@@ -1,0 +1,379 @@
+#property strict
+
+#include <Trade/Trade.mqh>
+
+namespace NM1
+{
+enum { kMaxLevels = 20 };
+const int kLotDigits = 2;
+const double kMinLot = 0.01;
+const double kMaxLot = 100.0;
+}
+
+input int MagicNumber = 202507;
+input int SlippagePoints = 4;
+input int StartDelaySeconds = 5;
+input int GridStepPoints = 250;
+input double BaseLot = 0.01;
+input double ProfitBase = 1.0;
+input double ProfitStep = 0.1;
+input int MaxLevels = 20;
+input int RestartDelaySeconds = 1;
+input bool UseAsyncClose = true;
+input int CloseRetryCount = 3;
+input int CloseRetryDelayMs = 200;
+input double StopBuyLimitPrice = 4000.0;
+input double StopBuyLimitLot = 0.01;
+
+struct BasketInfo
+{
+  int count;
+  double volume;
+  double avg_price;
+  double min_price;
+  double max_price;
+};
+
+CTrade trade;
+CTrade close_trade;
+datetime start_time = 0;
+bool initial_started = false;
+double lot_seq[NM1::kMaxLevels];
+datetime last_buy_close_time = 0;
+datetime last_sell_close_time = 0;
+int prev_buy_count = 0;
+int prev_sell_count = 0;
+
+bool IsTradingTime()
+{
+  return true;
+}
+
+double NormalizeLot(double lot)
+{
+  double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+  double minlot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+  double maxlot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+  if (step <= 0.0)
+    step = 0.01;
+  if (minlot <= 0.0)
+    minlot = NM1::kMinLot;
+  if (maxlot <= 0.0)
+    maxlot = NM1::kMaxLot;
+  lot = MathMax(minlot, MathMin(maxlot, lot));
+  double steps = MathFloor(lot / step + 0.0000001);
+  return NormalizeDouble(steps * step, NM1::kLotDigits);
+}
+
+int EffectiveMaxLevels()
+{
+  int levels = MaxLevels;
+  if (levels < 1)
+    levels = 1;
+  if (levels > NM1::kMaxLevels)
+    levels = NM1::kMaxLevels;
+  return levels;
+}
+
+void BuildLotSequence()
+{
+  int levels = EffectiveMaxLevels();
+  lot_seq[0] = BaseLot;
+  if (levels > 1)
+    lot_seq[1] = BaseLot;
+  for (int i = 2; i < levels; ++i)
+  {
+    lot_seq[i] = lot_seq[i - 1] + lot_seq[i - 2];
+  }
+  for (int i = 0; i < levels; ++i)
+  {
+    lot_seq[i] = NormalizeLot(lot_seq[i]);
+  }
+}
+
+int OnInit()
+{
+  start_time = TimeCurrent();
+  initial_started = false;
+  BuildLotSequence();
+
+  trade.SetExpertMagicNumber(MagicNumber);
+  trade.SetDeviationInPoints(SlippagePoints);
+  int filling = (int)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+  if (filling == ORDER_FILLING_FOK || filling == ORDER_FILLING_IOC || filling == ORDER_FILLING_RETURN)
+    trade.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
+  close_trade.SetExpertMagicNumber(MagicNumber);
+  close_trade.SetDeviationInPoints(SlippagePoints);
+  if (filling == ORDER_FILLING_FOK || filling == ORDER_FILLING_IOC || filling == ORDER_FILLING_RETURN)
+    close_trade.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
+  close_trade.SetAsyncMode(UseAsyncClose);
+  return INIT_SUCCEEDED;
+}
+
+void CollectBasketInfo(BasketInfo &buy, BasketInfo &sell)
+{
+  buy.count = 0;
+  buy.volume = 0.0;
+  buy.avg_price = 0.0;
+  buy.min_price = 0.0;
+  buy.max_price = 0.0;
+  sell.count = 0;
+  sell.volume = 0.0;
+  sell.avg_price = 0.0;
+  sell.min_price = 0.0;
+  sell.max_price = 0.0;
+
+  double buy_value = 0.0;
+  double sell_value = 0.0;
+
+  for (int i = PositionsTotal() - 1; i >= 0; --i)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if (!PositionSelectByTicket(ticket))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+      continue;
+
+    int type = (int)PositionGetInteger(POSITION_TYPE);
+    double volume = PositionGetDouble(POSITION_VOLUME);
+    double price = PositionGetDouble(POSITION_PRICE_OPEN);
+
+    if (type == POSITION_TYPE_BUY)
+    {
+      if (buy.count == 0)
+      {
+        buy.min_price = price;
+        buy.max_price = price;
+      }
+      else
+      {
+        buy.min_price = MathMin(buy.min_price, price);
+        buy.max_price = MathMax(buy.max_price, price);
+      }
+      buy.count++;
+      buy.volume += volume;
+      buy_value += volume * price;
+    }
+    else if (type == POSITION_TYPE_SELL)
+    {
+      if (sell.count == 0)
+      {
+        sell.min_price = price;
+        sell.max_price = price;
+      }
+      else
+      {
+        sell.min_price = MathMin(sell.min_price, price);
+        sell.max_price = MathMax(sell.max_price, price);
+      }
+      sell.count++;
+      sell.volume += volume;
+      sell_value += volume * price;
+    }
+  }
+
+  if (buy.volume > 0.0)
+    buy.avg_price = buy_value / buy.volume;
+  if (sell.volume > 0.0)
+    sell.avg_price = sell_value / sell.volume;
+}
+
+void CloseBasket(ENUM_POSITION_TYPE type)
+{
+  ulong tickets[];
+  int count = 0;
+  for (int i = PositionsTotal() - 1; i >= 0; --i)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if (!PositionSelectByTicket(ticket))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+      continue;
+    if ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != type)
+      continue;
+    ArrayResize(tickets, ++count);
+    tickets[count - 1] = ticket;
+  }
+
+  for (int i = 0; i < count; ++i)
+  {
+    bool closed = false;
+    int attempts = 0;
+    while (attempts <= CloseRetryCount)
+    {
+      if (close_trade.PositionClose(tickets[i]))
+      {
+        closed = true;
+        break;
+      }
+      attempts++;
+      if (attempts <= CloseRetryCount && CloseRetryDelayMs > 0)
+        Sleep(CloseRetryDelayMs);
+    }
+    if (!closed)
+    {
+      PrintFormat("Close failed after retries: ticket=%I64u retcode=%d %s",
+                  tickets[i], close_trade.ResultRetcode(), close_trade.ResultRetcodeDescription());
+    }
+  }
+}
+
+bool TryOpen(ENUM_ORDER_TYPE order_type, double lot)
+{
+  lot = NormalizeLot(lot);
+  if (lot <= 0.0)
+    return false;
+  bool ok = false;
+  if (order_type == ORDER_TYPE_BUY)
+    ok = trade.Buy(lot, _Symbol);
+  else if (order_type == ORDER_TYPE_SELL)
+    ok = trade.Sell(lot, _Symbol);
+
+  if (!ok)
+  {
+    PrintFormat("Order failed: type=%d lot=%.2f retcode=%d %s",
+                order_type, lot, trade.ResultRetcode(), trade.ResultRetcodeDescription());
+  }
+  return ok;
+}
+
+bool ShouldStopOnBuyLimit(double limit_price, double limit_lot)
+{
+  if (limit_price <= 0.0 || limit_lot <= 0.0)
+    return false;
+  double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+  if (point <= 0.0)
+    point = 0.00001;
+  double price_tol = point * 0.5;
+  double norm_lot = NormalizeLot(limit_lot);
+  for (int i = OrdersTotal() - 1; i >= 0; --i)
+  {
+    ulong ticket = OrderGetTicket(i);
+    if (!OrderSelect(ticket))
+      continue;
+    long magic = OrderGetInteger(ORDER_MAGIC);
+    if (magic != MagicNumber && magic != 0)
+      continue;
+    if (OrderGetString(ORDER_SYMBOL) != _Symbol)
+      continue;
+    if ((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE) != ORDER_TYPE_BUY_LIMIT)
+      continue;
+    double volume = OrderGetDouble(ORDER_VOLUME_CURRENT);
+    double price = OrderGetDouble(ORDER_PRICE_OPEN);
+    if (MathAbs(volume - norm_lot) <= 0.0000001 && MathAbs(price - limit_price) <= price_tol)
+      return true;
+  }
+  return false;
+}
+
+double ProfitOffsetByCount(int count)
+{
+  if (count <= 2)
+    return ProfitBase;
+  return ProfitBase + (count - 2) * ProfitStep;
+}
+
+double PipPointSize()
+{
+  int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+  double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+  if (digits == 3 || digits == 5)
+    return point * 10.0;
+  return point;
+}
+
+bool CanRestart(datetime last_close_time)
+{
+  if (last_close_time == 0)
+    return true;
+  return (TimeCurrent() - last_close_time) >= RestartDelaySeconds;
+}
+
+void OnTick()
+{
+  BasketInfo buy, sell;
+  CollectBasketInfo(buy, sell);
+  if (ShouldStopOnBuyLimit(StopBuyLimitPrice, StopBuyLimitLot))
+  {
+    PrintFormat("EA stopped: buy limit %.2f lots at price %.2f detected.", StopBuyLimitLot, StopBuyLimitPrice);
+    ExpertRemove();
+    return;
+  }
+
+  if (prev_buy_count > 0 && buy.count == 0)
+    last_buy_close_time = TimeCurrent();
+  if (prev_sell_count > 0 && sell.count == 0)
+    last_sell_close_time = TimeCurrent();
+
+  bool attempted_initial = false;
+  if (!initial_started && (TimeCurrent() - start_time) >= StartDelaySeconds)
+  {
+    if (buy.count == 0 && sell.count == 0 && IsTradingTime())
+    {
+      bool opened = false;
+      opened |= TryOpen(ORDER_TYPE_BUY, lot_seq[0]);
+      opened |= TryOpen(ORDER_TYPE_SELL, lot_seq[0]);
+      if (opened)
+        initial_started = true;
+      attempted_initial = true;
+    }
+  }
+
+  if (attempted_initial)
+  {
+    prev_buy_count = buy.count;
+    prev_sell_count = sell.count;
+    return;
+  }
+
+  double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+  double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+  double grid_step = GridStepPoints * PipPointSize();
+
+  if (buy.count > 0)
+  {
+    double target = buy.avg_price + ProfitOffsetByCount(buy.count);
+    if (bid >= target)
+      CloseBasket(POSITION_TYPE_BUY);
+  }
+
+  if (sell.count > 0)
+  {
+    double target = sell.avg_price - ProfitOffsetByCount(sell.count);
+    if (ask <= target)
+      CloseBasket(POSITION_TYPE_SELL);
+  }
+
+  if (IsTradingTime())
+  {
+    if (initial_started)
+    {
+      if (buy.count == 0 && CanRestart(last_buy_close_time))
+        TryOpen(ORDER_TYPE_BUY, lot_seq[0]);
+      if (sell.count == 0 && CanRestart(last_sell_close_time))
+        TryOpen(ORDER_TYPE_SELL, lot_seq[0]);
+    }
+
+    int levels = EffectiveMaxLevels();
+    if (buy.count > 0 && buy.count < levels)
+    {
+      // Buy orders fill at ask, so compare ask to the grid.
+      if (ask <= buy.min_price - grid_step)
+        TryOpen(ORDER_TYPE_BUY, lot_seq[buy.count]);
+    }
+
+    if (sell.count > 0 && sell.count < levels)
+    {
+      // Sell orders fill at bid, so compare bid to the grid.
+      if (bid >= sell.max_price + grid_step)
+        TryOpen(ORDER_TYPE_SELL, lot_seq[sell.count]);
+    }
+  }
+
+  prev_buy_count = buy.count;
+  prev_sell_count = sell.count;
+}
