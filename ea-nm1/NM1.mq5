@@ -5,6 +5,7 @@
 namespace NM1
 {
 enum { kMaxLevels = 20 };
+const int kAtrBasePeriod = 14;
 const int kLotDigits = 2;
 const double kMinLot = 0.01;
 const double kMaxLot = 100.0;
@@ -14,6 +15,10 @@ input int MagicNumber = 202507;
 input int SlippagePoints = 4;
 input int StartDelaySeconds = 5;
 input int GridStepPoints = 250;
+input bool GridStepAuto = true;
+input double AtrMultiplier = 1.2;
+input bool SafetyMode = true;
+input double SafeK = 2.0;
 input double BaseLot = 0.01;
 input double ProfitBase = 1.0;
 input double ProfitStep = 0.1;
@@ -43,6 +48,8 @@ datetime last_buy_close_time = 0;
 datetime last_sell_close_time = 0;
 int prev_buy_count = 0;
 int prev_sell_count = 0;
+int atr_handle = INVALID_HANDLE;
+bool safety_active = false;
 
 bool IsTradingTime()
 {
@@ -96,6 +103,8 @@ int OnInit()
   start_time = TimeCurrent();
   initial_started = false;
   BuildLotSequence();
+  if (GridStepAuto || SafetyMode)
+    atr_handle = iATR(_Symbol, _Period, NM1::kAtrBasePeriod);
 
   trade.SetExpertMagicNumber(MagicNumber);
   trade.SetDeviationInPoints(SlippagePoints);
@@ -108,6 +117,36 @@ int OnInit()
     close_trade.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
   close_trade.SetAsyncMode(UseAsyncClose);
   return INIT_SUCCEEDED;
+}
+
+void OnDeinit(const int reason)
+{
+  if (atr_handle != INVALID_HANDLE)
+    IndicatorRelease(atr_handle);
+  atr_handle = INVALID_HANDLE;
+}
+
+double GetAtrBase()
+{
+  if (atr_handle == INVALID_HANDLE)
+    return 0.0;
+  double buffer[];
+  if (CopyBuffer(atr_handle, 0, 5, 50, buffer) < 50)
+    return 0.0;
+  double sum = 0.0;
+  for (int i = 0; i < 50; ++i)
+    sum += buffer[i];
+  return sum / 50.0;
+}
+
+double GetCurrentAtr()
+{
+  if (atr_handle == INVALID_HANDLE)
+    return 0.0;
+  double buffer[];
+  if (CopyBuffer(atr_handle, 0, 0, 1, buffer) <= 0)
+    return 0.0;
+  return buffer[0];
 }
 
 void CollectBasketInfo(BasketInfo &buy, BasketInfo &sell)
@@ -333,6 +372,38 @@ void OnTick()
   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
   double grid_step = GridStepPoints * PipPointSize();
+  double atr_base = 0.0;
+  if (GridStepAuto)
+  {
+    atr_base = GetAtrBase();
+    if (atr_base > 0.0)
+      grid_step = atr_base * AtrMultiplier;
+  }
+  else if (SafetyMode)
+  {
+    atr_base = GetAtrBase();
+  }
+
+  bool allow_nanpin = true;
+  if (SafetyMode && atr_base > 0.0)
+  {
+    double atr_now = GetCurrentAtr();
+    if (atr_now >= atr_base * SafeK)
+      allow_nanpin = false;
+  }
+  if (SafetyMode)
+  {
+    bool prev = safety_active;
+    safety_active = !allow_nanpin;
+    if (safety_active != prev)
+    {
+      string ts = TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS);
+      if (safety_active)
+        PrintFormat("Safety mode ON: %s", ts);
+      else
+        PrintFormat("Safety mode OFF: %s", ts);
+    }
+  }
 
   if (buy.count > 0)
   {
@@ -362,14 +433,14 @@ void OnTick()
     if (buy.count > 0 && buy.count < levels)
     {
       // Buy orders fill at ask, so compare ask to the grid.
-      if (ask <= buy.min_price - grid_step)
+      if (allow_nanpin && ask <= buy.min_price - grid_step)
         TryOpen(ORDER_TYPE_BUY, lot_seq[buy.count]);
     }
 
     if (sell.count > 0 && sell.count < levels)
     {
       // Sell orders fill at bid, so compare bid to the grid.
-      if (bid >= sell.max_price + grid_step)
+      if (allow_nanpin && bid >= sell.max_price + grid_step)
         TryOpen(ORDER_TYPE_SELL, lot_seq[sell.count]);
     }
   }
