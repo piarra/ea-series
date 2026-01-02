@@ -1,4 +1,5 @@
 #property strict
+#property version   "0.1.0"
 
 #include <Trade/Trade.mqh>
 
