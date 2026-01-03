@@ -19,6 +19,7 @@ input int GridStepPoints = 250;
 input bool GridStepAuto = true;
 input double AtrMultiplier = 1.2;
 input bool SafetyMode = true;
+input bool SafeStopMode = false;
 input double SafeK = 2.0;
 input double BaseLot = 0.01;
 input double ProfitBase = 1.0;
@@ -386,16 +387,21 @@ void OnTick()
   }
 
   bool allow_nanpin = true;
+  bool safety_triggered = false;
   if (SafetyMode && atr_base > 0.0)
   {
     double atr_now = GetCurrentAtr();
     if (atr_now >= atr_base * SafeK)
-      allow_nanpin = false;
+    {
+      safety_triggered = true;
+      if (!SafeStopMode)
+        allow_nanpin = false;
+    }
   }
   if (SafetyMode)
   {
     bool prev = safety_active;
-    safety_active = !allow_nanpin;
+    safety_active = safety_triggered || !allow_nanpin;
     if (safety_active != prev)
     {
       string ts = TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS);
@@ -404,6 +410,15 @@ void OnTick()
       else
         PrintFormat("Safety mode OFF: %s", ts);
     }
+  }
+
+  if (SafeStopMode && safety_triggered)
+  {
+    if (buy.count > 0)
+      CloseBasket(POSITION_TYPE_BUY);
+    if (sell.count > 0)
+      CloseBasket(POSITION_TYPE_SELL);
+    return;
   }
 
   if (buy.count > 0)
