@@ -1,5 +1,5 @@
 #property strict
-#property version   "0.1.1"
+#property version   "0.12"
 
 #include <Trade/Trade.mqh>
 
@@ -21,6 +21,7 @@ input double AtrMultiplier = 1.2;
 input bool SafetyMode = true;
 input bool SafeStopMode = false;
 input double SafeK = 2.0;
+input double SafeSlopeK = 0.3;
 input double BaseLot = 0.01;
 input double ProfitBase = 1.0;
 input double ProfitStep = 0.1;
@@ -149,6 +150,18 @@ double GetCurrentAtr()
   if (CopyBuffer(atr_handle, 0, 0, 1, buffer) <= 0)
     return 0.0;
   return buffer[0];
+}
+
+double GetAtrSlope()
+{
+  if (atr_handle == INVALID_HANDLE)
+    return 0.0;
+
+  double buf[3];
+  if (CopyBuffer(atr_handle, 0, 0, 3, buf) < 3)
+    return 0.0;
+
+  return buf[0] - buf[2];
 }
 
 void CollectBasketInfo(BasketInfo &buy, BasketInfo &sell)
@@ -392,6 +405,13 @@ void OnTick()
   {
     double atr_now = GetCurrentAtr();
     if (atr_now >= atr_base * SafeK)
+    {
+      safety_triggered = true;
+      if (!SafeStopMode)
+        allow_nanpin = false;
+    }
+    double atr_slope = GetAtrSlope();
+    if (atr_slope > atr_base * SafeSlopeK)
     {
       safety_triggered = true;
       if (!SafeStopMode)
