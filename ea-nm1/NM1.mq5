@@ -1,5 +1,5 @@
 #property strict
-#property version   "0.12"
+#property version   "0.13"
 
 #include <Trade/Trade.mqh>
 
@@ -27,6 +27,7 @@ input double ProfitBase = 1.0;
 input double ProfitStep = 0.1;
 input int MaxLevels = 20;
 input int RestartDelaySeconds = 1;
+input int NanpinSleepSeconds = 10;
 input bool UseAsyncClose = true;
 input int CloseRetryCount = 3;
 input int CloseRetryDelayMs = 200;
@@ -49,6 +50,8 @@ bool initial_started = false;
 double lot_seq[NM1::kMaxLevels];
 datetime last_buy_close_time = 0;
 datetime last_sell_close_time = 0;
+datetime last_buy_nanpin_time = 0;
+datetime last_sell_nanpin_time = 0;
 int prev_buy_count = 0;
 int prev_sell_count = 0;
 int atr_handle = INVALID_HANDLE;
@@ -347,6 +350,13 @@ bool CanRestart(datetime last_close_time)
   return (TimeCurrent() - last_close_time) >= RestartDelaySeconds;
 }
 
+bool CanNanpin(datetime last_nanpin_time)
+{
+  if (last_nanpin_time == 0)
+    return true;
+  return (TimeCurrent() - last_nanpin_time) >= NanpinSleepSeconds;
+}
+
 void OnTick()
 {
   BasketInfo buy, sell;
@@ -359,9 +369,15 @@ void OnTick()
   }
 
   if (prev_buy_count > 0 && buy.count == 0)
+  {
     last_buy_close_time = TimeCurrent();
+    last_buy_nanpin_time = 0;
+  }
   if (prev_sell_count > 0 && sell.count == 0)
+  {
     last_sell_close_time = TimeCurrent();
+    last_sell_nanpin_time = 0;
+  }
 
   bool attempted_initial = false;
   if (!initial_started && (TimeCurrent() - start_time) >= StartDelaySeconds)
@@ -469,15 +485,21 @@ void OnTick()
     if (buy.count > 0 && buy.count < levels)
     {
       // Buy orders fill at ask, so compare ask to the grid.
-      if (allow_nanpin && ask <= buy.min_price - grid_step)
-        TryOpen(ORDER_TYPE_BUY, lot_seq[buy.count]);
+      if (allow_nanpin && CanNanpin(last_buy_nanpin_time) && ask <= buy.min_price - grid_step)
+      {
+        if (TryOpen(ORDER_TYPE_BUY, lot_seq[buy.count]))
+          last_buy_nanpin_time = TimeCurrent();
+      }
     }
 
     if (sell.count > 0 && sell.count < levels)
     {
       // Sell orders fill at bid, so compare bid to the grid.
-      if (allow_nanpin && bid >= sell.max_price + grid_step)
-        TryOpen(ORDER_TYPE_SELL, lot_seq[sell.count]);
+      if (allow_nanpin && CanNanpin(last_sell_nanpin_time) && bid >= sell.max_price + grid_step)
+      {
+        if (TryOpen(ORDER_TYPE_SELL, lot_seq[sell.count]))
+          last_sell_nanpin_time = TimeCurrent();
+      }
     }
   }
 
