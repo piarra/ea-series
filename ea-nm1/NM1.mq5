@@ -5,7 +5,7 @@
 
 namespace NM1
 {
-enum { kMaxLevels = 20 };
+enum { kMaxLevels = 14 };
 const int kAtrBasePeriod = 14;
 const int kLotDigits = 2;
 const double kMinLot = 0.01;
@@ -26,7 +26,7 @@ input double SafeK = 2.0;
 input double SafeSlopeK = 0.3;
 input double BaseLot = 0.01;
 input double ProfitBase = 1.0;
-input double ProfitStep = 0.1;
+input double ProfitStep = 0;
 input double CoreRatio = 0.7;
 input double FlexRatio = 0.3;
 input double FlexAtrProfitMultiplier = 0.5;
@@ -123,13 +123,13 @@ void NormalizeCoreFlexLot(double lot, double &core, double &flex)
   }
 }
 
-void ClearFlexRefs(FlexRef (&refs)[NM1::kMaxLevels])
+void ClearFlexRefs(FlexRef &refs[])
 {
   for (int i = 0; i < NM1::kMaxLevels; ++i)
     refs[i].active = false;
 }
 
-bool AddFlexRef(FlexRef (&refs)[NM1::kMaxLevels], double price, double lot)
+bool AddFlexRef(FlexRef &refs[], double price, double lot)
 {
   double tol = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 0.5;
   for (int i = 0; i < NM1::kMaxLevels; ++i)
@@ -485,7 +485,7 @@ void ProcessFlexPartial(double bid, double ask, double atr_now)
   }
 }
 
-void ProcessFlexRefill(ENUM_ORDER_TYPE order_type, FlexRef (&refs)[NM1::kMaxLevels], double trigger_price)
+void ProcessFlexRefill(ENUM_ORDER_TYPE order_type, FlexRef &refs[], double trigger_price)
 {
   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
   if (point <= 0.0)
