@@ -35,6 +35,10 @@ NM1.mq5 実装アルゴリズム
 - 段数上限は `MaxLevels`。
   - `SafetyMode = true` の場合、`ATR(14) >= ATR_base * SafeK` の間は
     ナンピン追加を停止する (初回エントリーや決済は継続)。
+- 3回目以降のナンピンはロットを分離する。
+  - `CoreRatio` と `FlexRatio` で分割 (デフォルト 70/30)。
+  - Core/Flex は別々のポジションとして発注。
+  - Flex は部分利確・補充の対象。
 
 決済 (バスケット)
 - buy: `bid >= buy.avg_price + ProfitOffsetByCount(count)` で全決済。
@@ -42,6 +46,11 @@ NM1.mq5 実装アルゴリズム
 - `ProfitOffsetByCount` は `count <= 2` なら `ProfitBase`、
   それ以降は `ProfitBase + (count - 2) * ProfitStep`。
 - クローズはリトライ付き (`CloseRetryCount`, `CloseRetryDelayMs`)。
+- Flex 部分利確:
+  - `ATR(14) * FlexAtrProfitMultiplier` (デフォルト 0.5) の利益で
+    Flex ポジションのみをクローズ。
+  - 部分利確した Flex は同一ロット・同一価格に戻ったら再補充。
+  - バスケットの段数カウントは Core のみを対象 (Flex は段数に含めない)。
 
 停止条件
 - `StopBuyLimitPrice` と `StopBuyLimitLot` に一致する buy limit が検出されたら、
