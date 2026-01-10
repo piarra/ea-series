@@ -1,5 +1,5 @@
 #property strict
-#property version   "0.15"
+#property version   "000.140"
 
 #include <Trade/Trade.mqh>
 
@@ -30,8 +30,6 @@ input double ProfitStep = 0;
 input double CoreRatio = 0.7;
 input double FlexRatio = 0.3;
 input double FlexAtrProfitMultiplier = 0.5;
-input double AtrNanpinMin = 1.8;
-input double AtrNewStopMin = 1.3;
 input int MaxLevels = 20;
 input int RestartDelaySeconds = 1;
 input int NanpinSleepSeconds = 10;
@@ -533,24 +531,10 @@ void OnTick()
     ClearFlexRefs(flex_sell_refs);
   }
 
-  double atr_now = GetCurrentAtr();
-  bool allow_new = true;
-  bool allow_nanpin = true;
-  if (atr_now > 0.0)
-  {
-    if (atr_now < AtrNanpinMin)
-      allow_nanpin = false;
-    if (atr_now < AtrNewStopMin)
-    {
-      allow_nanpin = false;
-      allow_new = false;
-    }
-  }
-
   bool attempted_initial = false;
   if (!initial_started && (TimeCurrent() - start_time) >= StartDelaySeconds)
   {
-    if (allow_new && buy.count == 0 && sell.count == 0 && IsTradingTime())
+    if (buy.count == 0 && sell.count == 0 && IsTradingTime())
     {
       bool opened = false;
       opened |= TryOpen(ORDER_TYPE_BUY, lot_seq[0]);
@@ -583,11 +567,12 @@ void OnTick()
     atr_base = GetAtrBase();
   }
 
+  bool allow_nanpin = true;
   bool safety_triggered = false;
+  double atr_now = 0.0;
   if (SafetyMode && atr_base > 0.0)
   {
-    if (atr_now <= 0.0)
-      atr_now = GetCurrentAtr();
+    atr_now = GetCurrentAtr();
     if (atr_now >= atr_base * SafeK)
     {
       safety_triggered = true;
@@ -647,14 +632,14 @@ void OnTick()
   {
     if (initial_started)
     {
-      if (allow_new && buy.count == 0 && CanRestart(last_buy_close_time))
+      if (buy.count == 0 && CanRestart(last_buy_close_time))
         TryOpen(ORDER_TYPE_BUY, lot_seq[0]);
-      if (allow_new && sell.count == 0 && CanRestart(last_sell_close_time))
+      if (sell.count == 0 && CanRestart(last_sell_close_time))
         TryOpen(ORDER_TYPE_SELL, lot_seq[0]);
     }
 
     int levels = EffectiveMaxLevels();
-    if (allow_new && buy.count > 0 && buy.level_count < levels)
+    if (buy.count > 0 && buy.level_count < levels)
     {
       // Buy orders fill at ask, so compare ask to the grid.
       if (allow_nanpin && CanNanpin(last_buy_nanpin_time) && ask <= buy.min_price - grid_step)
@@ -681,7 +666,7 @@ void OnTick()
       }
     }
 
-    if (allow_new && sell.count > 0 && sell.level_count < levels)
+    if (sell.count > 0 && sell.level_count < levels)
     {
       // Sell orders fill at bid, so compare bid to the grid.
       if (allow_nanpin && CanNanpin(last_sell_nanpin_time) && bid >= sell.max_price + grid_step)
@@ -708,7 +693,7 @@ void OnTick()
       }
     }
 
-    if (allow_new && allow_nanpin)
+    if (allow_nanpin)
     {
       if (buy.count > 0)
         ProcessFlexRefill(ORDER_TYPE_BUY, flex_buy_refs, ask);
