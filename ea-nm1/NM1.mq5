@@ -54,6 +54,7 @@ struct FlexRef
   bool active;
   double price;
   double lot;
+  int level;
 };
 
 CTrade trade;
@@ -126,17 +127,20 @@ void NormalizeCoreFlexLot(double lot, double &core, double &flex)
 void ClearFlexRefs(FlexRef &refs[])
 {
   for (int i = 0; i < NM1::kMaxLevels; ++i)
+  {
     refs[i].active = false;
+    refs[i].level = 0;
+  }
 }
 
-bool AddFlexRef(FlexRef &refs[], double price, double lot)
+bool AddFlexRef(FlexRef &refs[], double price, double lot, int level)
 {
   double tol = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 0.5;
   for (int i = 0; i < NM1::kMaxLevels; ++i)
   {
     if (!refs[i].active)
       continue;
-    if (MathAbs(refs[i].price - price) <= tol && MathAbs(refs[i].lot - lot) <= 0.0000001)
+    if (MathAbs(refs[i].price - price) <= tol && MathAbs(refs[i].lot - lot) <= 0.0000001 && refs[i].level == level)
       return false;
   }
   for (int i = 0; i < NM1::kMaxLevels; ++i)
@@ -146,6 +150,7 @@ bool AddFlexRef(FlexRef &refs[], double price, double lot)
       refs[i].active = true;
       refs[i].price = price;
       refs[i].lot = lot;
+      refs[i].level = level;
       return true;
     }
   }
@@ -176,6 +181,30 @@ void BuildLotSequence()
   {
     lot_seq[i] = NormalizeLot(lot_seq[i]);
   }
+}
+
+bool IsFlexComment(const string comment)
+{
+  return StringFind(comment, NM1::kFlexComment) == 0;
+}
+
+int ExtractLevelFromComment(const string comment)
+{
+  int pos = StringFind(comment, "_L");
+  if (pos < 0)
+    return 0;
+  string tail = StringSubstr(comment, pos + 2);
+  int level = (int)StringToInteger(tail);
+  if (level < 0)
+    return 0;
+  return level;
+}
+
+string MakeLevelComment(const string base, int level)
+{
+  if (level <= 0)
+    return base;
+  return StringFormat("%s_L%d", base, level);
 }
 
 int OnInit()
@@ -288,7 +317,7 @@ void CollectBasketInfo(BasketInfo &buy, BasketInfo &sell)
         buy.max_price = MathMax(buy.max_price, price);
       }
       buy.count++;
-      if (comment != NM1::kFlexComment)
+      if (!IsFlexComment(comment))
         buy.level_count++;
       buy.volume += volume;
       buy_value += volume * price;
@@ -306,7 +335,7 @@ void CollectBasketInfo(BasketInfo &buy, BasketInfo &sell)
         sell.max_price = MathMax(sell.max_price, price);
       }
       sell.count++;
-      if (comment != NM1::kFlexComment)
+      if (!IsFlexComment(comment))
         sell.level_count++;
       sell.volume += volume;
       sell_value += volume * price;
@@ -453,7 +482,8 @@ void ProcessFlexPartial(double bid, double ask, double atr_now)
       continue;
     if (PositionGetString(POSITION_SYMBOL) != _Symbol)
       continue;
-    if (PositionGetString(POSITION_COMMENT) != NM1::kFlexComment)
+    string comment = PositionGetString(POSITION_COMMENT);
+    if (!IsFlexComment(comment))
       continue;
 
     int type = (int)PositionGetInteger(POSITION_TYPE);
@@ -472,10 +502,11 @@ void ProcessFlexPartial(double bid, double ask, double atr_now)
 
     if (close_trade.PositionClose(ticket))
     {
+      int level = ExtractLevelFromComment(comment);
       if (type == POSITION_TYPE_BUY)
-        AddFlexRef(flex_buy_refs, price, volume);
+        AddFlexRef(flex_buy_refs, price, volume, level);
       else
-        AddFlexRef(flex_sell_refs, price, volume);
+        AddFlexRef(flex_sell_refs, price, volume, level);
     }
     else
     {
@@ -502,7 +533,8 @@ void ProcessFlexRefill(ENUM_ORDER_TYPE order_type, FlexRef &refs[], double trigg
       should_open = trigger_price >= refs[i].price - tol;
     if (!should_open)
       continue;
-    if (TryOpen(order_type, refs[i].lot, NM1::kFlexComment))
+    string comment = MakeLevelComment(NM1::kFlexComment, refs[i].level);
+    if (TryOpen(order_type, refs[i].lot, comment))
       refs[i].active = false;
   }
 }
@@ -537,8 +569,8 @@ void OnTick()
     if (buy.count == 0 && sell.count == 0 && IsTradingTime())
     {
       bool opened = false;
-      opened |= TryOpen(ORDER_TYPE_BUY, lot_seq[0]);
-      opened |= TryOpen(ORDER_TYPE_SELL, lot_seq[0]);
+      opened |= TryOpen(ORDER_TYPE_BUY, lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
+      opened |= TryOpen(ORDER_TYPE_SELL, lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
       if (opened)
         initial_started = true;
       attempted_initial = true;
@@ -633,9 +665,9 @@ void OnTick()
     if (initial_started)
     {
       if (buy.count == 0 && CanRestart(last_buy_close_time))
-        TryOpen(ORDER_TYPE_BUY, lot_seq[0]);
+        TryOpen(ORDER_TYPE_BUY, lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
       if (sell.count == 0 && CanRestart(last_sell_close_time))
-        TryOpen(ORDER_TYPE_SELL, lot_seq[0]);
+        TryOpen(ORDER_TYPE_SELL, lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
     }
 
     int levels = EffectiveMaxLevels();
@@ -651,16 +683,18 @@ void OnTick()
           double flex_lot = 0.0;
           NormalizeCoreFlexLot(lot, core_lot, flex_lot);
           bool opened = false;
+          int level = buy.level_count + 1;
           if (core_lot > 0.0)
-            opened |= TryOpen(ORDER_TYPE_BUY, core_lot, NM1::kCoreComment);
+            opened |= TryOpen(ORDER_TYPE_BUY, core_lot, MakeLevelComment(NM1::kCoreComment, level));
           if (flex_lot > 0.0)
-            opened |= TryOpen(ORDER_TYPE_BUY, flex_lot, NM1::kFlexComment);
+            opened |= TryOpen(ORDER_TYPE_BUY, flex_lot, MakeLevelComment(NM1::kFlexComment, level));
           if (opened)
             last_buy_nanpin_time = TimeCurrent();
         }
         else
         {
-          if (TryOpen(ORDER_TYPE_BUY, lot))
+          int level = buy.level_count + 1;
+          if (TryOpen(ORDER_TYPE_BUY, lot, MakeLevelComment(NM1::kCoreComment, level)))
             last_buy_nanpin_time = TimeCurrent();
         }
       }
@@ -678,16 +712,18 @@ void OnTick()
           double flex_lot = 0.0;
           NormalizeCoreFlexLot(lot, core_lot, flex_lot);
           bool opened = false;
+          int level = sell.level_count + 1;
           if (core_lot > 0.0)
-            opened |= TryOpen(ORDER_TYPE_SELL, core_lot, NM1::kCoreComment);
+            opened |= TryOpen(ORDER_TYPE_SELL, core_lot, MakeLevelComment(NM1::kCoreComment, level));
           if (flex_lot > 0.0)
-            opened |= TryOpen(ORDER_TYPE_SELL, flex_lot, NM1::kFlexComment);
+            opened |= TryOpen(ORDER_TYPE_SELL, flex_lot, MakeLevelComment(NM1::kFlexComment, level));
           if (opened)
             last_sell_nanpin_time = TimeCurrent();
         }
         else
         {
-          if (TryOpen(ORDER_TYPE_SELL, lot))
+          int level = sell.level_count + 1;
+          if (TryOpen(ORDER_TYPE_SELL, lot, MakeLevelComment(NM1::kCoreComment, level)))
             last_sell_nanpin_time = TimeCurrent();
         }
       }
