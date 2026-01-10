@@ -1,5 +1,5 @@
 #property strict
-#property version   "100.160"
+#property version   "100.170"
 
 #include <Trade/Trade.mqh>
 
@@ -18,9 +18,7 @@ const string kCoreComment = "NM1_CORE";
 input group "XAUUSD"
 input bool EnableXAUUSD = true;
 input string SymbolXAUUSD = "XAUUSD";
-input int MagicNumberXAUUSD = 202507;
 input int SlippagePointsXAUUSD = 4;
-input int StartDelaySecondsXAUUSD = 5;
 input int GridStepPointsXAUUSD = 250;
 input bool GridStepAutoXAUUSD = true;
 input double AtrMultiplierXAUUSD = 1.2;
@@ -37,18 +35,20 @@ input double FlexAtrProfitMultiplierXAUUSD = 0.5;
 input int MaxLevelsXAUUSD = 20;
 input int RestartDelaySecondsXAUUSD = 1;
 input int NanpinSleepSecondsXAUUSD = 10;
-input bool UseAsyncCloseXAUUSD = true;
-input int CloseRetryCountXAUUSD = 3;
-input int CloseRetryDelayMsXAUUSD = 200;
 input double StopBuyLimitPriceXAUUSD = 4000.0;
 input double StopBuyLimitLotXAUUSD = 0.01;
+
+input group "COMMON"
+input int MagicNumber = 202507;
+input int StartDelaySeconds = 5;
+input bool UseAsyncClose = true;
+input int CloseRetryCount = 3;
+input int CloseRetryDelayMs = 200;
 
 input group "EURUSD"
 input bool EnableEURUSD = true;
 input string SymbolEURUSD = "EURUSD";
-input int MagicNumberEURUSD = 202507;
 input int SlippagePointsEURUSD = 4;
-input int StartDelaySecondsEURUSD = 5;
 input int GridStepPointsEURUSD = 250;
 input bool GridStepAutoEURUSD = true;
 input double AtrMultiplierEURUSD = 1.2;
@@ -65,18 +65,13 @@ input double FlexAtrProfitMultiplierEURUSD = 0.5;
 input int MaxLevelsEURUSD = 20;
 input int RestartDelaySecondsEURUSD = 1;
 input int NanpinSleepSecondsEURUSD = 10;
-input bool UseAsyncCloseEURUSD = true;
-input int CloseRetryCountEURUSD = 3;
-input int CloseRetryDelayMsEURUSD = 200;
 input double StopBuyLimitPriceEURUSD = 4000.0;
 input double StopBuyLimitLotEURUSD = 0.01;
 
 input group "USDJPY"
 input bool EnableUSDJPY = true;
 input string SymbolUSDJPY = "USDJPY";
-input int MagicNumberUSDJPY = 202507;
 input int SlippagePointsUSDJPY = 4;
-input int StartDelaySecondsUSDJPY = 5;
 input int GridStepPointsUSDJPY = 250;
 input bool GridStepAutoUSDJPY = true;
 input double AtrMultiplierUSDJPY = 1.2;
@@ -93,18 +88,13 @@ input double FlexAtrProfitMultiplierUSDJPY = 0.5;
 input int MaxLevelsUSDJPY = 20;
 input int RestartDelaySecondsUSDJPY = 1;
 input int NanpinSleepSecondsUSDJPY = 10;
-input bool UseAsyncCloseUSDJPY = true;
-input int CloseRetryCountUSDJPY = 3;
-input int CloseRetryDelayMsUSDJPY = 200;
 input double StopBuyLimitPriceUSDJPY = 4000.0;
 input double StopBuyLimitLotUSDJPY = 0.01;
 
 input group "AUDUSD"
 input bool EnableAUDUSD = true;
 input string SymbolAUDUSD = "AUDUSD";
-input int MagicNumberAUDUSD = 202507;
 input int SlippagePointsAUDUSD = 4;
-input int StartDelaySecondsAUDUSD = 5;
 input int GridStepPointsAUDUSD = 250;
 input bool GridStepAutoAUDUSD = true;
 input double AtrMultiplierAUDUSD = 1.2;
@@ -121,18 +111,13 @@ input double FlexAtrProfitMultiplierAUDUSD = 0.5;
 input int MaxLevelsAUDUSD = 20;
 input int RestartDelaySecondsAUDUSD = 1;
 input int NanpinSleepSecondsAUDUSD = 10;
-input bool UseAsyncCloseAUDUSD = true;
-input int CloseRetryCountAUDUSD = 3;
-input int CloseRetryDelayMsAUDUSD = 200;
 input double StopBuyLimitPriceAUDUSD = 4000.0;
 input double StopBuyLimitLotAUDUSD = 0.01;
 
 input group "BTCUSD"
 input bool EnableBTCUSD = true;
 input string SymbolBTCUSD = "BTCUSD";
-input int MagicNumberBTCUSD = 202507;
 input int SlippagePointsBTCUSD = 4;
-input int StartDelaySecondsBTCUSD = 5;
 input int GridStepPointsBTCUSD = 250;
 input bool GridStepAutoBTCUSD = true;
 input double AtrMultiplierBTCUSD = 1.2;
@@ -149,18 +134,13 @@ input double FlexAtrProfitMultiplierBTCUSD = 0.5;
 input int MaxLevelsBTCUSD = 20;
 input int RestartDelaySecondsBTCUSD = 1;
 input int NanpinSleepSecondsBTCUSD = 10;
-input bool UseAsyncCloseBTCUSD = true;
-input int CloseRetryCountBTCUSD = 3;
-input int CloseRetryDelayMsBTCUSD = 200;
 input double StopBuyLimitPriceBTCUSD = 4000.0;
 input double StopBuyLimitLotBTCUSD = 0.01;
 
 input group "ETHUSD"
 input bool EnableETHUSD = true;
 input string SymbolETHUSD = "ETHUSD";
-input int MagicNumberETHUSD = 202507;
 input int SlippagePointsETHUSD = 4;
-input int StartDelaySecondsETHUSD = 5;
 input int GridStepPointsETHUSD = 250;
 input bool GridStepAutoETHUSD = true;
 input double AtrMultiplierETHUSD = 1.2;
@@ -177,9 +157,6 @@ input double FlexAtrProfitMultiplierETHUSD = 0.5;
 input int MaxLevelsETHUSD = 20;
 input int RestartDelaySecondsETHUSD = 1;
 input int NanpinSleepSecondsETHUSD = 10;
-input bool UseAsyncCloseETHUSD = true;
-input int CloseRetryCountETHUSD = 3;
-input int CloseRetryDelayMsETHUSD = 200;
 input double StopBuyLimitPriceETHUSD = 4000.0;
 input double StopBuyLimitLotETHUSD = 0.01;
 
@@ -292,9 +269,9 @@ void LoadParamsForIndex(int index, NM1Params &params)
 {
   if (index == 0)
   {
-    params.magic_number = MagicNumberXAUUSD;
+    params.magic_number = MagicNumber;
     params.slippage_points = SlippagePointsXAUUSD;
-    params.start_delay_seconds = StartDelaySecondsXAUUSD;
+    params.start_delay_seconds = StartDelaySeconds;
     params.grid_step_points = GridStepPointsXAUUSD;
     params.grid_step_auto = GridStepAutoXAUUSD;
     params.atr_multiplier = AtrMultiplierXAUUSD;
@@ -311,17 +288,17 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.max_levels = MaxLevelsXAUUSD;
     params.restart_delay_seconds = RestartDelaySecondsXAUUSD;
     params.nanpin_sleep_seconds = NanpinSleepSecondsXAUUSD;
-    params.use_async_close = UseAsyncCloseXAUUSD;
-    params.close_retry_count = CloseRetryCountXAUUSD;
-    params.close_retry_delay_ms = CloseRetryDelayMsXAUUSD;
+    params.use_async_close = UseAsyncClose;
+    params.close_retry_count = CloseRetryCount;
+    params.close_retry_delay_ms = CloseRetryDelayMs;
     params.stop_buy_limit_price = StopBuyLimitPriceXAUUSD;
     params.stop_buy_limit_lot = StopBuyLimitLotXAUUSD;
   }
   else if (index == 1)
   {
-    params.magic_number = MagicNumberEURUSD;
+    params.magic_number = MagicNumber;
     params.slippage_points = SlippagePointsEURUSD;
-    params.start_delay_seconds = StartDelaySecondsEURUSD;
+    params.start_delay_seconds = StartDelaySeconds;
     params.grid_step_points = GridStepPointsEURUSD;
     params.grid_step_auto = GridStepAutoEURUSD;
     params.atr_multiplier = AtrMultiplierEURUSD;
@@ -338,17 +315,17 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.max_levels = MaxLevelsEURUSD;
     params.restart_delay_seconds = RestartDelaySecondsEURUSD;
     params.nanpin_sleep_seconds = NanpinSleepSecondsEURUSD;
-    params.use_async_close = UseAsyncCloseEURUSD;
-    params.close_retry_count = CloseRetryCountEURUSD;
-    params.close_retry_delay_ms = CloseRetryDelayMsEURUSD;
+    params.use_async_close = UseAsyncClose;
+    params.close_retry_count = CloseRetryCount;
+    params.close_retry_delay_ms = CloseRetryDelayMs;
     params.stop_buy_limit_price = StopBuyLimitPriceEURUSD;
     params.stop_buy_limit_lot = StopBuyLimitLotEURUSD;
   }
   else if (index == 2)
   {
-    params.magic_number = MagicNumberUSDJPY;
+    params.magic_number = MagicNumber;
     params.slippage_points = SlippagePointsUSDJPY;
-    params.start_delay_seconds = StartDelaySecondsUSDJPY;
+    params.start_delay_seconds = StartDelaySeconds;
     params.grid_step_points = GridStepPointsUSDJPY;
     params.grid_step_auto = GridStepAutoUSDJPY;
     params.atr_multiplier = AtrMultiplierUSDJPY;
@@ -365,17 +342,17 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.max_levels = MaxLevelsUSDJPY;
     params.restart_delay_seconds = RestartDelaySecondsUSDJPY;
     params.nanpin_sleep_seconds = NanpinSleepSecondsUSDJPY;
-    params.use_async_close = UseAsyncCloseUSDJPY;
-    params.close_retry_count = CloseRetryCountUSDJPY;
-    params.close_retry_delay_ms = CloseRetryDelayMsUSDJPY;
+    params.use_async_close = UseAsyncClose;
+    params.close_retry_count = CloseRetryCount;
+    params.close_retry_delay_ms = CloseRetryDelayMs;
     params.stop_buy_limit_price = StopBuyLimitPriceUSDJPY;
     params.stop_buy_limit_lot = StopBuyLimitLotUSDJPY;
   }
   else if (index == 3)
   {
-    params.magic_number = MagicNumberAUDUSD;
+    params.magic_number = MagicNumber;
     params.slippage_points = SlippagePointsAUDUSD;
-    params.start_delay_seconds = StartDelaySecondsAUDUSD;
+    params.start_delay_seconds = StartDelaySeconds;
     params.grid_step_points = GridStepPointsAUDUSD;
     params.grid_step_auto = GridStepAutoAUDUSD;
     params.atr_multiplier = AtrMultiplierAUDUSD;
@@ -392,17 +369,17 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.max_levels = MaxLevelsAUDUSD;
     params.restart_delay_seconds = RestartDelaySecondsAUDUSD;
     params.nanpin_sleep_seconds = NanpinSleepSecondsAUDUSD;
-    params.use_async_close = UseAsyncCloseAUDUSD;
-    params.close_retry_count = CloseRetryCountAUDUSD;
-    params.close_retry_delay_ms = CloseRetryDelayMsAUDUSD;
+    params.use_async_close = UseAsyncClose;
+    params.close_retry_count = CloseRetryCount;
+    params.close_retry_delay_ms = CloseRetryDelayMs;
     params.stop_buy_limit_price = StopBuyLimitPriceAUDUSD;
     params.stop_buy_limit_lot = StopBuyLimitLotAUDUSD;
   }
   else if (index == 4)
   {
-    params.magic_number = MagicNumberBTCUSD;
+    params.magic_number = MagicNumber;
     params.slippage_points = SlippagePointsBTCUSD;
-    params.start_delay_seconds = StartDelaySecondsBTCUSD;
+    params.start_delay_seconds = StartDelaySeconds;
     params.grid_step_points = GridStepPointsBTCUSD;
     params.grid_step_auto = GridStepAutoBTCUSD;
     params.atr_multiplier = AtrMultiplierBTCUSD;
@@ -419,17 +396,17 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.max_levels = MaxLevelsBTCUSD;
     params.restart_delay_seconds = RestartDelaySecondsBTCUSD;
     params.nanpin_sleep_seconds = NanpinSleepSecondsBTCUSD;
-    params.use_async_close = UseAsyncCloseBTCUSD;
-    params.close_retry_count = CloseRetryCountBTCUSD;
-    params.close_retry_delay_ms = CloseRetryDelayMsBTCUSD;
+    params.use_async_close = UseAsyncClose;
+    params.close_retry_count = CloseRetryCount;
+    params.close_retry_delay_ms = CloseRetryDelayMs;
     params.stop_buy_limit_price = StopBuyLimitPriceBTCUSD;
     params.stop_buy_limit_lot = StopBuyLimitLotBTCUSD;
   }
   else if (index == 5)
   {
-    params.magic_number = MagicNumberETHUSD;
+    params.magic_number = MagicNumber;
     params.slippage_points = SlippagePointsETHUSD;
-    params.start_delay_seconds = StartDelaySecondsETHUSD;
+    params.start_delay_seconds = StartDelaySeconds;
     params.grid_step_points = GridStepPointsETHUSD;
     params.grid_step_auto = GridStepAutoETHUSD;
     params.atr_multiplier = AtrMultiplierETHUSD;
@@ -446,9 +423,9 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.max_levels = MaxLevelsETHUSD;
     params.restart_delay_seconds = RestartDelaySecondsETHUSD;
     params.nanpin_sleep_seconds = NanpinSleepSecondsETHUSD;
-    params.use_async_close = UseAsyncCloseETHUSD;
-    params.close_retry_count = CloseRetryCountETHUSD;
-    params.close_retry_delay_ms = CloseRetryDelayMsETHUSD;
+    params.use_async_close = UseAsyncClose;
+    params.close_retry_count = CloseRetryCount;
+    params.close_retry_delay_ms = CloseRetryDelayMs;
     params.stop_buy_limit_price = StopBuyLimitPriceETHUSD;
     params.stop_buy_limit_lot = StopBuyLimitLotETHUSD;
   }
