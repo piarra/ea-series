@@ -24,7 +24,7 @@ input bool GridStepAutoXAUUSD = true;
 input double AtrMultiplierXAUUSD = 1.2;
 input double MinAtrXAUUSD = 1.5;
 input bool SafetyModeXAUUSD = true;
-input bool SafeStopModeXAUUSD = true;
+input bool SafeStopModeXAUUSD = false;
 input double SafeKXAUUSD = 2.0;
 input double SafeSlopeKXAUUSD = 0.3;
 input double BaseLotXAUUSD = 0.01;
@@ -55,7 +55,7 @@ input bool GridStepAutoEURUSD = true;
 input double AtrMultiplierEURUSD = 1.2;
 input double MinAtrEURUSD = 0.00025;
 input bool SafetyModeEURUSD = true;
-input bool SafeStopModeEURUSD = true;
+input bool SafeStopModeEURUSD = false;
 input double SafeKEURUSD = 2.0;
 input double SafeSlopeKEURUSD = 0.3;
 input double BaseLotEURUSD = 0.01;
@@ -79,7 +79,7 @@ input bool GridStepAutoUSDJPY = true;
 input double AtrMultiplierUSDJPY = 1.2;
 input double MinAtrUSDJPY = 0.04;
 input bool SafetyModeUSDJPY = true;
-input bool SafeStopModeUSDJPY = true;
+input bool SafeStopModeUSDJPY = false;
 input double SafeKUSDJPY = 2.0;
 input double SafeSlopeKUSDJPY = 0.3;
 input double BaseLotUSDJPY = 0.3;
@@ -103,7 +103,7 @@ input bool GridStepAutoAUDUSD = true;
 input double AtrMultiplierAUDUSD = 1.2;
 input double MinAtrAUDUSD = 0.00015;
 input bool SafetyModeAUDUSD = true;
-input bool SafeStopModeAUDUSD = true;
+input bool SafeStopModeAUDUSD = false;
 input double SafeKAUDUSD = 2.0;
 input double SafeSlopeKAUDUSD = 0.3;
 input double BaseLotAUDUSD = 0.01;
@@ -127,7 +127,7 @@ input bool GridStepAutoBTCUSD = true;
 input double AtrMultiplierBTCUSD = 1.2;
 input double MinAtrBTCUSD = 10.0;
 input bool SafetyModeBTCUSD = true;
-input bool SafeStopModeBTCUSD = true;
+input bool SafeStopModeBTCUSD = false;
 input double SafeKBTCUSD = 2.0;
 input double SafeSlopeKBTCUSD = 0.3;
 input double BaseLotBTCUSD = 0.3;
@@ -151,7 +151,7 @@ input bool GridStepAutoETHUSD = true;
 input double AtrMultiplierETHUSD = 1.2;
 input double MinAtrETHUSD = 1.2;
 input bool SafetyModeETHUSD = true;
-input bool SafeStopModeETHUSD = true;
+input bool SafeStopModeETHUSD = false;
 input double SafeKETHUSD = 2.0;
 input double SafeSlopeKETHUSD = 0.3;
 input double BaseLotETHUSD = 0.1;
@@ -203,6 +203,7 @@ struct BasketInfo
   double avg_price;
   double min_price;
   double max_price;
+  double profit;
 };
 
 struct FlexRef
@@ -235,6 +236,10 @@ struct SymbolState
   int prev_sell_count;
   int atr_handle;
   bool safety_active;
+  double realized_buy_profit;
+  double realized_sell_profit;
+  bool has_partial_buy;
+  bool has_partial_sell;
 };
 
 SymbolState symbols[NM1::kMaxSymbols];
@@ -268,6 +273,10 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.prev_sell_count = 0;
   state.atr_handle = INVALID_HANDLE;
   state.safety_active = false;
+  state.realized_buy_profit = 0.0;
+  state.realized_sell_profit = 0.0;
+  state.has_partial_buy = false;
+  state.has_partial_sell = false;
   ClearFlexRefs(state.flex_buy_refs);
   ClearFlexRefs(state.flex_sell_refs);
 }
@@ -702,12 +711,14 @@ void CollectBasketInfo(const SymbolState &state, BasketInfo &buy, BasketInfo &se
   buy.avg_price = 0.0;
   buy.min_price = 0.0;
   buy.max_price = 0.0;
+  buy.profit = 0.0;
   sell.count = 0;
   sell.level_count = 0;
   sell.volume = 0.0;
   sell.avg_price = 0.0;
   sell.min_price = 0.0;
   sell.max_price = 0.0;
+  sell.profit = 0.0;
 
   double buy_value = 0.0;
   double sell_value = 0.0;
@@ -744,6 +755,7 @@ void CollectBasketInfo(const SymbolState &state, BasketInfo &buy, BasketInfo &se
         buy.level_count++;
       buy.volume += volume;
       buy_value += volume * price;
+      buy.profit += PositionGetDouble(POSITION_PROFIT);
     }
     else if (type == POSITION_TYPE_SELL)
     {
@@ -762,6 +774,7 @@ void CollectBasketInfo(const SymbolState &state, BasketInfo &buy, BasketInfo &se
         sell.level_count++;
       sell.volume += volume;
       sell_value += volume * price;
+      sell.profit += PositionGetDouble(POSITION_PROFIT);
     }
   }
 
@@ -889,6 +902,32 @@ double PipPointSize(const string symbol)
   return point;
 }
 
+double DealNetProfit(ulong deal_ticket)
+{
+  if (deal_ticket == 0)
+    return 0.0;
+  if (!HistoryDealSelect(deal_ticket))
+  {
+    datetime now = TimeCurrent();
+    if (!HistorySelect(now - 86400, now + 60))
+      return 0.0;
+    if (!HistoryDealSelect(deal_ticket))
+      return 0.0;
+  }
+  return HistoryDealGetDouble(deal_ticket, DEAL_PROFIT)
+         + HistoryDealGetDouble(deal_ticket, DEAL_SWAP)
+         + HistoryDealGetDouble(deal_ticket, DEAL_COMMISSION);
+}
+
+double PriceValuePerUnit(const string symbol)
+{
+  double tick_value = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
+  double tick_size = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+  if (tick_value <= 0.0 || tick_size <= 0.0)
+    return 0.0;
+  return tick_value / tick_size;
+}
+
 bool CanRestart(const NM1Params &params, datetime last_close_time)
 {
   if (last_close_time == 0)
@@ -944,11 +983,20 @@ void ProcessFlexPartial(SymbolState &state, const string symbol, double bid, dou
 
     if (close_trade.PositionClose(ticket))
     {
+      double realized = DealNetProfit(close_trade.ResultDeal());
       int level = ExtractLevelFromComment(comment);
       if (type == POSITION_TYPE_BUY)
+      {
+        state.realized_buy_profit += realized;
+        state.has_partial_buy = true;
         AddFlexRef(symbol, state.flex_buy_refs, price, volume, level);
+      }
       else
+      {
+        state.realized_sell_profit += realized;
+        state.has_partial_sell = true;
         AddFlexRef(symbol, state.flex_sell_refs, price, volume, level);
+      }
     }
     else
     {
@@ -1001,12 +1049,16 @@ void ProcessSymbolTick(SymbolState &state)
   {
     state.last_buy_close_time = TimeCurrent();
     state.last_buy_nanpin_time = 0;
+    state.realized_buy_profit = 0.0;
+    state.has_partial_buy = false;
     ClearFlexRefs(state.flex_buy_refs);
   }
   if (state.prev_sell_count > 0 && sell.count == 0)
   {
     state.last_sell_close_time = TimeCurrent();
     state.last_sell_nanpin_time = 0;
+    state.realized_sell_profit = 0.0;
+    state.has_partial_sell = false;
     ClearFlexRefs(state.flex_sell_refs);
   }
 
@@ -1098,16 +1150,54 @@ void ProcessSymbolTick(SymbolState &state)
 
   if (buy.count > 0)
   {
-    double target = buy.avg_price + ProfitOffsetByCount(params, buy.level_count);
-    if (bid >= target)
-      CloseBasket(state, POSITION_TYPE_BUY);
+    if (state.has_partial_buy)
+    {
+      double value_per_unit = PriceValuePerUnit(symbol);
+      double target_profit = buy.volume * params.profit_base * 0.5 * value_per_unit;
+      if (value_per_unit > 0.0)
+      {
+        if ((buy.profit + state.realized_buy_profit) >= target_profit)
+          CloseBasket(state, POSITION_TYPE_BUY);
+      }
+      else
+      {
+        double target = buy.avg_price + ProfitOffsetByCount(params, buy.level_count);
+        if (bid >= target)
+          CloseBasket(state, POSITION_TYPE_BUY);
+      }
+    }
+    else
+    {
+      double target = buy.avg_price + ProfitOffsetByCount(params, buy.level_count);
+      if (bid >= target)
+        CloseBasket(state, POSITION_TYPE_BUY);
+    }
   }
 
   if (sell.count > 0)
   {
-    double target = sell.avg_price - ProfitOffsetByCount(params, sell.level_count);
-    if (ask <= target)
-      CloseBasket(state, POSITION_TYPE_SELL);
+    if (state.has_partial_sell)
+    {
+      double value_per_unit = PriceValuePerUnit(symbol);
+      double target_profit = sell.volume * params.profit_base * 0.5 * value_per_unit;
+      if (value_per_unit > 0.0)
+      {
+        if ((sell.profit + state.realized_sell_profit) >= target_profit)
+          CloseBasket(state, POSITION_TYPE_SELL);
+      }
+      else
+      {
+        double target = sell.avg_price - ProfitOffsetByCount(params, sell.level_count);
+        if (ask <= target)
+          CloseBasket(state, POSITION_TYPE_SELL);
+      }
+    }
+    else
+    {
+      double target = sell.avg_price - ProfitOffsetByCount(params, sell.level_count);
+      if (ask <= target)
+        CloseBasket(state, POSITION_TYPE_SELL);
+    }
   }
 
   if (IsTradingTime())
