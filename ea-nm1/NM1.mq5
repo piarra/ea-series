@@ -15,6 +15,13 @@ const string kFlexComment = "NM1_FLEX";
 const string kCoreComment = "NM1_CORE";
 }
 
+input group "COMMON"
+input int MagicNumber = 202507;
+input int StartDelaySeconds = 5;
+input bool UseAsyncClose = true;
+input int CloseRetryCount = 3;
+input int CloseRetryDelayMs = 200;
+
 input group "XAUUSD"
 input bool EnableXAUUSD = true;
 input string SymbolXAUUSD = "XAUUSD";
@@ -32,19 +39,12 @@ input double ProfitBaseXAUUSD = 1.0;
 input double ProfitStepXAUUSD = 0;
 input double CoreRatioXAUUSD = 0.7;
 input double FlexRatioXAUUSD = 0.3;
-input double FlexAtrProfitMultiplierXAUUSD = 0.5;
+input double FlexAtrProfitMultiplierXAUUSD = 0.7;
 input int MaxLevelsXAUUSD = 20;
 input int RestartDelaySecondsXAUUSD = 1;
 input int NanpinSleepSecondsXAUUSD = 10;
 input double StopBuyLimitPriceXAUUSD = 4000.0;
 input double StopBuyLimitLotXAUUSD = 0.01;
-
-input group "COMMON"
-input int MagicNumber = 202507;
-input int StartDelaySeconds = 5;
-input bool UseAsyncClose = true;
-input int CloseRetryCount = 3;
-input int CloseRetryDelayMs = 200;
 
 input group "EURUSD"
 input bool EnableEURUSD = true;
@@ -63,7 +63,7 @@ input double ProfitBaseEURUSD = 1.0;
 input double ProfitStepEURUSD = 0;
 input double CoreRatioEURUSD = 0.7;
 input double FlexRatioEURUSD = 0.3;
-input double FlexAtrProfitMultiplierEURUSD = 0.5;
+input double FlexAtrProfitMultiplierEURUSD = 0.7;
 input int MaxLevelsEURUSD = 20;
 input int RestartDelaySecondsEURUSD = 1;
 input int NanpinSleepSecondsEURUSD = 10;
@@ -87,7 +87,7 @@ input double ProfitBaseUSDJPY = 0.01;
 input double ProfitStepUSDJPY = 0;
 input double CoreRatioUSDJPY = 0.7;
 input double FlexRatioUSDJPY = 0.3;
-input double FlexAtrProfitMultiplierUSDJPY = 0.5;
+input double FlexAtrProfitMultiplierUSDJPY = 0.7;
 input int MaxLevelsUSDJPY = 20;
 input int RestartDelaySecondsUSDJPY = 1;
 input int NanpinSleepSecondsUSDJPY = 10;
@@ -111,7 +111,7 @@ input double ProfitBaseAUDUSD = 1.0;
 input double ProfitStepAUDUSD = 0;
 input double CoreRatioAUDUSD = 0.7;
 input double FlexRatioAUDUSD = 0.3;
-input double FlexAtrProfitMultiplierAUDUSD = 0.5;
+input double FlexAtrProfitMultiplierAUDUSD = 0.7;
 input int MaxLevelsAUDUSD = 20;
 input int RestartDelaySecondsAUDUSD = 1;
 input int NanpinSleepSecondsAUDUSD = 10;
@@ -135,7 +135,7 @@ input double ProfitBaseBTCUSD = 4.0;
 input double ProfitStepBTCUSD = 0;
 input double CoreRatioBTCUSD = 0.7;
 input double FlexRatioBTCUSD = 0.3;
-input double FlexAtrProfitMultiplierBTCUSD = 0.5;
+input double FlexAtrProfitMultiplierBTCUSD = 0.7;
 input int MaxLevelsBTCUSD = 20;
 input int RestartDelaySecondsBTCUSD = 1;
 input int NanpinSleepSecondsBTCUSD = 10;
@@ -159,7 +159,7 @@ input double ProfitBaseETHUSD = 1.0;
 input double ProfitStepETHUSD = 0;
 input double CoreRatioETHUSD = 0.7;
 input double FlexRatioETHUSD = 0.3;
-input double FlexAtrProfitMultiplierETHUSD = 0.5;
+input double FlexAtrProfitMultiplierETHUSD = 0.7;
 input int MaxLevelsETHUSD = 20;
 input int RestartDelaySecondsETHUSD = 1;
 input int NanpinSleepSecondsETHUSD = 10;
