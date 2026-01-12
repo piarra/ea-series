@@ -228,6 +228,10 @@ struct SymbolState
   double lot_seq[NM1::kMaxLevels];
   FlexRef flex_buy_refs[NM1::kMaxLevels];
   FlexRef flex_sell_refs[NM1::kMaxLevels];
+  double buy_level_price[NM1::kMaxLevels];
+  double sell_level_price[NM1::kMaxLevels];
+  double buy_grid_step;
+  double sell_grid_step;
   datetime last_buy_close_time;
   datetime last_sell_close_time;
   datetime last_buy_nanpin_time;
@@ -279,6 +283,10 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.has_partial_sell = false;
   ClearFlexRefs(state.flex_buy_refs);
   ClearFlexRefs(state.flex_sell_refs);
+  ClearLevelPrices(state.buy_level_price);
+  ClearLevelPrices(state.sell_level_price);
+  state.buy_grid_step = 0.0;
+  state.sell_grid_step = 0.0;
 }
 
 void LoadParamsForIndex(int index, NM1Params &params)
@@ -554,6 +562,52 @@ void ClearFlexRefs(FlexRef &refs[])
     refs[i].active = false;
     refs[i].level = 0;
   }
+}
+
+void ClearLevelPrices(double &prices[])
+{
+  for (int i = 0; i < NM1::kMaxLevels; ++i)
+    prices[i] = 0.0;
+}
+
+void SyncLevelPricesFromPositions(SymbolState &state)
+{
+  const string symbol = state.broker_symbol;
+  const int magic = state.params.magic_number;
+  for (int i = PositionsTotal() - 1; i >= 0; --i)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if (!PositionSelectByTicket(ticket))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != magic)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != symbol)
+      continue;
+    string comment = PositionGetString(POSITION_COMMENT);
+    if (IsFlexComment(comment))
+      continue;
+    int level = ExtractLevelFromComment(comment);
+    if (level <= 0)
+      level = 1;
+    if (level > NM1::kMaxLevels)
+      continue;
+    double price = PositionGetDouble(POSITION_PRICE_OPEN);
+    int type = (int)PositionGetInteger(POSITION_TYPE);
+    if (type == POSITION_TYPE_BUY)
+    {
+      if (state.buy_level_price[level - 1] <= 0.0)
+        state.buy_level_price[level - 1] = price;
+    }
+    else if (type == POSITION_TYPE_SELL)
+    {
+      if (state.sell_level_price[level - 1] <= 0.0)
+        state.sell_level_price[level - 1] = price;
+    }
+  }
+  if (state.buy_grid_step <= 0.0 && state.buy_level_price[0] > 0.0 && state.buy_level_price[1] > 0.0)
+    state.buy_grid_step = MathAbs(state.buy_level_price[0] - state.buy_level_price[1]);
+  if (state.sell_grid_step <= 0.0 && state.sell_level_price[0] > 0.0 && state.sell_level_price[1] > 0.0)
+    state.sell_grid_step = MathAbs(state.sell_level_price[0] - state.sell_level_price[1]);
 }
 
 bool AddFlexRef(const string symbol, FlexRef &refs[], double price, double lot, int level)
@@ -1052,6 +1106,8 @@ void ProcessSymbolTick(SymbolState &state)
     state.realized_buy_profit = 0.0;
     state.has_partial_buy = false;
     ClearFlexRefs(state.flex_buy_refs);
+    ClearLevelPrices(state.buy_level_price);
+    state.buy_grid_step = 0.0;
   }
   if (state.prev_sell_count > 0 && sell.count == 0)
   {
@@ -1060,16 +1116,27 @@ void ProcessSymbolTick(SymbolState &state)
     state.realized_sell_profit = 0.0;
     state.has_partial_sell = false;
     ClearFlexRefs(state.flex_sell_refs);
+    ClearLevelPrices(state.sell_level_price);
+    state.sell_grid_step = 0.0;
   }
+
+  if (buy.count > 0 || sell.count > 0)
+    SyncLevelPricesFromPositions(state);
 
   bool attempted_initial = false;
   if (!state.initial_started && (TimeCurrent() - state.start_time) >= params.start_delay_seconds)
   {
     if (buy.count == 0 && sell.count == 0 && IsTradingTime())
     {
-      bool opened = false;
-      opened |= TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
-      opened |= TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
+      double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+      bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
+      if (opened_buy && state.buy_level_price[0] <= 0.0)
+        state.buy_level_price[0] = ask;
+      bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
+      if (opened_sell && state.sell_level_price[0] <= 0.0)
+        state.sell_level_price[0] = bid;
+      bool opened = opened_buy || opened_sell;
       if (opened)
         state.initial_started = true;
       attempted_initial = true;
@@ -1100,6 +1167,11 @@ void ProcessSymbolTick(SymbolState &state)
   {
     atr_base = GetAtrBase(state);
   }
+
+  if (buy.count > 0 && state.buy_grid_step <= 0.0)
+    state.buy_grid_step = grid_step;
+  if (sell.count > 0 && state.sell_grid_step <= 0.0)
+    state.sell_grid_step = grid_step;
 
   bool allow_nanpin = true;
   bool safety_triggered = false;
@@ -1205,16 +1277,41 @@ void ProcessSymbolTick(SymbolState &state)
     if (state.initial_started)
     {
       if (buy.count == 0 && CanRestart(params, state.last_buy_close_time))
-        TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
+      {
+        bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
+        if (opened_buy && state.buy_level_price[0] <= 0.0)
+          state.buy_level_price[0] = ask;
+      }
       if (sell.count == 0 && CanRestart(params, state.last_sell_close_time))
-        TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
+      {
+        bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
+        if (opened_sell && state.sell_level_price[0] <= 0.0)
+          state.sell_level_price[0] = bid;
+      }
     }
 
     int levels = EffectiveMaxLevels(params);
     if (buy.count > 0 && buy.level_count < levels)
     {
       // Buy orders fill at ask, so compare ask to the grid.
-      if (allow_nanpin && CanNanpin(params, state.last_buy_nanpin_time) && ask <= buy.min_price - grid_step)
+      double step = state.buy_grid_step > 0.0 ? state.buy_grid_step : grid_step;
+      int level_index = buy.level_count;
+      double target = state.buy_level_price[level_index];
+      if (target <= 0.0)
+      {
+        double base = 0.0;
+        if (level_index > 0)
+          base = state.buy_level_price[level_index - 1];
+        if (base <= 0.0)
+          base = buy.min_price;
+        target = base - step;
+        state.buy_level_price[level_index] = target;
+      }
+      double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+      if (point <= 0.0)
+        point = 0.00001;
+      double tol = point * 0.5;
+      if (allow_nanpin && CanNanpin(params, state.last_buy_nanpin_time) && ask <= target + tol)
       {
         double lot = state.lot_seq[buy.level_count];
         if (buy.level_count >= 3)
@@ -1243,7 +1340,24 @@ void ProcessSymbolTick(SymbolState &state)
     if (sell.count > 0 && sell.level_count < levels)
     {
       // Sell orders fill at bid, so compare bid to the grid.
-      if (allow_nanpin && CanNanpin(params, state.last_sell_nanpin_time) && bid >= sell.max_price + grid_step)
+      double step = state.sell_grid_step > 0.0 ? state.sell_grid_step : grid_step;
+      int level_index = sell.level_count;
+      double target = state.sell_level_price[level_index];
+      if (target <= 0.0)
+      {
+        double base = 0.0;
+        if (level_index > 0)
+          base = state.sell_level_price[level_index - 1];
+        if (base <= 0.0)
+          base = sell.max_price;
+        target = base + step;
+        state.sell_level_price[level_index] = target;
+      }
+      double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+      if (point <= 0.0)
+        point = 0.00001;
+      double tol = point * 0.5;
+      if (allow_nanpin && CanNanpin(params, state.last_sell_nanpin_time) && bid >= target - tol)
       {
         double lot = state.lot_seq[sell.level_count];
         if (sell.level_count >= 3)
