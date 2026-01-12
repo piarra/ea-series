@@ -28,7 +28,7 @@ NM1.mq5 実装アルゴリズム
 追加エントリー (ナンピン)
 - グリッド幅は以下のいずれか。
   - `GridStepAuto = false`: `GridStepPoints * PipPointSize()`。
-  - `GridStepAuto = true`: `ATR_base * AtrMultiplier`。
+  - `GridStepAuto = true`: `max(ATR_base, MinAtr) * AtrMultiplier`。
     - `ATR_base = SMA(ATR(14)[5], 50)` (5本前から50本分の平均)。
 - buy: `ask <= buy.min_price - grid_step` で追加。
 - sell: `bid >= sell.max_price + grid_step` で追加。

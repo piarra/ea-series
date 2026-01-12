@@ -22,6 +22,7 @@ input int SlippagePointsXAUUSD = 4;
 input int GridStepPointsXAUUSD = 250;
 input bool GridStepAutoXAUUSD = true;
 input double AtrMultiplierXAUUSD = 1.2;
+input double MinAtrXAUUSD = 1.5;
 input bool SafetyModeXAUUSD = true;
 input bool SafeStopModeXAUUSD = true;
 input double SafeKXAUUSD = 2.0;
@@ -52,6 +53,7 @@ input int SlippagePointsEURUSD = 4;
 input int GridStepPointsEURUSD = 250;
 input bool GridStepAutoEURUSD = true;
 input double AtrMultiplierEURUSD = 1.2;
+input double MinAtrEURUSD = 0.00025;
 input bool SafetyModeEURUSD = true;
 input bool SafeStopModeEURUSD = true;
 input double SafeKEURUSD = 2.0;
@@ -75,6 +77,7 @@ input int SlippagePointsUSDJPY = 4;
 input int GridStepPointsUSDJPY = 250;
 input bool GridStepAutoUSDJPY = true;
 input double AtrMultiplierUSDJPY = 1.2;
+input double MinAtrUSDJPY = 0.04;
 input bool SafetyModeUSDJPY = true;
 input bool SafeStopModeUSDJPY = true;
 input double SafeKUSDJPY = 2.0;
@@ -98,6 +101,7 @@ input int SlippagePointsAUDUSD = 4;
 input int GridStepPointsAUDUSD = 250;
 input bool GridStepAutoAUDUSD = true;
 input double AtrMultiplierAUDUSD = 1.2;
+input double MinAtrAUDUSD = 0.00015;
 input bool SafetyModeAUDUSD = true;
 input bool SafeStopModeAUDUSD = true;
 input double SafeKAUDUSD = 2.0;
@@ -121,6 +125,7 @@ input int SlippagePointsBTCUSD = 4;
 input int GridStepPointsBTCUSD = 250;
 input bool GridStepAutoBTCUSD = true;
 input double AtrMultiplierBTCUSD = 1.2;
+input double MinAtrBTCUSD = 10.0;
 input bool SafetyModeBTCUSD = true;
 input bool SafeStopModeBTCUSD = true;
 input double SafeKBTCUSD = 2.0;
@@ -144,6 +149,7 @@ input int SlippagePointsETHUSD = 4;
 input int GridStepPointsETHUSD = 250;
 input bool GridStepAutoETHUSD = true;
 input double AtrMultiplierETHUSD = 1.2;
+input double MinAtrETHUSD = 1.2;
 input bool SafetyModeETHUSD = true;
 input bool SafeStopModeETHUSD = true;
 input double SafeKETHUSD = 2.0;
@@ -168,6 +174,7 @@ struct NM1Params
   int grid_step_points;
   bool grid_step_auto;
   double atr_multiplier;
+  double min_atr;
   bool safety_mode;
   bool safe_stop_mode;
   double safe_k;
@@ -275,6 +282,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.grid_step_points = GridStepPointsXAUUSD;
     params.grid_step_auto = GridStepAutoXAUUSD;
     params.atr_multiplier = AtrMultiplierXAUUSD;
+    params.min_atr = MinAtrXAUUSD;
     params.safety_mode = SafetyModeXAUUSD;
     params.safe_stop_mode = SafeStopModeXAUUSD;
     params.safe_k = SafeKXAUUSD;
@@ -302,6 +310,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.grid_step_points = GridStepPointsEURUSD;
     params.grid_step_auto = GridStepAutoEURUSD;
     params.atr_multiplier = AtrMultiplierEURUSD;
+    params.min_atr = MinAtrEURUSD;
     params.safety_mode = SafetyModeEURUSD;
     params.safe_stop_mode = SafeStopModeEURUSD;
     params.safe_k = SafeKEURUSD;
@@ -329,6 +338,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.grid_step_points = GridStepPointsUSDJPY;
     params.grid_step_auto = GridStepAutoUSDJPY;
     params.atr_multiplier = AtrMultiplierUSDJPY;
+    params.min_atr = MinAtrUSDJPY;
     params.safety_mode = SafetyModeUSDJPY;
     params.safe_stop_mode = SafeStopModeUSDJPY;
     params.safe_k = SafeKUSDJPY;
@@ -356,6 +366,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.grid_step_points = GridStepPointsAUDUSD;
     params.grid_step_auto = GridStepAutoAUDUSD;
     params.atr_multiplier = AtrMultiplierAUDUSD;
+    params.min_atr = MinAtrAUDUSD;
     params.safety_mode = SafetyModeAUDUSD;
     params.safe_stop_mode = SafeStopModeAUDUSD;
     params.safe_k = SafeKAUDUSD;
@@ -383,6 +394,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.grid_step_points = GridStepPointsBTCUSD;
     params.grid_step_auto = GridStepAutoBTCUSD;
     params.atr_multiplier = AtrMultiplierBTCUSD;
+    params.min_atr = MinAtrBTCUSD;
     params.safety_mode = SafetyModeBTCUSD;
     params.safe_stop_mode = SafeStopModeBTCUSD;
     params.safe_k = SafeKBTCUSD;
@@ -410,6 +422,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.grid_step_points = GridStepPointsETHUSD;
     params.grid_step_auto = GridStepAutoETHUSD;
     params.atr_multiplier = AtrMultiplierETHUSD;
+    params.min_atr = MinAtrETHUSD;
     params.safety_mode = SafetyModeETHUSD;
     params.safe_stop_mode = SafeStopModeETHUSD;
     params.safe_k = SafeKETHUSD;
@@ -1025,8 +1038,11 @@ void ProcessSymbolTick(SymbolState &state)
   if (params.grid_step_auto)
   {
     atr_base = GetAtrBase(state);
-    if (atr_base > 0.0)
-      grid_step = atr_base * params.atr_multiplier;
+    double atr_ref = atr_base;
+    if (params.min_atr > atr_ref)
+      atr_ref = params.min_atr;
+    if (atr_ref > 0.0)
+      grid_step = atr_ref * params.atr_multiplier;
   }
   else if (params.safety_mode)
   {
