@@ -5,7 +5,7 @@
 
 namespace NM1
 {
-enum { kMaxLevels = 14 };
+enum { kMaxLevels = 13 };
 enum { kMaxSymbols = 6 };
 const int kAtrBasePeriod = 14;
 const int kLotDigits = 2;
