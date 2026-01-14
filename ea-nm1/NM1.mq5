@@ -1,5 +1,5 @@
 #property strict
-#property version   "100.180"
+#property version   "100.190"
 
 #include <Trade/Trade.mqh>
 
@@ -708,11 +708,14 @@ int OnInit()
   }
   if (active == 0)
     return INIT_FAILED;
+  if (!EventSetMillisecondTimer(500))
+    Print("EventSetMillisecondTimer failed");
   return INIT_SUCCEEDED;
 }
 
 void OnDeinit(const int reason)
 {
+  EventKillTimer();
   for (int i = 0; i < symbols_count; ++i)
   {
     if (symbols[i].atr_handle != INVALID_HANDLE)
@@ -1400,4 +1403,9 @@ void OnTick()
 {
   for (int i = 0; i < symbols_count; ++i)
     ProcessSymbolTick(symbols[i]);
+}
+
+void OnTimer()
+{
+  OnTick();
 }
