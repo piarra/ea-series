@@ -510,6 +510,24 @@ bool IsFlexComment(const string comment)
   return StringFind(comment, NM1::kFlexComment) == 0;
 }
 
+bool HasOpenPosition(const SymbolState &state)
+{
+  const string symbol = state.broker_symbol;
+  const int magic = state.params.magic_number;
+  for (int i = PositionsTotal() - 1; i >= 0; --i)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if (!PositionSelectByTicket(ticket))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != magic)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != symbol)
+      continue;
+    return true;
+  }
+  return false;
+}
+
 int ExtractLevelFromComment(const string comment)
 {
   int pos = StringFind(comment, "_L");
@@ -554,6 +572,14 @@ int OnInit()
     return INIT_FAILED;
   if (!EventSetMillisecondTimer(500))
     Print("EventSetMillisecondTimer failed");
+
+  for (int i = 0; i < symbols_count; ++i)
+  {
+    if (!symbols[i].enabled)
+      continue;
+    if (HasOpenPosition(symbols[i]))
+      symbols[i].initial_started = true;
+  }
   return INIT_SUCCEEDED;
 }
 
