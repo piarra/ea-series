@@ -16,6 +16,7 @@ const string kCoreComment = "NM1_CORE";
 }
 
 input group "COMMON"
+input string SymbolSuffix = "c";
 input int MagicNumber = 202507;
 input int StartDelaySeconds = 5;
 input bool UseAsyncClose = true;
@@ -26,8 +27,6 @@ input group "XAUUSD"
 input bool EnableXAUUSD = true;
 input string SymbolXAUUSD = "XAUUSD";
 input int SlippagePointsXAUUSD = 4;
-input int GridStepPointsXAUUSD = 250;
-input bool GridStepAutoXAUUSD = true;
 input double AtrMultiplierXAUUSD = 1.4;
 input double MinAtrXAUUSD = 1.6;
 input bool SafetyModeXAUUSD = true;
@@ -50,8 +49,6 @@ input group "EURUSD"
 input bool EnableEURUSD = true;
 input string SymbolEURUSD = "EURUSD";
 input int SlippagePointsEURUSD = 4;
-input int GridStepPointsEURUSD = 250;
-input bool GridStepAutoEURUSD = true;
 input double AtrMultiplierEURUSD = 1.3;
 input double MinAtrEURUSD = 0.00025;
 input bool SafetyModeEURUSD = true;
@@ -74,8 +71,6 @@ input group "USDJPY"
 input bool EnableUSDJPY = true;
 input string SymbolUSDJPY = "USDJPY";
 input int SlippagePointsUSDJPY = 4;
-input int GridStepPointsUSDJPY = 250;
-input bool GridStepAutoUSDJPY = true;
 input double AtrMultiplierUSDJPY = 1.6;
 input double MinAtrUSDJPY = 0.05;
 input bool SafetyModeUSDJPY = true;
@@ -98,8 +93,6 @@ input group "AUDUSD"
 input bool EnableAUDUSD = true;
 input string SymbolAUDUSD = "AUDUSD";
 input int SlippagePointsAUDUSD = 4;
-input int GridStepPointsAUDUSD = 250;
-input bool GridStepAutoAUDUSD = true;
 input double AtrMultiplierAUDUSD = 1.2;
 input double MinAtrAUDUSD = 0.00015;
 input bool SafetyModeAUDUSD = true;
@@ -122,8 +115,6 @@ input group "BTCUSD"
 input bool EnableBTCUSD = true;
 input string SymbolBTCUSD = "BTCUSD";
 input int SlippagePointsBTCUSD = 4;
-input int GridStepPointsBTCUSD = 250;
-input bool GridStepAutoBTCUSD = true;
 input double AtrMultiplierBTCUSD = 2.5;
 input double MinAtrBTCUSD = 10.0;
 input bool SafetyModeBTCUSD = true;
@@ -146,8 +137,6 @@ input group "ETHUSD"
 input bool EnableETHUSD = true;
 input string SymbolETHUSD = "ETHUSD";
 input int SlippagePointsETHUSD = 4;
-input int GridStepPointsETHUSD = 250;
-input bool GridStepAutoETHUSD = true;
 input double AtrMultiplierETHUSD = 1.6;
 input double MinAtrETHUSD = 1.2;
 input bool SafetyModeETHUSD = true;
@@ -171,8 +160,6 @@ struct NM1Params
   int magic_number;
   int slippage_points;
   int start_delay_seconds;
-  int grid_step_points;
-  bool grid_step_auto;
   double atr_multiplier;
   double min_atr;
   bool safety_mode;
@@ -296,8 +283,6 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.magic_number = MagicNumber;
     params.slippage_points = SlippagePointsXAUUSD;
     params.start_delay_seconds = StartDelaySeconds;
-    params.grid_step_points = GridStepPointsXAUUSD;
-    params.grid_step_auto = GridStepAutoXAUUSD;
     params.atr_multiplier = AtrMultiplierXAUUSD;
     params.min_atr = MinAtrXAUUSD;
     params.safety_mode = SafetyModeXAUUSD;
@@ -324,8 +309,6 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.magic_number = MagicNumber;
     params.slippage_points = SlippagePointsEURUSD;
     params.start_delay_seconds = StartDelaySeconds;
-    params.grid_step_points = GridStepPointsEURUSD;
-    params.grid_step_auto = GridStepAutoEURUSD;
     params.atr_multiplier = AtrMultiplierEURUSD;
     params.min_atr = MinAtrEURUSD;
     params.safety_mode = SafetyModeEURUSD;
@@ -352,8 +335,6 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.magic_number = MagicNumber;
     params.slippage_points = SlippagePointsUSDJPY;
     params.start_delay_seconds = StartDelaySeconds;
-    params.grid_step_points = GridStepPointsUSDJPY;
-    params.grid_step_auto = GridStepAutoUSDJPY;
     params.atr_multiplier = AtrMultiplierUSDJPY;
     params.min_atr = MinAtrUSDJPY;
     params.safety_mode = SafetyModeUSDJPY;
@@ -380,8 +361,6 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.magic_number = MagicNumber;
     params.slippage_points = SlippagePointsAUDUSD;
     params.start_delay_seconds = StartDelaySeconds;
-    params.grid_step_points = GridStepPointsAUDUSD;
-    params.grid_step_auto = GridStepAutoAUDUSD;
     params.atr_multiplier = AtrMultiplierAUDUSD;
     params.min_atr = MinAtrAUDUSD;
     params.safety_mode = SafetyModeAUDUSD;
@@ -408,8 +387,6 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.magic_number = MagicNumber;
     params.slippage_points = SlippagePointsBTCUSD;
     params.start_delay_seconds = StartDelaySeconds;
-    params.grid_step_points = GridStepPointsBTCUSD;
-    params.grid_step_auto = GridStepAutoBTCUSD;
     params.atr_multiplier = AtrMultiplierBTCUSD;
     params.min_atr = MinAtrBTCUSD;
     params.safety_mode = SafetyModeBTCUSD;
@@ -436,8 +413,6 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.magic_number = MagicNumber;
     params.slippage_points = SlippagePointsETHUSD;
     params.start_delay_seconds = StartDelaySeconds;
-    params.grid_step_points = GridStepPointsETHUSD;
-    params.grid_step_auto = GridStepAutoETHUSD;
     params.atr_multiplier = AtrMultiplierETHUSD;
     params.min_atr = MinAtrETHUSD;
     params.safety_mode = SafetyModeETHUSD;
@@ -488,6 +463,8 @@ void BuildSymbols()
     string broker_symbol = symbol_inputs[i];
     if (StringLen(broker_symbol) == 0)
       broker_symbol = logical;
+    if (StringLen(SymbolSuffix) > 0)
+      broker_symbol = broker_symbol + SymbolSuffix;
     if (enabled)
     {
       if (!SymbolSelect(broker_symbol, true))
@@ -1155,21 +1132,13 @@ void ProcessSymbolTick(SymbolState &state)
 
   double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
   double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
-  double grid_step = params.grid_step_points * PipPointSize(symbol);
-  double atr_base = 0.0;
-  if (params.grid_step_auto)
-  {
-    atr_base = GetAtrBase(state);
-    double atr_ref = atr_base;
-    if (params.min_atr > atr_ref)
-      atr_ref = params.min_atr;
-    if (atr_ref > 0.0)
-      grid_step = atr_ref * params.atr_multiplier;
-  }
-  else if (params.safety_mode)
-  {
-    atr_base = GetAtrBase(state);
-  }
+  double grid_step = 0.0;
+  double atr_base = GetAtrBase(state);
+  double atr_ref = atr_base;
+  if (params.min_atr > atr_ref)
+    atr_ref = params.min_atr;
+  if (atr_ref > 0.0)
+    grid_step = atr_ref * params.atr_multiplier;
 
   if (buy.count > 0 && state.buy_grid_step <= 0.0)
     state.buy_grid_step = grid_step;
