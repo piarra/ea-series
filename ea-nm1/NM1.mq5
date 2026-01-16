@@ -23,6 +23,15 @@ input int StartDelaySeconds = 5;
 input bool UseAsyncClose = true;
 input int CloseRetryCount = 3;
 input int CloseRetryDelayMs = 200;
+input bool SafetyMode = true;
+input bool SafeStopMode = false;
+input double SafeK = 2.0;
+input double SafeSlopeK = 0.3;
+input double CoreRatio = 0.7;
+input double FlexRatio = 0.3;
+input double FlexAtrProfitMultiplier = 0.8;
+input int RestartDelaySeconds = 1;
+input int NanpinSleepSeconds = 10;
 
 input group "XAUUSD"
 input bool EnableXAUUSD = true;
@@ -30,17 +39,8 @@ input string SymbolXAUUSD = "XAUUSD";
 input double BaseLotXAUUSD = 0.03;
 input double AtrMultiplierXAUUSD = 1.4;
 input double MinAtrXAUUSD = 1.6;
-input bool SafetyModeXAUUSD = true;
-input bool SafeStopModeXAUUSD = false;
-input double SafeKXAUUSD = 2.0;
-input double SafeSlopeKXAUUSD = 0.3;
 input double ProfitBaseXAUUSD = 1.0;
-input double CoreRatioXAUUSD = 0.7;
-input double FlexRatioXAUUSD = 0.3;
-input double FlexAtrProfitMultiplierXAUUSD = 0.8;
 input int MaxLevelsXAUUSD = 12;
-input int RestartDelaySecondsXAUUSD = 1;
-input int NanpinSleepSecondsXAUUSD = 10;
 input double StopBuyLimitPriceXAUUSD = 4000.0;
 input double StopBuyLimitLotXAUUSD = 0.01;
 
@@ -50,17 +50,8 @@ input string SymbolEURUSD = "EURUSD";
 input double BaseLotEURUSD = 0.01;
 input double AtrMultiplierEURUSD = 1.3;
 input double MinAtrEURUSD = 0.00025;
-input bool SafetyModeEURUSD = true;
-input bool SafeStopModeEURUSD = false;
-input double SafeKEURUSD = 2.0;
-input double SafeSlopeKEURUSD = 0.3;
 input double ProfitBaseEURUSD = 0.00005;
-input double CoreRatioEURUSD = 0.7;
-input double FlexRatioEURUSD = 0.3;
-input double FlexAtrProfitMultiplierEURUSD = 0.8;
 input int MaxLevelsEURUSD = 10;
-input int RestartDelaySecondsEURUSD = 1;
-input int NanpinSleepSecondsEURUSD = 10;
 input double StopBuyLimitPriceEURUSD = 4000.0;
 input double StopBuyLimitLotEURUSD = 0.01;
 
@@ -70,17 +61,8 @@ input string SymbolUSDJPY = "USDJPY";
 input double BaseLotUSDJPY = 0.3;
 input double AtrMultiplierUSDJPY = 1.6;
 input double MinAtrUSDJPY = 0.05;
-input bool SafetyModeUSDJPY = true;
-input bool SafeStopModeUSDJPY = false;
-input double SafeKUSDJPY = 2.0;
-input double SafeSlopeKUSDJPY = 0.3;
 input double ProfitBaseUSDJPY = 0.01;
-input double CoreRatioUSDJPY = 0.7;
-input double FlexRatioUSDJPY = 0.3;
-input double FlexAtrProfitMultiplierUSDJPY = 0.8;
 input int MaxLevelsUSDJPY = 12;
-input int RestartDelaySecondsUSDJPY = 1;
-input int NanpinSleepSecondsUSDJPY = 10;
 input double StopBuyLimitPriceUSDJPY = 4000.0;
 input double StopBuyLimitLotUSDJPY = 0.01;
 
@@ -90,17 +72,8 @@ input string SymbolAUDUSD = "AUDUSD";
 input double BaseLotAUDUSD = 0.01;
 input double AtrMultiplierAUDUSD = 1.2;
 input double MinAtrAUDUSD = 0.00015;
-input bool SafetyModeAUDUSD = true;
-input bool SafeStopModeAUDUSD = false;
-input double SafeKAUDUSD = 2.0;
-input double SafeSlopeKAUDUSD = 0.3;
 input double ProfitBaseAUDUSD = 1.0;
-input double CoreRatioAUDUSD = 0.7;
-input double FlexRatioAUDUSD = 0.3;
-input double FlexAtrProfitMultiplierAUDUSD = 0.8;
 input int MaxLevelsAUDUSD = 10;
-input int RestartDelaySecondsAUDUSD = 1;
-input int NanpinSleepSecondsAUDUSD = 10;
 input double StopBuyLimitPriceAUDUSD = 4000.0;
 input double StopBuyLimitLotAUDUSD = 0.01;
 
@@ -110,17 +83,8 @@ input string SymbolBTCUSD = "BTCUSD";
 input double BaseLotBTCUSD = 0.3;
 input double AtrMultiplierBTCUSD = 2.5;
 input double MinAtrBTCUSD = 10.0;
-input bool SafetyModeBTCUSD = true;
-input bool SafeStopModeBTCUSD = false;
-input double SafeKBTCUSD = 2.0;
-input double SafeSlopeKBTCUSD = 0.3;
 input double ProfitBaseBTCUSD = 4.0;
-input double CoreRatioBTCUSD = 0.7;
-input double FlexRatioBTCUSD = 0.3;
-input double FlexAtrProfitMultiplierBTCUSD = 0.8;
 input int MaxLevelsBTCUSD = 8;
-input int RestartDelaySecondsBTCUSD = 1;
-input int NanpinSleepSecondsBTCUSD = 10;
 input double StopBuyLimitPriceBTCUSD = 4000.0;
 input double StopBuyLimitLotBTCUSD = 0.01;
 
@@ -130,17 +94,8 @@ input string SymbolETHUSD = "ETHUSD";
 input double BaseLotETHUSD = 0.1;
 input double AtrMultiplierETHUSD = 1.6;
 input double MinAtrETHUSD = 1.2;
-input bool SafetyModeETHUSD = true;
-input bool SafeStopModeETHUSD = false;
-input double SafeKETHUSD = 2.0;
-input double SafeSlopeKETHUSD = 0.3;
 input double ProfitBaseETHUSD = 1.0;
-input double CoreRatioETHUSD = 0.7;
-input double FlexRatioETHUSD = 0.3;
-input double FlexAtrProfitMultiplierETHUSD = 0.8;
 input int MaxLevelsETHUSD = 12;
-input int RestartDelaySecondsETHUSD = 1;
-input int NanpinSleepSecondsETHUSD = 10;
 input double StopBuyLimitPriceETHUSD = 4000.0;
 input double StopBuyLimitLotETHUSD = 0.01;
 
@@ -264,155 +219,85 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.sell_grid_step = 0.0;
 }
 
+void ApplyCommonParams(NM1Params &params)
+{
+  params.magic_number = MagicNumber;
+  params.slippage_points = SlippagePoints;
+  params.start_delay_seconds = StartDelaySeconds;
+  params.safety_mode = SafetyMode;
+  params.safe_stop_mode = SafeStopMode;
+  params.safe_k = SafeK;
+  params.safe_slope_k = SafeSlopeK;
+  params.core_ratio = CoreRatio;
+  params.flex_ratio = FlexRatio;
+  params.flex_atr_profit_multiplier = FlexAtrProfitMultiplier;
+  params.restart_delay_seconds = RestartDelaySeconds;
+  params.nanpin_sleep_seconds = NanpinSleepSeconds;
+  params.use_async_close = UseAsyncClose;
+  params.close_retry_count = CloseRetryCount;
+  params.close_retry_delay_ms = CloseRetryDelayMs;
+}
+
 void LoadParamsForIndex(int index, NM1Params &params)
 {
+  ApplyCommonParams(params);
   if (index == 0)
   {
-    params.magic_number = MagicNumber;
-    params.slippage_points = SlippagePoints;
-    params.start_delay_seconds = StartDelaySeconds;
     params.atr_multiplier = AtrMultiplierXAUUSD;
     params.min_atr = MinAtrXAUUSD;
-    params.safety_mode = SafetyModeXAUUSD;
-    params.safe_stop_mode = SafeStopModeXAUUSD;
-    params.safe_k = SafeKXAUUSD;
-    params.safe_slope_k = SafeSlopeKXAUUSD;
     params.base_lot = BaseLotXAUUSD;
     params.profit_base = ProfitBaseXAUUSD;
-    params.core_ratio = CoreRatioXAUUSD;
-    params.flex_ratio = FlexRatioXAUUSD;
-    params.flex_atr_profit_multiplier = FlexAtrProfitMultiplierXAUUSD;
     params.max_levels = MaxLevelsXAUUSD;
-    params.restart_delay_seconds = RestartDelaySecondsXAUUSD;
-    params.nanpin_sleep_seconds = NanpinSleepSecondsXAUUSD;
-    params.use_async_close = UseAsyncClose;
-    params.close_retry_count = CloseRetryCount;
-    params.close_retry_delay_ms = CloseRetryDelayMs;
     params.stop_buy_limit_price = StopBuyLimitPriceXAUUSD;
     params.stop_buy_limit_lot = StopBuyLimitLotXAUUSD;
   }
   else if (index == 1)
   {
-    params.magic_number = MagicNumber;
-    params.slippage_points = SlippagePoints;
-    params.start_delay_seconds = StartDelaySeconds;
     params.atr_multiplier = AtrMultiplierEURUSD;
     params.min_atr = MinAtrEURUSD;
-    params.safety_mode = SafetyModeEURUSD;
-    params.safe_stop_mode = SafeStopModeEURUSD;
-    params.safe_k = SafeKEURUSD;
-    params.safe_slope_k = SafeSlopeKEURUSD;
     params.base_lot = BaseLotEURUSD;
     params.profit_base = ProfitBaseEURUSD;
-    params.core_ratio = CoreRatioEURUSD;
-    params.flex_ratio = FlexRatioEURUSD;
-    params.flex_atr_profit_multiplier = FlexAtrProfitMultiplierEURUSD;
     params.max_levels = MaxLevelsEURUSD;
-    params.restart_delay_seconds = RestartDelaySecondsEURUSD;
-    params.nanpin_sleep_seconds = NanpinSleepSecondsEURUSD;
-    params.use_async_close = UseAsyncClose;
-    params.close_retry_count = CloseRetryCount;
-    params.close_retry_delay_ms = CloseRetryDelayMs;
     params.stop_buy_limit_price = StopBuyLimitPriceEURUSD;
     params.stop_buy_limit_lot = StopBuyLimitLotEURUSD;
   }
   else if (index == 2)
   {
-    params.magic_number = MagicNumber;
-    params.slippage_points = SlippagePoints;
-    params.start_delay_seconds = StartDelaySeconds;
     params.atr_multiplier = AtrMultiplierUSDJPY;
     params.min_atr = MinAtrUSDJPY;
-    params.safety_mode = SafetyModeUSDJPY;
-    params.safe_stop_mode = SafeStopModeUSDJPY;
-    params.safe_k = SafeKUSDJPY;
-    params.safe_slope_k = SafeSlopeKUSDJPY;
     params.base_lot = BaseLotUSDJPY;
     params.profit_base = ProfitBaseUSDJPY;
-    params.core_ratio = CoreRatioUSDJPY;
-    params.flex_ratio = FlexRatioUSDJPY;
-    params.flex_atr_profit_multiplier = FlexAtrProfitMultiplierUSDJPY;
     params.max_levels = MaxLevelsUSDJPY;
-    params.restart_delay_seconds = RestartDelaySecondsUSDJPY;
-    params.nanpin_sleep_seconds = NanpinSleepSecondsUSDJPY;
-    params.use_async_close = UseAsyncClose;
-    params.close_retry_count = CloseRetryCount;
-    params.close_retry_delay_ms = CloseRetryDelayMs;
     params.stop_buy_limit_price = StopBuyLimitPriceUSDJPY;
     params.stop_buy_limit_lot = StopBuyLimitLotUSDJPY;
   }
   else if (index == 3)
   {
-    params.magic_number = MagicNumber;
-    params.slippage_points = SlippagePoints;
-    params.start_delay_seconds = StartDelaySeconds;
     params.atr_multiplier = AtrMultiplierAUDUSD;
     params.min_atr = MinAtrAUDUSD;
-    params.safety_mode = SafetyModeAUDUSD;
-    params.safe_stop_mode = SafeStopModeAUDUSD;
-    params.safe_k = SafeKAUDUSD;
-    params.safe_slope_k = SafeSlopeKAUDUSD;
     params.base_lot = BaseLotAUDUSD;
     params.profit_base = ProfitBaseAUDUSD;
-    params.core_ratio = CoreRatioAUDUSD;
-    params.flex_ratio = FlexRatioAUDUSD;
-    params.flex_atr_profit_multiplier = FlexAtrProfitMultiplierAUDUSD;
     params.max_levels = MaxLevelsAUDUSD;
-    params.restart_delay_seconds = RestartDelaySecondsAUDUSD;
-    params.nanpin_sleep_seconds = NanpinSleepSecondsAUDUSD;
-    params.use_async_close = UseAsyncClose;
-    params.close_retry_count = CloseRetryCount;
-    params.close_retry_delay_ms = CloseRetryDelayMs;
     params.stop_buy_limit_price = StopBuyLimitPriceAUDUSD;
     params.stop_buy_limit_lot = StopBuyLimitLotAUDUSD;
   }
   else if (index == 4)
   {
-    params.magic_number = MagicNumber;
-    params.slippage_points = SlippagePoints;
-    params.start_delay_seconds = StartDelaySeconds;
     params.atr_multiplier = AtrMultiplierBTCUSD;
     params.min_atr = MinAtrBTCUSD;
-    params.safety_mode = SafetyModeBTCUSD;
-    params.safe_stop_mode = SafeStopModeBTCUSD;
-    params.safe_k = SafeKBTCUSD;
-    params.safe_slope_k = SafeSlopeKBTCUSD;
     params.base_lot = BaseLotBTCUSD;
     params.profit_base = ProfitBaseBTCUSD;
-    params.core_ratio = CoreRatioBTCUSD;
-    params.flex_ratio = FlexRatioBTCUSD;
-    params.flex_atr_profit_multiplier = FlexAtrProfitMultiplierBTCUSD;
     params.max_levels = MaxLevelsBTCUSD;
-    params.restart_delay_seconds = RestartDelaySecondsBTCUSD;
-    params.nanpin_sleep_seconds = NanpinSleepSecondsBTCUSD;
-    params.use_async_close = UseAsyncClose;
-    params.close_retry_count = CloseRetryCount;
-    params.close_retry_delay_ms = CloseRetryDelayMs;
     params.stop_buy_limit_price = StopBuyLimitPriceBTCUSD;
     params.stop_buy_limit_lot = StopBuyLimitLotBTCUSD;
   }
   else if (index == 5)
   {
-    params.magic_number = MagicNumber;
-    params.slippage_points = SlippagePoints;
-    params.start_delay_seconds = StartDelaySeconds;
     params.atr_multiplier = AtrMultiplierETHUSD;
     params.min_atr = MinAtrETHUSD;
-    params.safety_mode = SafetyModeETHUSD;
-    params.safe_stop_mode = SafeStopModeETHUSD;
-    params.safe_k = SafeKETHUSD;
-    params.safe_slope_k = SafeSlopeKETHUSD;
     params.base_lot = BaseLotETHUSD;
     params.profit_base = ProfitBaseETHUSD;
-    params.core_ratio = CoreRatioETHUSD;
-    params.flex_ratio = FlexRatioETHUSD;
-    params.flex_atr_profit_multiplier = FlexAtrProfitMultiplierETHUSD;
     params.max_levels = MaxLevelsETHUSD;
-    params.restart_delay_seconds = RestartDelaySecondsETHUSD;
-    params.nanpin_sleep_seconds = NanpinSleepSecondsETHUSD;
-    params.use_async_close = UseAsyncClose;
-    params.close_retry_count = CloseRetryCount;
-    params.close_retry_delay_ms = CloseRetryDelayMs;
     params.stop_buy_limit_price = StopBuyLimitPriceETHUSD;
     params.stop_buy_limit_lot = StopBuyLimitLotETHUSD;
   }
