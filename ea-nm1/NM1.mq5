@@ -35,7 +35,6 @@ input double SafeKXAUUSD = 2.0;
 input double SafeSlopeKXAUUSD = 0.3;
 input double BaseLotXAUUSD = 0.03;
 input double ProfitBaseXAUUSD = 1.0;
-input double ProfitStepXAUUSD = 0;
 input double CoreRatioXAUUSD = 0.7;
 input double FlexRatioXAUUSD = 0.3;
 input double FlexAtrProfitMultiplierXAUUSD = 0.7;
@@ -57,7 +56,6 @@ input double SafeKEURUSD = 2.0;
 input double SafeSlopeKEURUSD = 0.3;
 input double BaseLotEURUSD = 0.01;
 input double ProfitBaseEURUSD = 0.00005;
-input double ProfitStepEURUSD = 0;
 input double CoreRatioEURUSD = 0.7;
 input double FlexRatioEURUSD = 0.3;
 input double FlexAtrProfitMultiplierEURUSD = 0.7;
@@ -79,7 +77,6 @@ input double SafeKUSDJPY = 2.0;
 input double SafeSlopeKUSDJPY = 0.3;
 input double BaseLotUSDJPY = 0.3;
 input double ProfitBaseUSDJPY = 0.01;
-input double ProfitStepUSDJPY = 0;
 input double CoreRatioUSDJPY = 0.7;
 input double FlexRatioUSDJPY = 0.3;
 input double FlexAtrProfitMultiplierUSDJPY = 0.7;
@@ -101,7 +98,6 @@ input double SafeKAUDUSD = 2.0;
 input double SafeSlopeKAUDUSD = 0.3;
 input double BaseLotAUDUSD = 0.01;
 input double ProfitBaseAUDUSD = 1.0;
-input double ProfitStepAUDUSD = 0;
 input double CoreRatioAUDUSD = 0.7;
 input double FlexRatioAUDUSD = 0.3;
 input double FlexAtrProfitMultiplierAUDUSD = 0.7;
@@ -123,7 +119,6 @@ input double SafeKBTCUSD = 2.0;
 input double SafeSlopeKBTCUSD = 0.3;
 input double BaseLotBTCUSD = 0.3;
 input double ProfitBaseBTCUSD = 4.0;
-input double ProfitStepBTCUSD = 0;
 input double CoreRatioBTCUSD = 0.7;
 input double FlexRatioBTCUSD = 0.3;
 input double FlexAtrProfitMultiplierBTCUSD = 0.7;
@@ -145,7 +140,6 @@ input double SafeKETHUSD = 2.0;
 input double SafeSlopeKETHUSD = 0.3;
 input double BaseLotETHUSD = 0.1;
 input double ProfitBaseETHUSD = 1.0;
-input double ProfitStepETHUSD = 0;
 input double CoreRatioETHUSD = 0.7;
 input double FlexRatioETHUSD = 0.3;
 input double FlexAtrProfitMultiplierETHUSD = 0.7;
@@ -168,7 +162,6 @@ struct NM1Params
   double safe_slope_k;
   double base_lot;
   double profit_base;
-  double profit_step;
   double core_ratio;
   double flex_ratio;
   double flex_atr_profit_multiplier;
@@ -291,7 +284,6 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.safe_slope_k = SafeSlopeKXAUUSD;
     params.base_lot = BaseLotXAUUSD;
     params.profit_base = ProfitBaseXAUUSD;
-    params.profit_step = ProfitStepXAUUSD;
     params.core_ratio = CoreRatioXAUUSD;
     params.flex_ratio = FlexRatioXAUUSD;
     params.flex_atr_profit_multiplier = FlexAtrProfitMultiplierXAUUSD;
@@ -317,7 +309,6 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.safe_slope_k = SafeSlopeKEURUSD;
     params.base_lot = BaseLotEURUSD;
     params.profit_base = ProfitBaseEURUSD;
-    params.profit_step = ProfitStepEURUSD;
     params.core_ratio = CoreRatioEURUSD;
     params.flex_ratio = FlexRatioEURUSD;
     params.flex_atr_profit_multiplier = FlexAtrProfitMultiplierEURUSD;
@@ -343,7 +334,6 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.safe_slope_k = SafeSlopeKUSDJPY;
     params.base_lot = BaseLotUSDJPY;
     params.profit_base = ProfitBaseUSDJPY;
-    params.profit_step = ProfitStepUSDJPY;
     params.core_ratio = CoreRatioUSDJPY;
     params.flex_ratio = FlexRatioUSDJPY;
     params.flex_atr_profit_multiplier = FlexAtrProfitMultiplierUSDJPY;
@@ -369,7 +359,6 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.safe_slope_k = SafeSlopeKAUDUSD;
     params.base_lot = BaseLotAUDUSD;
     params.profit_base = ProfitBaseAUDUSD;
-    params.profit_step = ProfitStepAUDUSD;
     params.core_ratio = CoreRatioAUDUSD;
     params.flex_ratio = FlexRatioAUDUSD;
     params.flex_atr_profit_multiplier = FlexAtrProfitMultiplierAUDUSD;
@@ -395,7 +384,6 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.safe_slope_k = SafeSlopeKBTCUSD;
     params.base_lot = BaseLotBTCUSD;
     params.profit_base = ProfitBaseBTCUSD;
-    params.profit_step = ProfitStepBTCUSD;
     params.core_ratio = CoreRatioBTCUSD;
     params.flex_ratio = FlexRatioBTCUSD;
     params.flex_atr_profit_multiplier = FlexAtrProfitMultiplierBTCUSD;
@@ -421,7 +409,6 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.safe_slope_k = SafeSlopeKETHUSD;
     params.base_lot = BaseLotETHUSD;
     params.profit_base = ProfitBaseETHUSD;
-    params.profit_step = ProfitStepETHUSD;
     params.core_ratio = CoreRatioETHUSD;
     params.flex_ratio = FlexRatioETHUSD;
     params.flex_atr_profit_multiplier = FlexAtrProfitMultiplierETHUSD;
@@ -920,13 +907,6 @@ bool ShouldStopOnBuyLimit(const NM1Params &params, const string symbol, double l
   return false;
 }
 
-double ProfitOffsetByCount(const NM1Params &params, int count)
-{
-  if (count <= 2)
-    return params.profit_base;
-  return params.profit_base + (count - 2) * params.profit_step;
-}
-
 double PipPointSize(const string symbol)
 {
   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
@@ -1205,14 +1185,14 @@ void ProcessSymbolTick(SymbolState &state)
       }
       else
       {
-        double target = buy.avg_price + ProfitOffsetByCount(params, buy.level_count);
+        double target = buy.avg_price + params.profit_base;
         if (bid >= target)
           CloseBasket(state, POSITION_TYPE_BUY);
       }
     }
     else
     {
-      double target = buy.avg_price + ProfitOffsetByCount(params, buy.level_count);
+      double target = buy.avg_price + params.profit_base;
       if (bid >= target)
         CloseBasket(state, POSITION_TYPE_BUY);
     }
@@ -1231,14 +1211,14 @@ void ProcessSymbolTick(SymbolState &state)
       }
       else
       {
-        double target = sell.avg_price - ProfitOffsetByCount(params, sell.level_count);
+        double target = sell.avg_price - params.profit_base;
         if (ask <= target)
           CloseBasket(state, POSITION_TYPE_SELL);
       }
     }
     else
     {
-      double target = sell.avg_price - ProfitOffsetByCount(params, sell.level_count);
+      double target = sell.avg_price - params.profit_base;
       if (ask <= target)
         CloseBasket(state, POSITION_TYPE_SELL);
     }
