@@ -1,5 +1,5 @@
 #property strict
-#property version   "100.200"
+#property version   "1.20"
 
 #include <Trade/Trade.mqh>
 
@@ -59,7 +59,7 @@ input bool SafeStopModeEURUSD = false;
 input double SafeKEURUSD = 2.0;
 input double SafeSlopeKEURUSD = 0.3;
 input double BaseLotEURUSD = 0.01;
-input double ProfitBaseEURUSD = 1.0;
+input double ProfitBaseEURUSD = 0.00005;
 input double ProfitStepEURUSD = 0;
 input double CoreRatioEURUSD = 0.7;
 input double FlexRatioEURUSD = 0.3;
