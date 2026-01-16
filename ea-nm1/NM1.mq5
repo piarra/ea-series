@@ -18,6 +18,7 @@ const string kCoreComment = "NM1_CORE";
 input group "COMMON"
 input string SymbolSuffix = "c";
 input int MagicNumber = 202507;
+input int SlippagePoints = 4;
 input int StartDelaySeconds = 5;
 input bool UseAsyncClose = true;
 input int CloseRetryCount = 3;
@@ -26,14 +27,13 @@ input int CloseRetryDelayMs = 200;
 input group "XAUUSD"
 input bool EnableXAUUSD = true;
 input string SymbolXAUUSD = "XAUUSD";
-input int SlippagePointsXAUUSD = 4;
+input double BaseLotXAUUSD = 0.03;
 input double AtrMultiplierXAUUSD = 1.4;
 input double MinAtrXAUUSD = 1.6;
 input bool SafetyModeXAUUSD = true;
 input bool SafeStopModeXAUUSD = false;
 input double SafeKXAUUSD = 2.0;
 input double SafeSlopeKXAUUSD = 0.3;
-input double BaseLotXAUUSD = 0.03;
 input double ProfitBaseXAUUSD = 1.0;
 input double CoreRatioXAUUSD = 0.7;
 input double FlexRatioXAUUSD = 0.3;
@@ -47,14 +47,13 @@ input double StopBuyLimitLotXAUUSD = 0.01;
 input group "EURUSD"
 input bool EnableEURUSD = true;
 input string SymbolEURUSD = "EURUSD";
-input int SlippagePointsEURUSD = 4;
+input double BaseLotEURUSD = 0.01;
 input double AtrMultiplierEURUSD = 1.3;
 input double MinAtrEURUSD = 0.00025;
 input bool SafetyModeEURUSD = true;
 input bool SafeStopModeEURUSD = false;
 input double SafeKEURUSD = 2.0;
 input double SafeSlopeKEURUSD = 0.3;
-input double BaseLotEURUSD = 0.01;
 input double ProfitBaseEURUSD = 0.00005;
 input double CoreRatioEURUSD = 0.7;
 input double FlexRatioEURUSD = 0.3;
@@ -68,14 +67,13 @@ input double StopBuyLimitLotEURUSD = 0.01;
 input group "USDJPY"
 input bool EnableUSDJPY = true;
 input string SymbolUSDJPY = "USDJPY";
-input int SlippagePointsUSDJPY = 4;
+input double BaseLotUSDJPY = 0.3;
 input double AtrMultiplierUSDJPY = 1.6;
 input double MinAtrUSDJPY = 0.05;
 input bool SafetyModeUSDJPY = true;
 input bool SafeStopModeUSDJPY = false;
 input double SafeKUSDJPY = 2.0;
 input double SafeSlopeKUSDJPY = 0.3;
-input double BaseLotUSDJPY = 0.3;
 input double ProfitBaseUSDJPY = 0.01;
 input double CoreRatioUSDJPY = 0.7;
 input double FlexRatioUSDJPY = 0.3;
@@ -89,14 +87,13 @@ input double StopBuyLimitLotUSDJPY = 0.01;
 input group "AUDUSD"
 input bool EnableAUDUSD = true;
 input string SymbolAUDUSD = "AUDUSD";
-input int SlippagePointsAUDUSD = 4;
+input double BaseLotAUDUSD = 0.01;
 input double AtrMultiplierAUDUSD = 1.2;
 input double MinAtrAUDUSD = 0.00015;
 input bool SafetyModeAUDUSD = true;
 input bool SafeStopModeAUDUSD = false;
 input double SafeKAUDUSD = 2.0;
 input double SafeSlopeKAUDUSD = 0.3;
-input double BaseLotAUDUSD = 0.01;
 input double ProfitBaseAUDUSD = 1.0;
 input double CoreRatioAUDUSD = 0.7;
 input double FlexRatioAUDUSD = 0.3;
@@ -110,14 +107,13 @@ input double StopBuyLimitLotAUDUSD = 0.01;
 input group "BTCUSD"
 input bool EnableBTCUSD = true;
 input string SymbolBTCUSD = "BTCUSD";
-input int SlippagePointsBTCUSD = 4;
+input double BaseLotBTCUSD = 0.3;
 input double AtrMultiplierBTCUSD = 2.5;
 input double MinAtrBTCUSD = 10.0;
 input bool SafetyModeBTCUSD = true;
 input bool SafeStopModeBTCUSD = false;
 input double SafeKBTCUSD = 2.0;
 input double SafeSlopeKBTCUSD = 0.3;
-input double BaseLotBTCUSD = 0.3;
 input double ProfitBaseBTCUSD = 4.0;
 input double CoreRatioBTCUSD = 0.7;
 input double FlexRatioBTCUSD = 0.3;
@@ -131,14 +127,13 @@ input double StopBuyLimitLotBTCUSD = 0.01;
 input group "ETHUSD"
 input bool EnableETHUSD = true;
 input string SymbolETHUSD = "ETHUSD";
-input int SlippagePointsETHUSD = 4;
+input double BaseLotETHUSD = 0.1;
 input double AtrMultiplierETHUSD = 1.6;
 input double MinAtrETHUSD = 1.2;
 input bool SafetyModeETHUSD = true;
 input bool SafeStopModeETHUSD = false;
 input double SafeKETHUSD = 2.0;
 input double SafeSlopeKETHUSD = 0.3;
-input double BaseLotETHUSD = 0.1;
 input double ProfitBaseETHUSD = 1.0;
 input double CoreRatioETHUSD = 0.7;
 input double FlexRatioETHUSD = 0.3;
@@ -274,7 +269,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
   if (index == 0)
   {
     params.magic_number = MagicNumber;
-    params.slippage_points = SlippagePointsXAUUSD;
+    params.slippage_points = SlippagePoints;
     params.start_delay_seconds = StartDelaySeconds;
     params.atr_multiplier = AtrMultiplierXAUUSD;
     params.min_atr = MinAtrXAUUSD;
@@ -299,7 +294,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
   else if (index == 1)
   {
     params.magic_number = MagicNumber;
-    params.slippage_points = SlippagePointsEURUSD;
+    params.slippage_points = SlippagePoints;
     params.start_delay_seconds = StartDelaySeconds;
     params.atr_multiplier = AtrMultiplierEURUSD;
     params.min_atr = MinAtrEURUSD;
@@ -324,7 +319,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
   else if (index == 2)
   {
     params.magic_number = MagicNumber;
-    params.slippage_points = SlippagePointsUSDJPY;
+    params.slippage_points = SlippagePoints;
     params.start_delay_seconds = StartDelaySeconds;
     params.atr_multiplier = AtrMultiplierUSDJPY;
     params.min_atr = MinAtrUSDJPY;
@@ -349,7 +344,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
   else if (index == 3)
   {
     params.magic_number = MagicNumber;
-    params.slippage_points = SlippagePointsAUDUSD;
+    params.slippage_points = SlippagePoints;
     params.start_delay_seconds = StartDelaySeconds;
     params.atr_multiplier = AtrMultiplierAUDUSD;
     params.min_atr = MinAtrAUDUSD;
@@ -374,7 +369,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
   else if (index == 4)
   {
     params.magic_number = MagicNumber;
-    params.slippage_points = SlippagePointsBTCUSD;
+    params.slippage_points = SlippagePoints;
     params.start_delay_seconds = StartDelaySeconds;
     params.atr_multiplier = AtrMultiplierBTCUSD;
     params.min_atr = MinAtrBTCUSD;
@@ -399,7 +394,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
   else if (index == 5)
   {
     params.magic_number = MagicNumber;
-    params.slippage_points = SlippagePointsETHUSD;
+    params.slippage_points = SlippagePoints;
     params.start_delay_seconds = StartDelaySeconds;
     params.atr_multiplier = AtrMultiplierETHUSD;
     params.min_atr = MinAtrETHUSD;
