@@ -11,6 +11,7 @@ const int kAtrBasePeriod = 14;
 const int kLotDigits = 2;
 const double kMinLot = 0.01;
 const double kMaxLot = 100.0;
+const int kCoreFlexSplitLevel = 3;
 const string kFlexComment = "NM1_FLEX";
 const string kCoreComment = "NM1_CORE";
 }
@@ -1172,24 +1173,23 @@ void ProcessSymbolTick(SymbolState &state)
       if (allow_nanpin && CanNanpin(params, state.last_buy_nanpin_time) && ask <= target + tol)
       {
         double lot = state.lot_seq[buy.level_count];
-        if (buy.level_count >= 3)
+        int next_level = buy.level_count + 1;
+        if (next_level >= NM1::kCoreFlexSplitLevel)
         {
           double core_lot = 0.0;
           double flex_lot = 0.0;
           NormalizeCoreFlexLot(params, symbol, lot, core_lot, flex_lot);
           bool opened = false;
-          int level = buy.level_count + 1;
           if (core_lot > 0.0)
-            opened |= TryOpen(state, symbol, ORDER_TYPE_BUY, core_lot, MakeLevelComment(NM1::kCoreComment, level));
+            opened |= TryOpen(state, symbol, ORDER_TYPE_BUY, core_lot, MakeLevelComment(NM1::kCoreComment, next_level));
           if (flex_lot > 0.0)
-            opened |= TryOpen(state, symbol, ORDER_TYPE_BUY, flex_lot, MakeLevelComment(NM1::kFlexComment, level));
+            opened |= TryOpen(state, symbol, ORDER_TYPE_BUY, flex_lot, MakeLevelComment(NM1::kFlexComment, next_level));
           if (opened)
             state.last_buy_nanpin_time = TimeCurrent();
         }
         else
         {
-          int level = buy.level_count + 1;
-          if (TryOpen(state, symbol, ORDER_TYPE_BUY, lot, MakeLevelComment(NM1::kCoreComment, level)))
+          if (TryOpen(state, symbol, ORDER_TYPE_BUY, lot, MakeLevelComment(NM1::kCoreComment, next_level)))
             state.last_buy_nanpin_time = TimeCurrent();
         }
       }
@@ -1218,24 +1218,23 @@ void ProcessSymbolTick(SymbolState &state)
       if (allow_nanpin && CanNanpin(params, state.last_sell_nanpin_time) && bid >= target - tol)
       {
         double lot = state.lot_seq[sell.level_count];
-        if (sell.level_count >= 3)
+        int next_level = sell.level_count + 1;
+        if (next_level >= NM1::kCoreFlexSplitLevel)
         {
           double core_lot = 0.0;
           double flex_lot = 0.0;
           NormalizeCoreFlexLot(params, symbol, lot, core_lot, flex_lot);
           bool opened = false;
-          int level = sell.level_count + 1;
           if (core_lot > 0.0)
-            opened |= TryOpen(state, symbol, ORDER_TYPE_SELL, core_lot, MakeLevelComment(NM1::kCoreComment, level));
+            opened |= TryOpen(state, symbol, ORDER_TYPE_SELL, core_lot, MakeLevelComment(NM1::kCoreComment, next_level));
           if (flex_lot > 0.0)
-            opened |= TryOpen(state, symbol, ORDER_TYPE_SELL, flex_lot, MakeLevelComment(NM1::kFlexComment, level));
+            opened |= TryOpen(state, symbol, ORDER_TYPE_SELL, flex_lot, MakeLevelComment(NM1::kFlexComment, next_level));
           if (opened)
             state.last_sell_nanpin_time = TimeCurrent();
         }
         else
         {
-          int level = sell.level_count + 1;
-          if (TryOpen(state, symbol, ORDER_TYPE_SELL, lot, MakeLevelComment(NM1::kCoreComment, level)))
+          if (TryOpen(state, symbol, ORDER_TYPE_SELL, lot, MakeLevelComment(NM1::kCoreComment, next_level)))
             state.last_sell_nanpin_time = TimeCurrent();
         }
       }
