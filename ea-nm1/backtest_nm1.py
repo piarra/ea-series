@@ -7,6 +7,7 @@ Default range: last 30 days from latest available data in data/XAUUSD.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import datetime as dt
 import gzip
@@ -26,6 +27,7 @@ TOTAL_CAPITAL = 250000.0
 START_BALANCE = 50000.0
 OPTIMIZE_START_LOT = 0.05
 OPTIMIZE_STEP = 0.01
+LEVERAGE = 400.0
 
 def transfer_funds(
     balance: float,
@@ -85,14 +87,14 @@ class NM1Params:
     magic_number: int = 202507
     slippage_points: int = 4
     start_delay_seconds: int = 5
-    atr_multiplier: float = 1.3
+    atr_multiplier: float = 1.4
     min_atr: float = 1.6
     safety_mode: bool = True
     safe_stop_mode: bool = False
     safe_k: float = 2.0
     safe_slope_k: float = 0.3
     base_lot: float = 0.03
-    profit_base: float = 1.0
+    profit_base: float = 2.0
     profit_base_level_mode: bool = False
     profit_base_level_step: float = 0.05
     profit_base_level_min: float = 0.2
@@ -959,6 +961,28 @@ def build_default_range(data_dir: str) -> Tuple[dt.datetime, dt.datetime]:
     return start, end
 
 
+def build_daily_ranges(start: dt.datetime, end: dt.datetime) -> List[Tuple[dt.datetime, dt.datetime]]:
+    ranges: List[Tuple[dt.datetime, dt.datetime]] = []
+    current = start.date()
+    while current <= end.date():
+        day_start = dt.datetime.combine(current, dt.time(0, 0, 0))
+        day_end = dt.datetime.combine(current, dt.time(23, 59, 59, 999000))
+        if current == start.date():
+            day_start = start
+        if current == end.date():
+            day_end = end
+        ranges.append((day_start, day_end))
+        current += dt.timedelta(days=1)
+    return ranges
+
+
+def build_result_path(prefix: str = "") -> str:
+    os.makedirs("result", exist_ok=True)
+    timestamp = dt.datetime.now().strftime("%Y%m%d%H%M%S%f")
+    pid = os.getpid()
+    return os.path.join("result", f"{prefix}{timestamp}_{pid}.json")
+
+
 def init_symbol_state(params: NM1Params) -> SymbolState:
     state = SymbolState(params=params)
     state.lot_seq = build_lot_sequence(params)
@@ -1120,6 +1144,12 @@ def run_backtest(
             else:
                 unrealized += (pos.price - ask) * pos.volume * CONTRACT_SIZE
         equity = balance + unrealized
+        used_margin = 0.0
+        if positions:
+            for pos in positions:
+                price = bid if pos.side == "buy" else ask
+                used_margin += pos.volume * CONTRACT_SIZE * price / LEVERAGE
+        margin_level = equity / used_margin if used_margin > 0.0 else float("inf")
         hour_peak_equity = max(hour_peak_equity, equity)
         hour_min_equity = min(hour_min_equity, equity)
 
@@ -1138,7 +1168,7 @@ def run_backtest(
                 over_50_active = True
         else:
             over_50_active = False
-        if balance > 0.0 and drawdown > balance:
+        if used_margin > 0.0 and margin_level < 0.9:
             margin_call_detected = True
             loss = balance
             stats.closed_profit -= loss
@@ -1146,7 +1176,8 @@ def run_backtest(
             if log_mode:
                 print(
                     f"{tick_time.isoformat()} "
-                    f"MARGIN_CALL loss={loss:.2f} balance=0.00"
+                    f"MARGIN_CALL loss={loss:.2f} balance=0.00 "
+                    f"margin_level={margin_level:.3f}"
                 )
             positions.clear()
             state = init_symbol_state(params)
@@ -1236,9 +1267,7 @@ def run_backtest(
                 "stop_on_margin_call": stop_on_margin_call,
             },
         }
-        os.makedirs("result", exist_ok=True)
-        timestamp = dt.datetime.now().strftime("%Y%m%d%H%M%S")
-        result_path = os.path.join("result", f"{timestamp}.json")
+        result_path = build_result_path()
         with open(result_path, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2, sort_keys=True)
         print("Backtest result")
@@ -1267,6 +1296,46 @@ def run_backtest(
             duration = level_max_duration.get(level, 0.0)
             print(f"Core close max duration L{level}: {duration:.0f}s")
     return final_funds, margin_call_detected, max_drawdown_rate
+
+
+def run_daily_backtest_task(args: Tuple[
+    str,
+    dt.datetime,
+    dt.datetime,
+    bool,
+    Optional[float],
+    int,
+    bool,
+    Optional[Dict[str, object]],
+]) -> Dict[str, object]:
+    (
+        data_dir,
+        start,
+        end,
+        debug,
+        base_lot_override,
+        fund_mode,
+        stop_on_margin_call,
+        params_override,
+    ) = args
+    final_funds, margin_call_detected, max_drawdown_rate = run_backtest(
+        data_dir,
+        start,
+        end,
+        debug,
+        base_lot_override,
+        fund_mode,
+        stop_on_margin_call=stop_on_margin_call,
+        log_mode=False,
+        params_override=params_override,
+    )
+    return {
+        "date": start.date().isoformat(),
+        "range": {"start": start.isoformat(), "end": end.isoformat()},
+        "final_funds": round(final_funds, 2),
+        "margin_call": margin_call_detected,
+        "max_drawdown_rate": round(max_drawdown_rate, 6),
+    }
 
 
 def optimize_base_lot(
@@ -1360,6 +1429,17 @@ def main() -> None:
         type=float,
         help="Minimum profit_base when level-based mode is enabled",
     )
+    parser.add_argument(
+        "--parallel-days",
+        action="store_true",
+        help="Split range by day and run backtests in parallel",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="Parallel worker count for --parallel-days",
+    )
     args = parser.parse_args()
 
     start = parse_user_datetime(args.from_dt, is_end=False)
@@ -1384,6 +1464,8 @@ def main() -> None:
         params_override = None
 
     if args.optimize_lot:
+        if args.parallel_days:
+            raise SystemExit("--parallel-days cannot be used with --optimize-lot")
         optimize_base_lot(
             args.data_dir,
             start,
@@ -1393,6 +1475,45 @@ def main() -> None:
             args.optimize_stop_on_margin_call or args.stop_on_margin_call,
             params_override=params_override,
         )
+    elif args.parallel_days:
+        ranges = build_daily_ranges(start, end)
+        worker_count = max(1, args.workers)
+        tasks = [
+            (
+                args.data_dir,
+                day_start,
+                day_end,
+                args.debug,
+                args.base_lot,
+                args.fund_mode,
+                args.stop_on_margin_call,
+                params_override,
+            )
+            for day_start, day_end in ranges
+        ]
+        results: List[Dict[str, object]] = []
+        with concurrent.futures.ProcessPoolExecutor(max_workers=worker_count) as executor:
+            futures = [executor.submit(run_daily_backtest_task, task) for task in tasks]
+            for future in concurrent.futures.as_completed(futures):
+                item = future.result()
+                results.append(item)
+                print(
+                    f"{item['date']} final_funds={item['final_funds']:.2f} "
+                    f"margin_call={int(item['margin_call'])} "
+                    f"max_drawdown_rate={item['max_drawdown_rate']:.6f}"
+                )
+        summary = {
+            "range": {"start": start.isoformat(), "end": end.isoformat()},
+            "workers": worker_count,
+            "results": results,
+        }
+        result_path = build_result_path(prefix="parallel_daily_")
+        with open(result_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, sort_keys=True)
+        print("Parallel daily backtest complete")
+        print(f"Range: {start.isoformat()} -> {end.isoformat()}")
+        print(f"Workers: {worker_count}")
+        print(f"Summary: {result_path}")
     else:
         run_backtest(
             args.data_dir,
