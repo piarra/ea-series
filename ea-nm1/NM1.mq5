@@ -1026,10 +1026,10 @@ void ProcessSymbolTick(SymbolState &state)
   if (atr_ref > 0.0)
     grid_step = atr_ref * params.atr_multiplier;
 
-  if (buy.count > 0 && state.buy_grid_step <= 0.0)
-    state.buy_grid_step = grid_step;
-  if (sell.count > 0 && state.sell_grid_step <= 0.0)
-    state.sell_grid_step = grid_step;
+  if (buy.count > 0)
+    state.buy_grid_step = MathMax(state.buy_grid_step, grid_step);
+  if (sell.count > 0)
+    state.sell_grid_step = MathMax(state.sell_grid_step, grid_step);
 
   bool allow_nanpin = true;
   bool safety_triggered = false;
