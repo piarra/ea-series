@@ -10,8 +10,9 @@ import argparse
 import csv
 import datetime as dt
 import gzip
+import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Iterator, List, Optional, Tuple
 
 # NM1 constants (from NM1.mq5)
@@ -91,7 +92,7 @@ class NM1Params:
     safe_stop_mode: bool = False
     safe_k: float = 2.0
     safe_slope_k: float = 0.3
-    base_lot: float = 0.2
+    base_lot: float = 0.04
     profit_base: float = 1.0
     core_ratio: float = 0.7
     flex_ratio: float = 0.3
@@ -1070,6 +1071,37 @@ def run_backtest(
 
     final_funds = total_funds + balance
     if log_mode:
+        result = {
+            "range": {"start": start.isoformat(), "end": end.isoformat()},
+            "ticks": total_ticks,
+            "opened_trades": stats.opened_trades,
+            "closed_trades": stats.closed_trades,
+            "realized_pnl": round(stats.closed_profit, 2),
+            "unrealized_pnl": round(unrealized, 2),
+            "open_positions": len(positions),
+            "added_funds": round(added_funds, 2),
+            "remaining_funds": round(total_funds, 2),
+            "final_funds": round(final_funds, 2),
+            "max_drawdown": {
+                "time": max_drawdown_time.isoformat() if max_drawdown_time else None,
+                "amount": round(max_drawdown_amount, 2),
+                "rate": round(max_drawdown_rate, 6),
+            },
+            "drawdown_over_50_count": over_50_count,
+            "settings": {
+                "params": asdict(params),
+                "base_lot_override": base_lot_override,
+                "fund_mode": fund_mode,
+                "total_capital": TOTAL_CAPITAL,
+                "start_balance": START_BALANCE,
+                "contract_size": CONTRACT_SIZE,
+            },
+        }
+        os.makedirs("result", exist_ok=True)
+        timestamp = dt.datetime.now().strftime("%Y%m%d%H%M%S")
+        result_path = os.path.join("result", f"{timestamp}.json")
+        with open(result_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, sort_keys=True)
         print("Backtest result")
         print(f"Range: {start.isoformat()} -> {end.isoformat()}")
         print(f"Ticks: {total_ticks}")
