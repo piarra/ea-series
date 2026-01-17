@@ -13,20 +13,19 @@ import gzip
 import json
 import os
 from dataclasses import asdict, dataclass, field
-from typing import Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 # NM1 constants (from NM1.mq5)
 K_MAX_LEVELS = 13
-K_CORE_FLEX_SPLIT_LEVEL = 3
+K_CORE_FLEX_SPLIT_LEVEL = 20 # 20 = spilitしない
 K_FLEX_COMMENT = "NM1_FLEX"
 K_CORE_COMMENT = "NM1_CORE"
 ATR_PERIOD = 14
 CONTRACT_SIZE = 100.0
 TOTAL_CAPITAL = 250000.0
 START_BALANCE = 50000.0
-OPTIMIZE_START_LOT = 0.04
+OPTIMIZE_START_LOT = 0.05
 OPTIMIZE_STEP = 0.01
-
 
 def transfer_funds(
     balance: float,
@@ -86,17 +85,17 @@ class NM1Params:
     magic_number: int = 202507
     slippage_points: int = 4
     start_delay_seconds: int = 5
-    atr_multiplier: float = 1.4
+    atr_multiplier: float = 1.3
     min_atr: float = 1.6
     safety_mode: bool = True
     safe_stop_mode: bool = False
     safe_k: float = 2.0
     safe_slope_k: float = 0.3
-    base_lot: float = 0.04
+    base_lot: float = 0.03
     profit_base: float = 1.0
     core_ratio: float = 0.7
     flex_ratio: float = 0.3
-    flex_atr_profit_multiplier: float = 0.8
+    flex_atr_profit_multiplier: float = 1.2
     max_levels: int = 12
     restart_delay_seconds: int = 1
     nanpin_sleep_seconds: int = 10
@@ -433,6 +432,8 @@ def close_positions(
     ask: float,
     tick_time: dt.datetime,
     debug: bool,
+    start_time_by_side: Dict[str, Optional[dt.datetime]],
+    level_max_duration: Dict[int, float],
 ) -> None:
     remaining = []
     for pos in positions:
@@ -443,6 +444,11 @@ def close_positions(
             profit = (bid - pos.price) * pos.volume * CONTRACT_SIZE
         else:
             profit = (pos.price - ask) * pos.volume * CONTRACT_SIZE
+        if not is_flex_comment(pos.comment):
+            start_time = start_time_by_side.get(side)
+            if start_time is not None:
+                duration = (tick_time - start_time).total_seconds()
+                level_max_duration[pos.level] = max(level_max_duration.get(pos.level, 0.0), duration)
         if debug:
             print(
                 f"{tick_time.isoformat()} "
@@ -544,6 +550,8 @@ def process_tick(
     atr_base: float,
     atr_slope: float,
     debug: bool,
+    start_time_by_side: Dict[str, Optional[dt.datetime]],
+    level_max_duration: Dict[int, float],
 ) -> None:
     params = state.params
     buy, sell = collect_basket_info(positions, bid, ask)
@@ -556,6 +564,7 @@ def process_tick(
         state.flex_buy_refs = [FlexRef() for _ in range(K_MAX_LEVELS)]
         state.buy_level_price = [0.0 for _ in range(K_MAX_LEVELS)]
         state.buy_grid_step = 0.0
+        start_time_by_side["buy"] = None
     if state.prev_sell_count > 0 and sell.count == 0:
         state.last_sell_close_time = tick_time
         state.last_sell_nanpin_time = None
@@ -564,6 +573,7 @@ def process_tick(
         state.flex_sell_refs = [FlexRef() for _ in range(K_MAX_LEVELS)]
         state.sell_level_price = [0.0 for _ in range(K_MAX_LEVELS)]
         state.sell_grid_step = 0.0
+        start_time_by_side["sell"] = None
 
     if buy.count > 0 or sell.count > 0:
         sync_level_prices_from_positions(state, positions)
@@ -584,6 +594,8 @@ def process_tick(
                     1,
                     state,
                 )
+                if start_time_by_side.get("buy") is None:
+                    start_time_by_side["buy"] = tick_time
                 open_position(
                     positions,
                     stats,
@@ -594,6 +606,8 @@ def process_tick(
                     1,
                     state,
                 )
+                if start_time_by_side.get("sell") is None:
+                    start_time_by_side["sell"] = tick_time
                 if positions:
                     state.initial_started = True
                 attempted_initial = True
@@ -632,9 +646,29 @@ def process_tick(
 
     if params.safe_stop_mode and safety_triggered:
         if buy.count > 0:
-            close_positions(positions, stats, "buy", bid, ask, tick_time, debug)
+            close_positions(
+                positions,
+                stats,
+                "buy",
+                bid,
+                ask,
+                tick_time,
+                debug,
+                start_time_by_side,
+                level_max_duration,
+            )
         if sell.count > 0:
-            close_positions(positions, stats, "sell", bid, ask, tick_time, debug)
+            close_positions(
+                positions,
+                stats,
+                "sell",
+                bid,
+                ask,
+                tick_time,
+                debug,
+                start_time_by_side,
+                level_max_duration,
+            )
         state.prev_buy_count = buy.count
         state.prev_sell_count = sell.count
         return
@@ -647,21 +681,61 @@ def process_tick(
         if state.has_partial_buy:
             target_profit = buy.volume * params.profit_base * 0.5 * CONTRACT_SIZE
             if (buy.profit + state.realized_buy_profit) >= target_profit:
-                close_positions(positions, stats, "buy", bid, ask, tick_time, debug)
+                close_positions(
+                    positions,
+                    stats,
+                    "buy",
+                    bid,
+                    ask,
+                    tick_time,
+                    debug,
+                    start_time_by_side,
+                    level_max_duration,
+                )
         else:
             target = buy.avg_price + params.profit_base
             if bid >= target:
-                close_positions(positions, stats, "buy", bid, ask, tick_time, debug)
+                close_positions(
+                    positions,
+                    stats,
+                    "buy",
+                    bid,
+                    ask,
+                    tick_time,
+                    debug,
+                    start_time_by_side,
+                    level_max_duration,
+                )
 
     if sell.count > 0:
         if state.has_partial_sell:
             target_profit = sell.volume * params.profit_base * 0.5 * CONTRACT_SIZE
             if (sell.profit + state.realized_sell_profit) >= target_profit:
-                close_positions(positions, stats, "sell", bid, ask, tick_time, debug)
+                close_positions(
+                    positions,
+                    stats,
+                    "sell",
+                    bid,
+                    ask,
+                    tick_time,
+                    debug,
+                    start_time_by_side,
+                    level_max_duration,
+                )
         else:
             target = sell.avg_price - params.profit_base
             if ask <= target:
-                close_positions(positions, stats, "sell", bid, ask, tick_time, debug)
+                close_positions(
+                    positions,
+                    stats,
+                    "sell",
+                    bid,
+                    ask,
+                    tick_time,
+                    debug,
+                    start_time_by_side,
+                    level_max_duration,
+                )
 
     if state.initial_started:
         if buy.count == 0 and can_restart(state.last_buy_close_time, tick_time, params.restart_delay_seconds):
@@ -675,6 +749,7 @@ def process_tick(
                 1,
                 state,
             )
+            start_time_by_side["buy"] = tick_time
         if sell.count == 0 and can_restart(state.last_sell_close_time, tick_time, params.restart_delay_seconds):
             open_position(
                 positions,
@@ -686,6 +761,7 @@ def process_tick(
                 1,
                 state,
             )
+            start_time_by_side["sell"] = tick_time
 
     levels = effective_max_levels(params)
     point = infer_point(bid)
@@ -876,6 +952,16 @@ def init_symbol_state(params: NM1Params) -> SymbolState:
     return state
 
 
+def apply_param_overrides(params: NM1Params, overrides: Optional[Dict[str, object]]) -> NM1Params:
+    if not overrides:
+        return params
+    for key, value in overrides.items():
+        if not hasattr(params, key):
+            raise ValueError(f"Unknown parameter override: {key}")
+        setattr(params, key, value)
+    return params
+
+
 def run_backtest(
     data_dir: str,
     start: dt.datetime,
@@ -884,8 +970,9 @@ def run_backtest(
     base_lot_override: Optional[float],
     fund_mode: int,
     log_mode: bool = True,
+    params_override: Optional[Dict[str, object]] = None,
 ) -> Tuple[float, bool]:
-    params = NM1Params()
+    params = apply_param_overrides(NM1Params(), params_override)
     if base_lot_override is not None:
         params.base_lot = base_lot_override
     state = init_symbol_state(params)
@@ -930,6 +1017,8 @@ def run_backtest(
     max_drawdown_time: Optional[dt.datetime] = None
     over_50_count = 0
     over_50_active = False
+    start_time_by_side: Dict[str, Optional[dt.datetime]] = {"buy": None, "sell": None}
+    level_max_duration: Dict[int, float] = {}
     for tick_time, bid, ask in ticks:
         tick_date = tick_time.date()
         tick_hour = tick_time.replace(minute=0, second=0, microsecond=0)
@@ -975,7 +1064,20 @@ def run_backtest(
 
         total_ticks += 1
         atr_current, atr_base, atr_slope = update_atr_state(atr_state, tick_time, bid)
-        process_tick(state, positions, stats, tick_time, bid, ask, atr_current, atr_base, atr_slope, debug)
+        process_tick(
+            state,
+            positions,
+            stats,
+            tick_time,
+            bid,
+            ask,
+            atr_current,
+            atr_base,
+            atr_slope,
+            debug,
+            start_time_by_side,
+            level_max_duration,
+        )
         realized_delta = stats.closed_profit - last_closed_profit
         if abs(realized_delta) > 1e-12:
             balance += realized_delta
@@ -1027,6 +1129,7 @@ def run_backtest(
             positions.clear()
             state = init_symbol_state(params)
             balance = 0.0
+            start_time_by_side = {"buy": None, "sell": None}
             if total_funds <= 0.0:
                 if log_mode:
                     print(
@@ -1088,6 +1191,7 @@ def run_backtest(
                 "rate": round(max_drawdown_rate, 6),
             },
             "drawdown_over_50_count": over_50_count,
+            "core_close_max_duration_sec": level_max_duration,
             "settings": {
                 "params": asdict(params),
                 "base_lot_override": base_lot_override,
@@ -1122,6 +1226,10 @@ def run_backtest(
         else:
             print("Max drawdown time: N/A amount=0.00 rate=0.00%")
         print(f"Drawdown over 50% count: {over_50_count}")
+        levels = effective_max_levels(params)
+        for level in range(1, levels + 1):
+            duration = level_max_duration.get(level, 0.0)
+            print(f"Core close max duration L{level}: {duration:.0f}s")
     return final_funds, margin_call_detected
 
 
@@ -1186,7 +1294,7 @@ def main() -> None:
     parser.add_argument(
         "--optimize-lot",
         action="store_true",
-        help="Run lot optimization from 0.04 in 0.01 steps until final funds decrease",
+        help="Run lot optimization from 0.03 in 0.01 steps until final funds decrease",
     )
     parser.add_argument(
         "--optimize-stop-on-margin-call",
