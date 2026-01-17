@@ -97,6 +97,7 @@ class NM1Params:
     flex_ratio: float = 0.3
     flex_atr_profit_multiplier: float = 1.2
     max_levels: int = 12
+    core_flex_split_level: int = K_CORE_FLEX_SPLIT_LEVEL
     restart_delay_seconds: int = 1
     nanpin_sleep_seconds: int = 10
     stop_buy_limit_price: float = 4000.0
@@ -781,7 +782,7 @@ def process_tick(
             if ask <= target + tol:
                 lot = state.lot_seq[buy.level_count]
                 next_level = buy.level_count + 1
-                if next_level >= K_CORE_FLEX_SPLIT_LEVEL:
+                if next_level >= params.core_flex_split_level:
                     core_lot, flex_lot = normalize_core_flex_lot(params, lot)
                     opened = False
                     if core_lot > 0.0:
@@ -837,7 +838,7 @@ def process_tick(
             if bid >= target - tol:
                 lot = state.lot_seq[sell.level_count]
                 next_level = sell.level_count + 1
-                if next_level >= K_CORE_FLEX_SPLIT_LEVEL:
+                if next_level >= params.core_flex_split_level:
                     core_lot, flex_lot = normalize_core_flex_lot(params, lot)
                     opened = False
                     if core_lot > 0.0:
@@ -971,7 +972,7 @@ def run_backtest(
     fund_mode: int,
     log_mode: bool = True,
     params_override: Optional[Dict[str, object]] = None,
-) -> Tuple[float, bool]:
+) -> Tuple[float, bool, float]:
     params = apply_param_overrides(NM1Params(), params_override)
     if base_lot_override is not None:
         params.base_lot = base_lot_override
@@ -1230,7 +1231,7 @@ def run_backtest(
         for level in range(1, levels + 1):
             duration = level_max_duration.get(level, 0.0)
             print(f"Core close max duration L{level}: {duration:.0f}s")
-    return final_funds, margin_call_detected
+    return final_funds, margin_call_detected, max_drawdown_rate
 
 
 def optimize_base_lot(
@@ -1246,7 +1247,7 @@ def optimize_base_lot(
     best_lot = lot
     best_final = -1.0
     while True:
-        final_funds, margin_call_detected = run_backtest(
+        final_funds, margin_call_detected, _max_drawdown_rate = run_backtest(
             data_dir,
             start,
             end,
@@ -1323,7 +1324,14 @@ def main() -> None:
             args.optimize_stop_on_margin_call,
         )
     else:
-        run_backtest(args.data_dir, start, end, args.debug, args.base_lot, args.fund_mode)
+        run_backtest(
+            args.data_dir,
+            start,
+            end,
+            args.debug,
+            args.base_lot,
+            args.fund_mode,
+        )
 
 
 if __name__ == "__main__":

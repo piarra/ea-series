@@ -50,19 +50,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--atr-multiplier-max", type=float, default=1.3)
     parser.add_argument("--min-atr-min", type=float, default=0.5)
     parser.add_argument("--min-atr-max", type=float, default=3.0)
-    parser.add_argument("--safe-k-min", type=float, default=1.0)
-    parser.add_argument("--safe-k-max", type=float, default=4.0)
-    parser.add_argument("--safe-slope-k-min", type=float, default=0.1)
-    parser.add_argument("--safe-slope-k-max", type=float, default=1.0)
-    parser.add_argument("--profit-base-min", type=float, default=0.5)
-    parser.add_argument("--profit-base-max", type=float, default=2.0)
+    parser.add_argument("--safe-k-min", type=float, default=2.0)
+    parser.add_argument("--safe-k-max", type=float, default=2.0)
+    parser.add_argument("--safe-slope-k-min", type=float, default=0.3)
+    parser.add_argument("--safe-slope-k-max", type=float, default=0.3)
+    parser.add_argument("--profit-base-min", type=float, default=1.4)
+    parser.add_argument("--profit-base-max", type=float, default=3.0)
     parser.add_argument("--profit-base-step", type=float, default=0.1)
-    parser.add_argument("--core-ratio-min", type=float, default=0.5)
-    parser.add_argument("--core-ratio-max", type=float, default=0.9)
-    parser.add_argument("--flex-atr-profit-mult-min", type=float, default=0.8)
-    parser.add_argument("--flex-atr-profit-mult-max", type=float, default=2.0)
-    parser.add_argument("--max-levels-min", type=int, default=6)
+    parser.add_argument("--core-ratio-min", type=float, default=1)
+    parser.add_argument("--core-ratio-max", type=float, default=1)
+    parser.add_argument("--flex-atr-profit-mult-min", type=float, default=1.0)
+    parser.add_argument("--flex-atr-profit-mult-max", type=float, default=1.0)
+    parser.add_argument("--max-levels-min", type=int, default=5)
     parser.add_argument("--max-levels-max", type=int, default=12)
+    parser.add_argument("--core-flex-split-level-min", type=int, default=4)
+    parser.add_argument("--core-flex-split-level-max", type=int, default=4)
 
     return parser.parse_args()
 
@@ -82,6 +84,10 @@ def main() -> None:
     max_levels_max = min(args.max_levels_max, K_MAX_LEVELS)
     if args.max_levels_min > max_levels_max:
         raise SystemExit("--max-levels-min must be <= --max-levels-max")
+    if args.core_flex_split_level_min > args.core_flex_split_level_max:
+        raise SystemExit(
+            "--core-flex-split-level-min must be <= --core-flex-split-level-max"
+        )
 
     def objective(trial: optuna.Trial) -> float:
         params: Dict[str, object] = {}
@@ -138,12 +144,18 @@ def main() -> None:
             args.max_levels_min,
             max_levels_max,
         )
+        params["core_flex_split_level"] = trial.suggest_int(
+            "core_flex_split_level",
+            args.core_flex_split_level_min,
+            args.core_flex_split_level_max,
+            step=1,
+        )
         if args.optimize_safety_mode:
             params["safety_mode"] = trial.suggest_categorical(
                 "safety_mode", [True, False]
             )
 
-        final_funds, margin_call = run_backtest(
+        final_funds, margin_call, max_drawdown_rate = run_backtest(
             args.data_dir,
             start,
             end,
@@ -154,10 +166,11 @@ def main() -> None:
             params_override=params,
         )
         profit = final_funds - TOTAL_CAPITAL
-        if margin_call:
+        if margin_call or max_drawdown_rate >= 0.8:
             profit = 0.0
         trial.set_user_attr("final_funds", final_funds)
         trial.set_user_attr("margin_call", margin_call)
+        trial.set_user_attr("max_drawdown_rate", max_drawdown_rate)
         return profit
 
     sampler = optuna.samplers.TPESampler(seed=args.seed)
@@ -176,6 +189,7 @@ def main() -> None:
     print(f"  params: {best.params}")
     print(f"  final_funds: {best.user_attrs.get('final_funds')}")
     print(f"  margin_call: {best.user_attrs.get('margin_call')}")
+    print(f"  max_drawdown_rate: {best.user_attrs.get('max_drawdown_rate')}")
 
 
 if __name__ == "__main__":
