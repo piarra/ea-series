@@ -17,7 +17,7 @@ from typing import Dict, Iterator, List, Optional, Tuple
 
 # NM1 constants (from NM1.mq5)
 K_MAX_LEVELS = 13
-K_CORE_FLEX_SPLIT_LEVEL = 20 # 20 = spilitしない
+K_CORE_FLEX_SPLIT_LEVEL = 4 # 20 = spilitしない
 K_FLEX_COMMENT = "NM1_FLEX"
 K_CORE_COMMENT = "NM1_CORE"
 ATR_PERIOD = 14
@@ -88,7 +88,7 @@ class NM1Params:
     atr_multiplier: float = 1.3
     min_atr: float = 1.6
     safety_mode: bool = True
-    safe_stop_mode: bool = True
+    safe_stop_mode: bool = False
     safe_k: float = 2.0
     safe_slope_k: float = 0.3
     base_lot: float = 0.03
@@ -174,6 +174,7 @@ class Stats:
     closed_profit: float = 0.0
     closed_trades: int = 0
     opened_trades: int = 0
+    total_open_lots: float = 0.0
 
 
 @dataclass
@@ -429,6 +430,7 @@ def open_position(
         return
     positions.append(Position(side=side, volume=volume, price=price, comment=comment, level=level))
     stats.opened_trades += 1
+    stats.total_open_lots += volume
     if side == "buy" and not is_flex_comment(comment):
         if state.buy_level_price[level - 1] <= 0.0:
             state.buy_level_price[level - 1] = price
@@ -984,6 +986,7 @@ def run_backtest(
     debug: bool,
     base_lot_override: Optional[float],
     fund_mode: int,
+    stop_on_margin_call: bool = False,
     log_mode: bool = True,
     params_override: Optional[Dict[str, object]] = None,
 ) -> Tuple[float, bool, float]:
@@ -1015,7 +1018,8 @@ def run_backtest(
             f"start_balance={START_BALANCE:.2f} "
             f"total_capital={TOTAL_CAPITAL:.2f} "
             f"reserve_funds={reserve_funds:.2f} "
-            f"fund_mode={fund_mode}"
+            f"fund_mode={fund_mode} "
+            f"stop_on_margin_call={int(stop_on_margin_call)}"
         )
 
     ticks = iter_ticks(data_dir, start, end)
@@ -1148,6 +1152,17 @@ def run_backtest(
             state = init_symbol_state(params)
             balance = 0.0
             start_time_by_side = {"buy": None, "sell": None}
+            if stop_on_margin_call:
+                if log_mode:
+                    print(
+                        f"{tick_time.isoformat()} "
+                        f"MARGIN_CALL_STOP remaining_funds={total_funds:.2f} backtest_stop"
+                    )
+                unrealized = 0.0
+                equity = balance
+                last_balance = balance
+                last_equity = equity
+                break
             if total_funds <= 0.0:
                 if log_mode:
                     print(
@@ -1197,6 +1212,7 @@ def run_backtest(
             "ticks": total_ticks,
             "opened_trades": stats.opened_trades,
             "closed_trades": stats.closed_trades,
+            "total_open_lots": round(stats.total_open_lots, 2),
             "realized_pnl": round(stats.closed_profit, 2),
             "unrealized_pnl": round(unrealized, 2),
             "open_positions": len(positions),
@@ -1217,6 +1233,7 @@ def run_backtest(
                 "total_capital": TOTAL_CAPITAL,
                 "start_balance": START_BALANCE,
                 "contract_size": CONTRACT_SIZE,
+                "stop_on_margin_call": stop_on_margin_call,
             },
         }
         os.makedirs("result", exist_ok=True)
@@ -1229,6 +1246,7 @@ def run_backtest(
         print(f"Ticks: {total_ticks}")
         print(f"Opened trades: {stats.opened_trades}")
         print(f"Closed trades: {stats.closed_trades}")
+        print(f"Total open lots: {stats.total_open_lots:.2f}")
         print(f"Realized PnL: {stats.closed_profit:.2f}")
         print(f"Unrealized PnL: {unrealized:.2f}")
         print(f"Open positions: {len(positions)}")
@@ -1272,6 +1290,7 @@ def optimize_base_lot(
             debug,
             lot,
             fund_mode,
+            stop_on_margin_call=stop_on_margin_call,
             log_mode=False,
             params_override=params_override,
         )
@@ -1322,6 +1341,11 @@ def main() -> None:
         help="Stop lot optimization when a margin call occurs",
     )
     parser.add_argument(
+        "--stop-on-margin-call",
+        action="store_true",
+        help="Stop backtest when a margin call occurs",
+    )
+    parser.add_argument(
         "--profit-base-level-mode",
         action="store_true",
         help="Enable profit_base reduction as nanpin level increases",
@@ -1366,7 +1390,7 @@ def main() -> None:
             end,
             args.debug,
             args.fund_mode,
-            args.optimize_stop_on_margin_call,
+            args.optimize_stop_on_margin_call or args.stop_on_margin_call,
             params_override=params_override,
         )
     else:
@@ -1377,6 +1401,7 @@ def main() -> None:
             args.debug,
             args.base_lot,
             args.fund_mode,
+            stop_on_margin_call=args.stop_on_margin_call,
             params_override=params_override,
         )
 
