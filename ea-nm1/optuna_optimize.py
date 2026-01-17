@@ -57,6 +57,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profit-base-min", type=float, default=1.4)
     parser.add_argument("--profit-base-max", type=float, default=3.0)
     parser.add_argument("--profit-base-step", type=float, default=0.1)
+    parser.add_argument("--profit-base-level-step-min", type=float, default=0.0)
+    parser.add_argument("--profit-base-level-step-max", type=float, default=0.2)
+    parser.add_argument("--profit-base-level-min-min", type=float, default=0.0)
+    parser.add_argument("--profit-base-level-min-max", type=float, default=1.0)
     parser.add_argument("--core-ratio-min", type=float, default=1)
     parser.add_argument("--core-ratio-max", type=float, default=1)
     parser.add_argument("--flex-atr-profit-mult-min", type=float, default=1.0)
@@ -126,6 +130,19 @@ def main() -> None:
             args.profit_base_max,
             step=args.profit_base_step if args.profit_base_step > 0 else None,
         )
+        params["profit_base_level_mode"] = trial.suggest_categorical(
+            "profit_base_level_mode", [True, False]
+        )
+        params["profit_base_level_step"] = trial.suggest_float(
+            "profit_base_level_step",
+            args.profit_base_level_step_min,
+            args.profit_base_level_step_max,
+        )
+        params["profit_base_level_min"] = trial.suggest_float(
+            "profit_base_level_min",
+            args.profit_base_level_min_min,
+            args.profit_base_level_min_max,
+        )
         core_ratio = trial.suggest_float(
             "core_ratio",
             args.core_ratio_min,
@@ -173,6 +190,20 @@ def main() -> None:
         trial.set_user_attr("max_drawdown_rate", max_drawdown_rate)
         return profit
 
+    def log_best(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        if study.best_trial.number != trial.number:
+            return
+        max_dd_rate = trial.user_attrs.get("max_drawdown_rate")
+        if isinstance(max_dd_rate, (int, float)):
+            max_dd_text = f"{max_dd_rate * 100:.2f}%"
+        else:
+            max_dd_text = "N/A"
+        print(
+            f"best is trial {trial.number} with value: {trial.value}. "
+            f"max_dd_percent: {max_dd_text}"
+        )
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
     sampler = optuna.samplers.TPESampler(seed=args.seed)
     study = optuna.create_study(
         study_name=args.study_name,
@@ -181,7 +212,13 @@ def main() -> None:
         load_if_exists=bool(args.storage),
         direction="maximize",
     )
-    study.optimize(objective, n_trials=args.trials, n_jobs=args.jobs, show_progress_bar=True)
+    study.optimize(
+        objective,
+        n_trials=args.trials,
+        n_jobs=args.jobs,
+        show_progress_bar=True,
+        callbacks=[log_best],
+    )
 
     best = study.best_trial
     print("Best trial")
@@ -189,7 +226,10 @@ def main() -> None:
     print(f"  params: {best.params}")
     print(f"  final_funds: {best.user_attrs.get('final_funds')}")
     print(f"  margin_call: {best.user_attrs.get('margin_call')}")
-    print(f"  max_drawdown_rate: {best.user_attrs.get('max_drawdown_rate')}")
+    max_dd_rate = best.user_attrs.get("max_drawdown_rate")
+    print(f"  max_drawdown_rate: {max_dd_rate}")
+    if isinstance(max_dd_rate, (int, float)):
+        print(f"  max_dd_percent: {max_dd_rate * 100:.2f}")
 
 
 if __name__ == "__main__":

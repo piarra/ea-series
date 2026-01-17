@@ -88,11 +88,14 @@ class NM1Params:
     atr_multiplier: float = 1.3
     min_atr: float = 1.6
     safety_mode: bool = True
-    safe_stop_mode: bool = False
+    safe_stop_mode: bool = True
     safe_k: float = 2.0
     safe_slope_k: float = 0.3
     base_lot: float = 0.03
     profit_base: float = 1.0
+    profit_base_level_mode: bool = False
+    profit_base_level_step: float = 0.05
+    profit_base_level_min: float = 0.2
     core_ratio: float = 0.7
     flex_ratio: float = 0.3
     flex_atr_profit_multiplier: float = 1.2
@@ -211,6 +214,15 @@ def normalize_core_flex_lot(params: NM1Params, lot: float) -> Tuple[float, float
         flex = 0.0
         core = normalize_lot(lot)
     return core, flex
+
+
+def effective_profit_base(params: NM1Params, level_count: int) -> float:
+    if not params.profit_base_level_mode or level_count <= 1:
+        return params.profit_base
+    step = max(0.0, params.profit_base_level_step)
+    min_base = min(params.profit_base, max(0.0, params.profit_base_level_min))
+    adjusted = params.profit_base - step * (level_count - 1)
+    return max(min_base, adjusted)
 
 
 def effective_max_levels(params: NM1Params) -> int:
@@ -679,8 +691,9 @@ def process_tick(
     process_flex_partial(state, positions, stats, bid, ask, atr_now, tick_time, debug)
 
     if buy.count > 0:
+        buy_profit_base = effective_profit_base(params, buy.level_count)
         if state.has_partial_buy:
-            target_profit = buy.volume * params.profit_base * 0.5 * CONTRACT_SIZE
+            target_profit = buy.volume * buy_profit_base * 0.5 * CONTRACT_SIZE
             if (buy.profit + state.realized_buy_profit) >= target_profit:
                 close_positions(
                     positions,
@@ -694,7 +707,7 @@ def process_tick(
                     level_max_duration,
                 )
         else:
-            target = buy.avg_price + params.profit_base
+            target = buy.avg_price + buy_profit_base
             if bid >= target:
                 close_positions(
                     positions,
@@ -709,8 +722,9 @@ def process_tick(
                 )
 
     if sell.count > 0:
+        sell_profit_base = effective_profit_base(params, sell.level_count)
         if state.has_partial_sell:
-            target_profit = sell.volume * params.profit_base * 0.5 * CONTRACT_SIZE
+            target_profit = sell.volume * sell_profit_base * 0.5 * CONTRACT_SIZE
             if (sell.profit + state.realized_sell_profit) >= target_profit:
                 close_positions(
                     positions,
@@ -724,7 +738,7 @@ def process_tick(
                     level_max_duration,
                 )
         else:
-            target = sell.avg_price - params.profit_base
+            target = sell.avg_price - sell_profit_base
             if ask <= target:
                 close_positions(
                     positions,
@@ -993,6 +1007,9 @@ def run_backtest(
             f"base_lot={params.base_lot:.2f} "
             f"max_nanpin_lot={max_lot:.2f} "
             f"base_profit={params.profit_base:.8f} "
+            f"profit_level_mode={int(params.profit_base_level_mode)} "
+            f"profit_level_step={params.profit_base_level_step:.4f} "
+            f"profit_level_min={params.profit_base_level_min:.4f} "
             f"profit_amount={profit_amount:.2f} "
             f"contract_size={CONTRACT_SIZE:.0f} "
             f"start_balance={START_BALANCE:.2f} "
@@ -1241,6 +1258,7 @@ def optimize_base_lot(
     debug: bool,
     fund_mode: int,
     stop_on_margin_call: bool,
+    params_override: Optional[Dict[str, object]] = None,
 ) -> None:
     lot = OPTIMIZE_START_LOT
     prev_final: Optional[float] = None
@@ -1255,6 +1273,7 @@ def optimize_base_lot(
             lot,
             fund_mode,
             log_mode=False,
+            params_override=params_override,
         )
         print(f"Optimize lot={lot:.2f} final_funds={final_funds:.2f}")
         if final_funds > best_final:
@@ -1302,6 +1321,21 @@ def main() -> None:
         action="store_true",
         help="Stop lot optimization when a margin call occurs",
     )
+    parser.add_argument(
+        "--profit-base-level-mode",
+        action="store_true",
+        help="Enable profit_base reduction as nanpin level increases",
+    )
+    parser.add_argument(
+        "--profit-base-level-step",
+        type=float,
+        help="Decrease amount per nanpin level for profit_base",
+    )
+    parser.add_argument(
+        "--profit-base-level-min",
+        type=float,
+        help="Minimum profit_base when level-based mode is enabled",
+    )
     args = parser.parse_args()
 
     start = parse_user_datetime(args.from_dt, is_end=False)
@@ -1314,6 +1348,17 @@ def main() -> None:
     if start > end:
         raise SystemExit("--from must be <= --to")
 
+    params_override: Dict[str, object] = {}
+    if args.profit_base_level_mode:
+        params_override["profit_base_level_mode"] = True
+    if args.profit_base_level_step is not None:
+        params_override["profit_base_level_step"] = args.profit_base_level_step
+    if args.profit_base_level_min is not None:
+        params_override["profit_base_level_min"] = args.profit_base_level_min
+
+    if not params_override:
+        params_override = None
+
     if args.optimize_lot:
         optimize_base_lot(
             args.data_dir,
@@ -1322,6 +1367,7 @@ def main() -> None:
             args.debug,
             args.fund_mode,
             args.optimize_stop_on_margin_call,
+            params_override=params_override,
         )
     else:
         run_backtest(
@@ -1331,6 +1377,7 @@ def main() -> None:
             args.debug,
             args.base_lot,
             args.fund_mode,
+            params_override=params_override,
         )
 
 
