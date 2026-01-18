@@ -48,8 +48,8 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--atr-multiplier-min", type=float, default=1.3)
     parser.add_argument("--atr-multiplier-max", type=float, default=1.3)
-    parser.add_argument("--min-atr-min", type=float, default=0.5)
-    parser.add_argument("--min-atr-max", type=float, default=3.0)
+    parser.add_argument("--min-atr-min", type=float, default=1.4)
+    parser.add_argument("--min-atr-max", type=float, default=2.1)
     parser.add_argument("--safe-k-min", type=float, default=2.0)
     parser.add_argument("--safe-k-max", type=float, default=2.0)
     parser.add_argument("--safe-slope-k-min", type=float, default=0.3)
@@ -57,15 +57,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profit-base-min", type=float, default=1.4)
     parser.add_argument("--profit-base-max", type=float, default=3.0)
     parser.add_argument("--profit-base-step", type=float, default=0.1)
-    parser.add_argument("--profit-base-level-step-min", type=float, default=0.0)
+    parser.add_argument("--profit-base-level-step-min", type=float, default=0.2)
     parser.add_argument("--profit-base-level-step-max", type=float, default=0.2)
-    parser.add_argument("--profit-base-level-min-min", type=float, default=0.0)
+    parser.add_argument("--profit-base-level-min-min", type=float, default=1.0)
     parser.add_argument("--profit-base-level-min-max", type=float, default=1.0)
     parser.add_argument("--core-ratio-min", type=float, default=1)
     parser.add_argument("--core-ratio-max", type=float, default=1)
     parser.add_argument("--flex-atr-profit-mult-min", type=float, default=1.0)
     parser.add_argument("--flex-atr-profit-mult-max", type=float, default=1.0)
-    parser.add_argument("--max-levels-min", type=int, default=5)
+    parser.add_argument("--max-levels-min", type=int, default=12)
     parser.add_argument("--max-levels-max", type=int, default=12)
     parser.add_argument("--core-flex-split-level-min", type=int, default=4)
     parser.add_argument("--core-flex-split-level-max", type=int, default=4)
@@ -106,11 +106,13 @@ def main() -> None:
             "atr_multiplier",
             args.atr_multiplier_min,
             args.atr_multiplier_max,
+            step=0.01,
         )
         params["min_atr"] = trial.suggest_float(
             "min_atr",
             args.min_atr_min,
             args.min_atr_max,
+            step=0.01,
         )
         params["safe_k"] = trial.suggest_float(
             "safe_k",
@@ -130,9 +132,10 @@ def main() -> None:
             args.profit_base_max,
             step=args.profit_base_step if args.profit_base_step > 0 else None,
         )
-        params["profit_base_level_mode"] = trial.suggest_categorical(
-            "profit_base_level_mode", [True, False]
-        )
+        params["profit_base_level_mode"] = False
+        #trial.suggest_categorical(
+        #    "profit_base_level_mode", [True, False] # True, False
+        #)
         params["profit_base_level_step"] = trial.suggest_float(
             "profit_base_level_step",
             args.profit_base_level_step_min,
