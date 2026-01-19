@@ -351,7 +351,16 @@ void BuildSymbols()
 
 bool IsTradingTime()
 {
-  return true;
+  datetime now_gmt = TimeGMT();
+  if (now_gmt == 0)
+    now_gmt = TimeCurrent();
+  MqlDateTime dt;
+  TimeToStruct(now_gmt + 9 * 3600, dt);
+  int minutes = dt.hour * 60 + dt.min;
+  int stop_start = 6 * 60 + 30;
+  int stop_end = 8 * 60 + 15;
+  bool in_stop = (minutes >= stop_start && minutes < stop_end);
+  return !in_stop;
 }
 
 double NormalizeLot(const string symbol, double lot)
@@ -967,6 +976,42 @@ void ProcessSymbolTick(SymbolState &state)
     return;
   double bid = t.bid;
   double ask = t.ask;
+  bool is_trading_time = IsTradingTime();
+  if (!is_trading_time)
+  {
+    double value_per_unit = PriceValuePerUnit(symbol);
+    double threshold = -0.5 * params.profit_base;
+    if (buy.count > 0)
+    {
+      bool should_close = false;
+      if (value_per_unit > 0.0)
+      {
+        double threshold_profit = buy.volume * threshold * value_per_unit;
+        should_close = (buy.profit + state.realized_buy_profit) >= threshold_profit;
+      }
+      else
+      {
+        should_close = (bid - buy.avg_price) >= threshold;
+      }
+      if (should_close)
+        CloseBasket(state, POSITION_TYPE_BUY);
+    }
+    if (sell.count > 0)
+    {
+      bool should_close = false;
+      if (value_per_unit > 0.0)
+      {
+        double threshold_profit = sell.volume * threshold * value_per_unit;
+        should_close = (sell.profit + state.realized_sell_profit) >= threshold_profit;
+      }
+      else
+      {
+        should_close = (sell.avg_price - ask) >= threshold;
+      }
+      if (should_close)
+        CloseBasket(state, POSITION_TYPE_SELL);
+    }
+  }
   if (ShouldStopOnBuyLimit(params, symbol, params.stop_buy_limit_price, params.stop_buy_limit_lot))
   {
     PrintFormat("StopBuyLimit triggered: %s buy limit %.2f lots at price %.2f detected.",
@@ -1002,7 +1047,7 @@ void ProcessSymbolTick(SymbolState &state)
   bool attempted_initial = false;
   if (!state.initial_started && (TimeCurrent() - state.start_time) >= params.start_delay_seconds)
   {
-    if (buy.count == 0 && sell.count == 0 && IsTradingTime())
+    if (buy.count == 0 && sell.count == 0 && is_trading_time)
     {
       bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
       if (opened_buy && state.buy_level_price[0] <= 0.0)
@@ -1136,7 +1181,7 @@ void ProcessSymbolTick(SymbolState &state)
     }
   }
 
-  if (IsTradingTime())
+  if (is_trading_time)
   {
     if (state.initial_started)
     {
