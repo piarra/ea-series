@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.21"
+#property version   "1.22"
 
 #include <Trade/Trade.mqh>
 
@@ -958,6 +958,15 @@ void ProcessSymbolTick(SymbolState &state)
   NM1Params params = state.params;
   BasketInfo buy, sell;
   CollectBasketInfo(state, buy, sell);
+  MqlTick t;
+  if (!SymbolInfoTick(symbol, t))
+    return;
+  if ((long)TimeCurrent() - (long)t.time > 2)
+    return;
+  if (t.bid <= 0.0 || t.ask <= 0.0 || t.ask < t.bid)
+    return;
+  double bid = t.bid;
+  double ask = t.ask;
   if (ShouldStopOnBuyLimit(params, symbol, params.stop_buy_limit_price, params.stop_buy_limit_lot))
   {
     PrintFormat("StopBuyLimit triggered: %s buy limit %.2f lots at price %.2f detected.",
@@ -995,8 +1004,6 @@ void ProcessSymbolTick(SymbolState &state)
   {
     if (buy.count == 0 && sell.count == 0 && IsTradingTime())
     {
-      double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
-      double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
       bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
       if (opened_buy && state.buy_level_price[0] <= 0.0)
         state.buy_level_price[0] = ask;
@@ -1017,8 +1024,6 @@ void ProcessSymbolTick(SymbolState &state)
     return;
   }
 
-  double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
-  double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
   double grid_step = 0.0;
   double atr_base = GetAtrBase(state);
   double atr_ref = atr_base;
