@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.22"
+#property version   "1.23"
 
 #include <Trade/Trade.mqh>
 
@@ -11,7 +11,7 @@ const int kAtrBasePeriod = 14;
 const int kLotDigits = 2;
 const double kMinLot = 0.01;
 const double kMaxLot = 100.0;
-const int kCoreFlexSplitLevel = 20;
+const int kCoreFlexSplitLevel = 100; # 100 = no split
 const string kFlexComment = "NM1_FLEX";
 const string kCoreComment = "NM1_CORE";
 }
