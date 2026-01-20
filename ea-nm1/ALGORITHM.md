@@ -29,12 +29,19 @@ NM1.mq5 実装アルゴリズム
 追加エントリー (ナンピン)
 - グリッド幅は `max(ATR_base, MinAtr) * AtrMultiplier`。
   - `ATR_base = SMA(ATR(14)[5], 50)` (5本前から50本分の平均)。
+  - buy/sell それぞれで `grid_step` の最大値を保持し、既存ポジションがある間は
+    グリッド幅が縮まない (実測間隔 or ATRベースで大きい方を採用)。
 - 既存ポジションがある間は、直近レベルの価格からグリッド幅分ずらしたターゲット価格で追加。
   - 初回のターゲットは buy は `buy.min_price - grid_step`、sell は `sell.max_price + grid_step`。
   - 以降は前回のレベル価格を基準に更新する。
 - buy: `ask <= target_price` で追加。
 - sell: `bid >= target_price` で追加。
 - 段数上限は `MaxLevels`。
+  - `AdxPeriod` の ADX/DI を監視し、`ADX >= AdxMaxForNanpin` かつ
+    `DIギャップ >= DiGapMin` の方向はナンピン停止。
+  - ADX が低下中かつ DI ギャップが縮小している場合は停止解除。
+  - 停止中に価格がグリッド幅分進んだら、段数スキップとして
+    目標レベルを先送りし、ナンピン再開時に厳格な間隔を維持する。
   - `SafetyMode = true` の場合、`ATR(14) >= ATR_base * SafeK` または
     `ATR(14) の傾き > ATR_base * SafeSlopeK` の間は
     ナンピン追加を停止する (初回エントリーや決済は継続)。
