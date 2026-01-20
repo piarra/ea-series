@@ -1,5 +1,7 @@
 #property strict
-#property version   "1.23"
+#property version   "1.24"
+
+// v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 
 #include <Trade/Trade.mqh>
 
@@ -33,6 +35,9 @@ input double FlexRatio = 0;
 input double FlexAtrProfitMultiplier = 0.8;
 input int RestartDelaySeconds = 1;
 input int NanpinSleepSeconds = 10;
+input int AdxPeriod = 14;
+input double AdxMaxForNanpin = 30.0;
+input double DiGapMin = 12.0;
 
 input group "XAUUSD"
 input bool EnableXAUUSD = true;
@@ -116,6 +121,9 @@ struct NM1Params
   double core_ratio;
   double flex_ratio;
   double flex_atr_profit_multiplier;
+  int adx_period;
+  double adx_max_for_nanpin;
+  double di_gap_min;
   int max_levels;
   int restart_delay_seconds;
   int nanpin_sleep_seconds;
@@ -170,11 +178,20 @@ struct SymbolState
   int prev_buy_count;
   int prev_sell_count;
   int atr_handle;
+  int adx_handle;
   bool safety_active;
   double realized_buy_profit;
   double realized_sell_profit;
   bool has_partial_buy;
   bool has_partial_sell;
+  bool buy_stop_active;
+  bool sell_stop_active;
+  int buy_skip_levels;
+  int sell_skip_levels;
+  double buy_skip_distance;
+  double sell_skip_distance;
+  double buy_skip_price;
+  double sell_skip_price;
 };
 
 SymbolState symbols[NM1::kMaxSymbols];
@@ -188,6 +205,9 @@ void DisableSymbol(SymbolState &state, const string reason)
   if (state.atr_handle != INVALID_HANDLE)
     IndicatorRelease(state.atr_handle);
   state.atr_handle = INVALID_HANDLE;
+  if (state.adx_handle != INVALID_HANDLE)
+    IndicatorRelease(state.adx_handle);
+  state.adx_handle = INVALID_HANDLE;
   if (StringLen(reason) > 0)
     PrintFormat("Symbol disabled: %s (%s)", state.broker_symbol, reason);
 }
@@ -207,11 +227,20 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.prev_buy_count = 0;
   state.prev_sell_count = 0;
   state.atr_handle = INVALID_HANDLE;
+  state.adx_handle = INVALID_HANDLE;
   state.safety_active = false;
   state.realized_buy_profit = 0.0;
   state.realized_sell_profit = 0.0;
   state.has_partial_buy = false;
   state.has_partial_sell = false;
+  state.buy_stop_active = false;
+  state.sell_stop_active = false;
+  state.buy_skip_levels = 0;
+  state.sell_skip_levels = 0;
+  state.buy_skip_distance = 0.0;
+  state.sell_skip_distance = 0.0;
+  state.buy_skip_price = 0.0;
+  state.sell_skip_price = 0.0;
   ClearFlexRefs(state.flex_buy_refs);
   ClearFlexRefs(state.flex_sell_refs);
   ClearLevelPrices(state.buy_level_price);
@@ -232,6 +261,9 @@ void ApplyCommonParams(NM1Params &params)
   params.core_ratio = CoreRatio;
   params.flex_ratio = FlexRatio;
   params.flex_atr_profit_multiplier = FlexAtrProfitMultiplier;
+  params.adx_period = AdxPeriod;
+  params.adx_max_for_nanpin = AdxMaxForNanpin;
+  params.di_gap_min = DiGapMin;
   params.restart_delay_seconds = RestartDelaySeconds;
   params.nanpin_sleep_seconds = NanpinSleepSeconds;
   params.use_async_close = UseAsyncClose;
@@ -576,6 +608,9 @@ int OnInit()
       symbols[i].enabled = false;
       continue;
     }
+    symbols[i].adx_handle = iADX(symbols[i].broker_symbol, _Period, symbols[i].params.adx_period);
+    if (symbols[i].adx_handle == INVALID_HANDLE)
+      PrintFormat("ADX handle failed: %s", symbols[i].broker_symbol);
     active++;
   }
   if (active == 0)
@@ -601,6 +636,9 @@ void OnDeinit(const int reason)
     if (symbols[i].atr_handle != INVALID_HANDLE)
       IndicatorRelease(symbols[i].atr_handle);
     symbols[i].atr_handle = INVALID_HANDLE;
+    if (symbols[i].adx_handle != INVALID_HANDLE)
+      IndicatorRelease(symbols[i].adx_handle);
+    symbols[i].adx_handle = INVALID_HANDLE;
   }
 }
 
@@ -637,6 +675,34 @@ double GetAtrSlope(SymbolState &state)
     return 0.0;
 
   return buf[0] - buf[2];
+}
+
+bool GetAdxSnapshot(SymbolState &state,
+                    double &adx_now,
+                    double &adx_prev,
+                    double &di_plus_now,
+                    double &di_plus_prev,
+                    double &di_minus_now,
+                    double &di_minus_prev)
+{
+  if (state.adx_handle == INVALID_HANDLE)
+    return false;
+  double adx_buf[2];
+  double plus_buf[2];
+  double minus_buf[2];
+  if (CopyBuffer(state.adx_handle, 0, 0, 2, adx_buf) < 2)
+    return false;
+  if (CopyBuffer(state.adx_handle, 1, 0, 2, plus_buf) < 2)
+    return false;
+  if (CopyBuffer(state.adx_handle, 2, 0, 2, minus_buf) < 2)
+    return false;
+  adx_now = adx_buf[0];
+  adx_prev = adx_buf[1];
+  di_plus_now = plus_buf[0];
+  di_plus_prev = plus_buf[1];
+  di_minus_now = minus_buf[0];
+  di_minus_prev = minus_buf[1];
+  return true;
 }
 
 void CollectBasketInfo(const SymbolState &state, BasketInfo &buy, BasketInfo &sell)
@@ -719,6 +785,38 @@ void CollectBasketInfo(const SymbolState &state, BasketInfo &buy, BasketInfo &se
     buy.avg_price = buy_value / buy.volume;
   if (sell.volume > 0.0)
     sell.avg_price = sell_value / sell.volume;
+}
+
+double EnsureBuyTarget(SymbolState &state, const BasketInfo &buy, double step, int level_index)
+{
+  double target = state.buy_level_price[level_index];
+  if (target <= 0.0)
+  {
+    double base = 0.0;
+    if (level_index > 0)
+      base = state.buy_level_price[level_index - 1];
+    if (base <= 0.0)
+      base = buy.min_price;
+    target = base - step;
+    state.buy_level_price[level_index] = target;
+  }
+  return target;
+}
+
+double EnsureSellTarget(SymbolState &state, const BasketInfo &sell, double step, int level_index)
+{
+  double target = state.sell_level_price[level_index];
+  if (target <= 0.0)
+  {
+    double base = 0.0;
+    if (level_index > 0)
+      base = state.sell_level_price[level_index - 1];
+    if (base <= 0.0)
+      base = sell.max_price;
+    target = base + step;
+    state.sell_level_price[level_index] = target;
+  }
+  return target;
 }
 
 void CloseBasket(const SymbolState &state, ENUM_POSITION_TYPE type)
@@ -1026,6 +1124,10 @@ void ProcessSymbolTick(SymbolState &state)
     state.last_buy_nanpin_time = 0;
     state.realized_buy_profit = 0.0;
     state.has_partial_buy = false;
+    state.buy_stop_active = false;
+    state.buy_skip_levels = 0;
+    state.buy_skip_distance = 0.0;
+    state.buy_skip_price = 0.0;
     ClearFlexRefs(state.flex_buy_refs);
     ClearLevelPrices(state.buy_level_price);
     state.buy_grid_step = 0.0;
@@ -1036,6 +1138,10 @@ void ProcessSymbolTick(SymbolState &state)
     state.last_sell_nanpin_time = 0;
     state.realized_sell_profit = 0.0;
     state.has_partial_sell = false;
+    state.sell_stop_active = false;
+    state.sell_skip_levels = 0;
+    state.sell_skip_distance = 0.0;
+    state.sell_skip_price = 0.0;
     ClearFlexRefs(state.flex_sell_refs);
     ClearLevelPrices(state.sell_level_price);
     state.sell_grid_step = 0.0;
@@ -1125,6 +1231,36 @@ void ProcessSymbolTick(SymbolState &state)
     return;
   }
 
+  bool allow_buy_trigger = allow_nanpin;
+  bool allow_sell_trigger = allow_nanpin;
+  bool buy_stop = false;
+  bool sell_stop = false;
+  if (allow_nanpin)
+  {
+    double adx_now = 0.0;
+    double adx_prev = 0.0;
+    double di_plus_now = 0.0;
+    double di_plus_prev = 0.0;
+    double di_minus_now = 0.0;
+    double di_minus_prev = 0.0;
+    if (GetAdxSnapshot(state, adx_now, adx_prev, di_plus_now, di_plus_prev, di_minus_now, di_minus_prev))
+    {
+      double buy_gap = di_minus_now - di_plus_now;
+      double buy_gap_prev = di_minus_prev - di_plus_prev;
+      double sell_gap = di_plus_now - di_minus_now;
+      double sell_gap_prev = di_plus_prev - di_minus_prev;
+      buy_stop = (adx_now >= params.adx_max_for_nanpin && buy_gap >= params.di_gap_min);
+      sell_stop = (adx_now >= params.adx_max_for_nanpin && sell_gap >= params.di_gap_min);
+      bool adx_falling = adx_now < adx_prev;
+      if (buy_stop && adx_falling && buy_gap < buy_gap_prev)
+        buy_stop = false;
+      if (sell_stop && adx_falling && sell_gap < sell_gap_prev)
+        sell_stop = false;
+    }
+  }
+  allow_buy_trigger = allow_nanpin && !buy_stop;
+  allow_sell_trigger = allow_nanpin && !sell_stop;
+
   if (atr_now <= 0.0)
     atr_now = GetCurrentAtr(state);
   ProcessFlexPartial(state, symbol, bid, ask, atr_now);
@@ -1200,30 +1336,90 @@ void ProcessSymbolTick(SymbolState &state)
     }
 
     int levels = EffectiveMaxLevels(params);
-    if (buy.count > 0 && buy.level_count < levels)
+    if (buy.count > 0)
+    {
+      if (buy_stop)
+      {
+        double step = state.buy_grid_step > 0.0 ? state.buy_grid_step : grid_step;
+        if (!state.buy_stop_active)
+        {
+          state.buy_stop_active = true;
+          state.buy_skip_distance = 0.0;
+          state.buy_skip_price = ask;
+        }
+        if (step > 0.0 && state.buy_skip_price > 0.0)
+        {
+          double distance = state.buy_skip_price - ask;
+          if (distance < 0.0)
+            distance = 0.0;
+          while (distance >= step && (buy.level_count + state.buy_skip_levels) < levels)
+          {
+            distance -= step;
+            state.buy_skip_levels++;
+            state.buy_skip_price -= step;
+            int skipped_index = buy.level_count + state.buy_skip_levels - 1;
+            if (skipped_index >= 0 && skipped_index < NM1::kMaxLevels)
+              EnsureBuyTarget(state, buy, step, skipped_index);
+          }
+          state.buy_skip_distance = distance;
+        }
+      }
+      else
+      {
+        state.buy_stop_active = false;
+        state.buy_skip_price = 0.0;
+      }
+    }
+    if (sell.count > 0)
+    {
+      if (sell_stop)
+      {
+        double step = state.sell_grid_step > 0.0 ? state.sell_grid_step : grid_step;
+        if (!state.sell_stop_active)
+        {
+          state.sell_stop_active = true;
+          state.sell_skip_distance = 0.0;
+          state.sell_skip_price = bid;
+        }
+        if (step > 0.0 && state.sell_skip_price > 0.0)
+        {
+          double distance = bid - state.sell_skip_price;
+          if (distance < 0.0)
+            distance = 0.0;
+          while (distance >= step && (sell.level_count + state.sell_skip_levels) < levels)
+          {
+            distance -= step;
+            state.sell_skip_levels++;
+            state.sell_skip_price += step;
+            int skipped_index = sell.level_count + state.sell_skip_levels - 1;
+            if (skipped_index >= 0 && skipped_index < NM1::kMaxLevels)
+              EnsureSellTarget(state, sell, step, skipped_index);
+          }
+          state.sell_skip_distance = distance;
+        }
+      }
+      else
+      {
+        state.sell_stop_active = false;
+        state.sell_skip_price = 0.0;
+      }
+    }
+
+    if (buy.count > 0 && (buy.level_count + state.buy_skip_levels) < levels)
     {
       // Buy orders fill at ask, so compare ask to the grid.
       double step = state.buy_grid_step > 0.0 ? state.buy_grid_step : grid_step;
-      int level_index = buy.level_count;
-      double target = state.buy_level_price[level_index];
-      if (target <= 0.0)
-      {
-        double base = 0.0;
-        if (level_index > 0)
-          base = state.buy_level_price[level_index - 1];
-        if (base <= 0.0)
-          base = buy.min_price;
-        target = base - step;
-        state.buy_level_price[level_index] = target;
-      }
+      int level_index = buy.level_count + state.buy_skip_levels;
+      double target = 0.0;
+      target = EnsureBuyTarget(state, buy, step, level_index);
       double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
       if (point <= 0.0)
         point = 0.00001;
       double tol = point * 0.5;
-      if (allow_nanpin && CanNanpin(params, state.last_buy_nanpin_time) && ask <= target + tol)
+      if (allow_buy_trigger && CanNanpin(params, state.last_buy_nanpin_time) && ask <= target + tol)
       {
-        double lot = state.lot_seq[buy.level_count];
-        int next_level = buy.level_count + 1;
+        double lot = state.lot_seq[level_index];
+        int next_level = level_index + 1;
         if (next_level >= NM1::kCoreFlexSplitLevel)
         {
           double core_lot = 0.0;
@@ -1245,30 +1441,21 @@ void ProcessSymbolTick(SymbolState &state)
       }
     }
 
-    if (sell.count > 0 && sell.level_count < levels)
+    if (sell.count > 0 && (sell.level_count + state.sell_skip_levels) < levels)
     {
       // Sell orders fill at bid, so compare bid to the grid.
       double step = state.sell_grid_step > 0.0 ? state.sell_grid_step : grid_step;
-      int level_index = sell.level_count;
-      double target = state.sell_level_price[level_index];
-      if (target <= 0.0)
-      {
-        double base = 0.0;
-        if (level_index > 0)
-          base = state.sell_level_price[level_index - 1];
-        if (base <= 0.0)
-          base = sell.max_price;
-        target = base + step;
-        state.sell_level_price[level_index] = target;
-      }
+      int level_index = sell.level_count + state.sell_skip_levels;
+      double target = 0.0;
+      target = EnsureSellTarget(state, sell, step, level_index);
       double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
       if (point <= 0.0)
         point = 0.00001;
       double tol = point * 0.5;
-      if (allow_nanpin && CanNanpin(params, state.last_sell_nanpin_time) && bid >= target - tol)
+      if (allow_sell_trigger && CanNanpin(params, state.last_sell_nanpin_time) && bid >= target - tol)
       {
-        double lot = state.lot_seq[sell.level_count];
-        int next_level = sell.level_count + 1;
+        double lot = state.lot_seq[level_index];
+        int next_level = level_index + 1;
         if (next_level >= NM1::kCoreFlexSplitLevel)
         {
           double core_lot = 0.0;
@@ -1290,10 +1477,13 @@ void ProcessSymbolTick(SymbolState &state)
       }
     }
 
-    if (allow_nanpin)
+    if (allow_buy_trigger)
     {
       if (buy.count > 0)
         ProcessFlexRefill(state, symbol, ORDER_TYPE_BUY, state.flex_buy_refs, ask);
+    }
+    if (allow_sell_trigger)
+    {
       if (sell.count > 0)
         ProcessFlexRefill(state, symbol, ORDER_TYPE_SELL, state.flex_sell_refs, bid);
     }
