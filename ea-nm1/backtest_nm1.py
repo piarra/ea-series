@@ -22,6 +22,7 @@ K_CORE_FLEX_SPLIT_LEVEL = 4 # 20 = spilitしない
 K_FLEX_COMMENT = "NM1_FLEX"
 K_CORE_COMMENT = "NM1_CORE"
 ATR_PERIOD = 14
+ADX_PERIOD = 14
 CONTRACT_SIZE = 100.0
 TOTAL_CAPITAL = 250000.0
 START_BALANCE = 50000.0
@@ -93,6 +94,9 @@ class NM1Params:
     safe_stop_mode: bool = False
     safe_k: float = 2.0
     safe_slope_k: float = 0.3
+    adx_max_for_nanpin: float = 25.0
+    adx_max_for_entry: float = 20.0
+    di_gap_min: float = 12.0
     base_lot: float = 0.03
     profit_base: float = 2.0
     profit_base_level_mode: bool = False
@@ -185,6 +189,22 @@ class AtrState:
     tr_values: List[float] = field(default_factory=list)  # closed bars TR
     atr_values: List[float] = field(default_factory=list)  # closed bars ATR
     current_bar: Optional[Bar] = None
+
+
+@dataclass
+class AdxState:
+    bars: List[Bar] = field(default_factory=list)  # closed bars
+    tr_values: List[float] = field(default_factory=list)
+    plus_dm_values: List[float] = field(default_factory=list)
+    minus_dm_values: List[float] = field(default_factory=list)
+    dx_values: List[float] = field(default_factory=list)
+    current_bar: Optional[Bar] = None
+    smoothed_tr: float = 0.0
+    smoothed_plus_dm: float = 0.0
+    smoothed_minus_dm: float = 0.0
+    adx: float = 0.0
+    plus_di: float = 0.0
+    minus_di: float = 0.0
 
 
 def normalize_lot(lot: float) -> float:
@@ -405,6 +425,68 @@ def update_atr_state(atr_state: AtrState, tick_time: dt.datetime, bid: float) ->
     return atr_current, atr_base, atr_slope
 
 
+def update_adx_state(adx_state: AdxState, tick_time: dt.datetime, bid: float) -> Tuple[float, float, float]:
+    bar_start = tick_time.replace(second=0, microsecond=0)
+    if adx_state.current_bar is None:
+        adx_state.current_bar = Bar(start=bar_start, open=bid, high=bid, low=bid, close=bid)
+        return adx_state.adx, adx_state.plus_di, adx_state.minus_di
+
+    if adx_state.current_bar.start != bar_start:
+        prev_bar = adx_state.bars[-1] if adx_state.bars else None
+        if prev_bar is not None:
+            current_bar = adx_state.current_bar
+            tr = max(
+                current_bar.high - current_bar.low,
+                abs(current_bar.high - prev_bar.close),
+                abs(current_bar.low - prev_bar.close),
+            )
+            up_move = current_bar.high - prev_bar.high
+            down_move = prev_bar.low - current_bar.low
+            plus_dm = up_move if up_move > down_move and up_move > 0.0 else 0.0
+            minus_dm = down_move if down_move > up_move and down_move > 0.0 else 0.0
+            adx_state.tr_values.append(tr)
+            adx_state.plus_dm_values.append(plus_dm)
+            adx_state.minus_dm_values.append(minus_dm)
+
+            if len(adx_state.tr_values) == ADX_PERIOD:
+                adx_state.smoothed_tr = sum(adx_state.tr_values[-ADX_PERIOD:])
+                adx_state.smoothed_plus_dm = sum(adx_state.plus_dm_values[-ADX_PERIOD:])
+                adx_state.smoothed_minus_dm = sum(adx_state.minus_dm_values[-ADX_PERIOD:])
+            elif len(adx_state.tr_values) > ADX_PERIOD:
+                adx_state.smoothed_tr = (
+                    adx_state.smoothed_tr - (adx_state.smoothed_tr / ADX_PERIOD) + tr
+                )
+                adx_state.smoothed_plus_dm = (
+                    adx_state.smoothed_plus_dm - (adx_state.smoothed_plus_dm / ADX_PERIOD) + plus_dm
+                )
+                adx_state.smoothed_minus_dm = (
+                    adx_state.smoothed_minus_dm - (adx_state.smoothed_minus_dm / ADX_PERIOD) + minus_dm
+                )
+
+            if adx_state.smoothed_tr > 0.0:
+                adx_state.plus_di = 100.0 * adx_state.smoothed_plus_dm / adx_state.smoothed_tr
+                adx_state.minus_di = 100.0 * adx_state.smoothed_minus_dm / adx_state.smoothed_tr
+                denom = adx_state.plus_di + adx_state.minus_di
+                dx = 0.0
+                if denom > 0.0:
+                    dx = 100.0 * abs(adx_state.plus_di - adx_state.minus_di) / denom
+                if len(adx_state.dx_values) < ADX_PERIOD:
+                    adx_state.dx_values.append(dx)
+                    if len(adx_state.dx_values) == ADX_PERIOD:
+                        adx_state.adx = sum(adx_state.dx_values) / ADX_PERIOD
+                else:
+                    adx_state.adx = ((adx_state.adx * (ADX_PERIOD - 1)) + dx) / ADX_PERIOD
+
+        adx_state.bars.append(adx_state.current_bar)
+        adx_state.current_bar = Bar(start=bar_start, open=bid, high=bid, low=bid, close=bid)
+    else:
+        adx_state.current_bar.high = max(adx_state.current_bar.high, bid)
+        adx_state.current_bar.low = min(adx_state.current_bar.low, bid)
+        adx_state.current_bar.close = bid
+
+    return adx_state.adx, adx_state.plus_di, adx_state.minus_di
+
+
 def can_restart(last_close: Optional[dt.datetime], now: dt.datetime, delay: int) -> bool:
     if last_close is None:
         return True
@@ -415,6 +497,21 @@ def can_nanpin(last_time: Optional[dt.datetime], now: dt.datetime, delay: int) -
     if last_time is None:
         return True
     return (now - last_time).total_seconds() >= delay
+
+
+def adx_blocks_side(
+    adx: float,
+    plus_di: float,
+    minus_di: float,
+    adx_threshold: float,
+    di_gap_min: float,
+    side: str,
+) -> bool:
+    if adx < adx_threshold:
+        return False
+    if side == "buy":
+        return minus_di > plus_di + di_gap_min
+    return plus_di > minus_di + di_gap_min
 
 
 def open_position(
@@ -566,12 +663,31 @@ def process_tick(
     atr_current: float,
     atr_base: float,
     atr_slope: float,
+    adx: float,
+    plus_di: float,
+    minus_di: float,
     debug: bool,
     start_time_by_side: Dict[str, Optional[dt.datetime]],
     level_max_duration: Dict[int, float],
 ) -> None:
     params = state.params
     buy, sell = collect_basket_info(positions, bid, ask)
+    entry_block_buy = adx_blocks_side(
+        adx,
+        plus_di,
+        minus_di,
+        params.adx_max_for_entry,
+        params.di_gap_min,
+        "buy",
+    )
+    entry_block_sell = adx_blocks_side(
+        adx,
+        plus_di,
+        minus_di,
+        params.adx_max_for_entry,
+        params.di_gap_min,
+        "sell",
+    )
 
     if state.prev_buy_count > 0 and buy.count == 0:
         state.last_buy_close_time = tick_time
@@ -601,33 +717,38 @@ def process_tick(
             state.start_time = tick_time
         if (tick_time - state.start_time).total_seconds() >= params.start_delay_seconds:
             if buy.count == 0 and sell.count == 0:
-                open_position(
-                    positions,
-                    stats,
-                    "buy",
-                    state.lot_seq[0],
-                    ask,
-                    make_level_comment(K_CORE_COMMENT, 1),
-                    1,
-                    state,
-                )
-                if start_time_by_side.get("buy") is None:
-                    start_time_by_side["buy"] = tick_time
-                open_position(
-                    positions,
-                    stats,
-                    "sell",
-                    state.lot_seq[0],
-                    bid,
-                    make_level_comment(K_CORE_COMMENT, 1),
-                    1,
-                    state,
-                )
-                if start_time_by_side.get("sell") is None:
-                    start_time_by_side["sell"] = tick_time
+                opened_any = False
+                if not entry_block_buy:
+                    open_position(
+                        positions,
+                        stats,
+                        "buy",
+                        state.lot_seq[0],
+                        ask,
+                        make_level_comment(K_CORE_COMMENT, 1),
+                        1,
+                        state,
+                    )
+                    if start_time_by_side.get("buy") is None:
+                        start_time_by_side["buy"] = tick_time
+                    opened_any = True
+                if not entry_block_sell:
+                    open_position(
+                        positions,
+                        stats,
+                        "sell",
+                        state.lot_seq[0],
+                        bid,
+                        make_level_comment(K_CORE_COMMENT, 1),
+                        1,
+                        state,
+                    )
+                    if start_time_by_side.get("sell") is None:
+                        start_time_by_side["sell"] = tick_time
+                    opened_any = True
                 if positions:
                     state.initial_started = True
-                attempted_initial = True
+                attempted_initial = opened_any
 
     if attempted_initial:
         state.prev_buy_count = buy.count
@@ -689,6 +810,25 @@ def process_tick(
         state.prev_buy_count = buy.count
         state.prev_sell_count = sell.count
         return
+
+    nanpin_block_buy = adx_blocks_side(
+        adx,
+        plus_di,
+        minus_di,
+        params.adx_max_for_nanpin,
+        params.di_gap_min,
+        "buy",
+    )
+    nanpin_block_sell = adx_blocks_side(
+        adx,
+        plus_di,
+        minus_di,
+        params.adx_max_for_nanpin,
+        params.di_gap_min,
+        "sell",
+    )
+    allow_nanpin_buy = allow_nanpin and not nanpin_block_buy
+    allow_nanpin_sell = allow_nanpin and not nanpin_block_sell
 
     if atr_now <= 0.0:
         atr_now = atr_current
@@ -757,7 +897,11 @@ def process_tick(
                 )
 
     if state.initial_started:
-        if buy.count == 0 and can_restart(state.last_buy_close_time, tick_time, params.restart_delay_seconds):
+        if (
+            buy.count == 0
+            and can_restart(state.last_buy_close_time, tick_time, params.restart_delay_seconds)
+            and not entry_block_buy
+        ):
             open_position(
                 positions,
                 stats,
@@ -769,7 +913,11 @@ def process_tick(
                 state,
             )
             start_time_by_side["buy"] = tick_time
-        if sell.count == 0 and can_restart(state.last_sell_close_time, tick_time, params.restart_delay_seconds):
+        if (
+            sell.count == 0
+            and can_restart(state.last_sell_close_time, tick_time, params.restart_delay_seconds)
+            and not entry_block_sell
+        ):
             open_position(
                 positions,
                 stats,
@@ -796,7 +944,7 @@ def process_tick(
                 base = buy.min_price
             target = base - step
             state.buy_level_price[level_index] = target
-        if allow_nanpin and can_nanpin(state.last_buy_nanpin_time, tick_time, params.nanpin_sleep_seconds):
+        if allow_nanpin_buy and can_nanpin(state.last_buy_nanpin_time, tick_time, params.nanpin_sleep_seconds):
             if ask <= target + tol:
                 lot = state.lot_seq[buy.level_count]
                 next_level = buy.level_count + 1
@@ -852,7 +1000,7 @@ def process_tick(
                 base = sell.max_price
             target = base + step
             state.sell_level_price[level_index] = target
-        if allow_nanpin and can_nanpin(state.last_sell_nanpin_time, tick_time, params.nanpin_sleep_seconds):
+        if allow_nanpin_sell and can_nanpin(state.last_sell_nanpin_time, tick_time, params.nanpin_sleep_seconds):
             if bid >= target - tol:
                 lot = state.lot_seq[sell.level_count]
                 next_level = sell.level_count + 1
@@ -898,11 +1046,10 @@ def process_tick(
                     )
                     state.last_sell_nanpin_time = tick_time
 
-    if allow_nanpin:
-        if buy.count > 0:
-            process_flex_refill(state, positions, stats, "buy", ask)
-        if sell.count > 0:
-            process_flex_refill(state, positions, stats, "sell", bid)
+    if allow_nanpin_buy and buy.count > 0:
+        process_flex_refill(state, positions, stats, "buy", ask)
+    if allow_nanpin_sell and sell.count > 0:
+        process_flex_refill(state, positions, stats, "sell", bid)
 
     state.prev_buy_count = buy.count
     state.prev_sell_count = sell.count
@@ -1022,6 +1169,7 @@ def run_backtest(
     positions: List[Position] = []
     stats = Stats()
     atr_state = AtrState()
+    adx_state = AdxState()
     added_funds = 0.0
     reserve_funds = max(0.0, TOTAL_CAPITAL - START_BALANCE)
 
@@ -1110,6 +1258,7 @@ def run_backtest(
 
         total_ticks += 1
         atr_current, atr_base, atr_slope = update_atr_state(atr_state, tick_time, bid)
+        adx, plus_di, minus_di = update_adx_state(adx_state, tick_time, bid)
         process_tick(
             state,
             positions,
@@ -1120,6 +1269,9 @@ def run_backtest(
             atr_current,
             atr_base,
             atr_slope,
+            adx,
+            plus_di,
+            minus_di,
             debug,
             start_time_by_side,
             level_max_duration,
