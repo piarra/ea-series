@@ -1,7 +1,8 @@
 #property strict
-#property version   "1.24"
+#property version   "1.25"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
+// v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
 
 #include <Trade/Trade.mqh>
 
@@ -36,8 +37,8 @@ input double FlexAtrProfitMultiplier = 0.8;
 input int RestartDelaySeconds = 1;
 input int NanpinSleepSeconds = 10;
 input int AdxPeriod = 14;
-input double AdxMaxForNanpin = 30.0;
-input double DiGapMin = 12.0;
+input double AdxMaxForNanpin = 20.0;
+input double DiGapMin = 2.0;
 
 input group "XAUUSD"
 input bool EnableXAUUSD = true;
@@ -51,7 +52,7 @@ input double StopBuyLimitPriceXAUUSD = 4000.0;
 input double StopBuyLimitLotXAUUSD = 0.01;
 
 input group "EURUSD"
-input bool EnableEURUSD = true;
+input bool EnableEURUSD = false;
 input string SymbolEURUSD = "EURUSD";
 input double BaseLotEURUSD = 0.01;
 input double AtrMultiplierEURUSD = 1.3;
@@ -62,7 +63,7 @@ input double StopBuyLimitPriceEURUSD = 4000.0;
 input double StopBuyLimitLotEURUSD = 0.01;
 
 input group "USDJPY"
-input bool EnableUSDJPY = true;
+input bool EnableUSDJPY = false;
 input string SymbolUSDJPY = "USDJPY";
 input double BaseLotUSDJPY = 0.3;
 input double AtrMultiplierUSDJPY = 1.6;
@@ -73,7 +74,7 @@ input double StopBuyLimitPriceUSDJPY = 4000.0;
 input double StopBuyLimitLotUSDJPY = 0.01;
 
 input group "AUDUSD"
-input bool EnableAUDUSD = true;
+input bool EnableAUDUSD = false;
 input string SymbolAUDUSD = "AUDUSD";
 input double BaseLotAUDUSD = 0.01;
 input double AtrMultiplierAUDUSD = 1.2;
@@ -84,7 +85,7 @@ input double StopBuyLimitPriceAUDUSD = 4000.0;
 input double StopBuyLimitLotAUDUSD = 0.01;
 
 input group "BTCUSD"
-input bool EnableBTCUSD = true;
+input bool EnableBTCUSD = false;
 input string SymbolBTCUSD = "BTCUSD";
 input double BaseLotBTCUSD = 0.3;
 input double AtrMultiplierBTCUSD = 2.5;
@@ -95,7 +96,7 @@ input double StopBuyLimitPriceBTCUSD = 4000.0;
 input double StopBuyLimitLotBTCUSD = 0.01;
 
 input group "ETHUSD"
-input bool EnableETHUSD = true;
+input bool EnableETHUSD = false;
 input string SymbolETHUSD = "ETHUSD";
 input double BaseLotETHUSD = 0.1;
 input double AtrMultiplierETHUSD = 1.6;
