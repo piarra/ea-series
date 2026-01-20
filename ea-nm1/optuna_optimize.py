@@ -16,7 +16,6 @@ except ImportError as exc:  # pragma: no cover - optuna is optional
 
 from backtest_nm1 import (
     K_MAX_LEVELS,
-    TOTAL_CAPITAL,
     build_default_range,
     parse_user_datetime,
     run_backtest,
@@ -175,7 +174,7 @@ def main() -> None:
                 "safety_mode", [True, False]
             )
 
-        final_funds, margin_call, max_drawdown_rate = run_backtest(
+        final_funds, margin_call, max_drawdown_rate, profit, unrealized_loss = run_backtest(
             args.data_dir,
             start,
             end,
@@ -185,13 +184,15 @@ def main() -> None:
             log_mode=False,
             params_override=params,
         )
-        profit = final_funds - TOTAL_CAPITAL
         if margin_call or max_drawdown_rate >= 0.8:
             profit = 0.0
+        target = profit - unrealized_loss
         trial.set_user_attr("final_funds", final_funds)
         trial.set_user_attr("margin_call", margin_call)
         trial.set_user_attr("max_drawdown_rate", max_drawdown_rate)
-        return profit
+        trial.set_user_attr("profit", profit)
+        trial.set_user_attr("unrealized_loss", unrealized_loss)
+        return target
 
     def log_best(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
         if study.best_trial.number != trial.number:
@@ -225,9 +226,11 @@ def main() -> None:
 
     best = study.best_trial
     print("Best trial")
-    print(f"  profit: {best.value:.2f}")
+    print(f"  target: {best.value:.2f}")
     print(f"  params: {best.params}")
     print(f"  final_funds: {best.user_attrs.get('final_funds')}")
+    print(f"  profit_raw: {best.user_attrs.get('profit')}")
+    print(f"  unrealized_loss: {best.user_attrs.get('unrealized_loss')}")
     print(f"  margin_call: {best.user_attrs.get('margin_call')}")
     max_dd_rate = best.user_attrs.get("max_drawdown_rate")
     print(f"  max_drawdown_rate: {max_dd_rate}")

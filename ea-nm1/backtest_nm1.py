@@ -1160,7 +1160,7 @@ def run_backtest(
     stop_on_margin_call: bool = False,
     log_mode: bool = True,
     params_override: Optional[Dict[str, object]] = None,
-) -> Tuple[float, bool, float]:
+) -> Tuple[float, bool, float, float, float]:
     params = apply_param_overrides(NM1Params(), params_override)
     if base_lot_override is not None:
         params.base_lot = base_lot_override
@@ -1389,6 +1389,8 @@ def run_backtest(
                 unrealized += (pos.price - last_ask) * pos.volume * CONTRACT_SIZE
 
     final_funds = total_funds + balance
+    profit = final_funds - TOTAL_CAPITAL
+    unrealized_loss = max(0.0, -unrealized)
     if log_mode:
         result = {
             "range": {"start": start.isoformat(), "end": end.isoformat()},
@@ -1447,7 +1449,7 @@ def run_backtest(
         for level in range(1, levels + 1):
             duration = level_max_duration.get(level, 0.0)
             print(f"Core close max duration L{level}: {duration:.0f}s")
-    return final_funds, margin_call_detected, max_drawdown_rate
+    return final_funds, margin_call_detected, max_drawdown_rate, profit, unrealized_loss
 
 
 def run_daily_backtest_task(args: Tuple[
@@ -1470,7 +1472,7 @@ def run_daily_backtest_task(args: Tuple[
         stop_on_margin_call,
         params_override,
     ) = args
-    final_funds, margin_call_detected, max_drawdown_rate = run_backtest(
+    final_funds, margin_call_detected, max_drawdown_rate, profit, unrealized_loss = run_backtest(
         data_dir,
         start,
         end,
@@ -1485,6 +1487,8 @@ def run_daily_backtest_task(args: Tuple[
         "date": start.date().isoformat(),
         "range": {"start": start.isoformat(), "end": end.isoformat()},
         "final_funds": round(final_funds, 2),
+        "profit": round(profit, 2),
+        "unrealized_loss": round(unrealized_loss, 2),
         "margin_call": margin_call_detected,
         "max_drawdown_rate": round(max_drawdown_rate, 6),
     }
@@ -1504,7 +1508,7 @@ def optimize_base_lot(
     best_lot = lot
     best_final = -1.0
     while True:
-        final_funds, margin_call_detected, _max_drawdown_rate = run_backtest(
+        final_funds, margin_call_detected, _max_drawdown_rate, _profit, _unrealized_loss = run_backtest(
             data_dir,
             start,
             end,
