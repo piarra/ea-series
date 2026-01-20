@@ -18,7 +18,7 @@ from typing import Dict, Iterator, List, Optional, Tuple
 
 # NM1 constants (from NM1.mq5)
 K_MAX_LEVELS = 13
-K_CORE_FLEX_SPLIT_LEVEL = 4 # 20 = spilitしない
+K_CORE_FLEX_SPLIT_LEVEL = 20 # 20 = spilitしない
 K_FLEX_COMMENT = "NM1_FLEX"
 K_CORE_COMMENT = "NM1_CORE"
 ATR_PERIOD = 14
@@ -94,9 +94,9 @@ class NM1Params:
     safe_stop_mode: bool = False
     safe_k: float = 2.0
     safe_slope_k: float = 0.3
-    adx_max_for_nanpin: float = 25.0
+    adx_max_for_nanpin: float = 20.0
     adx_max_for_entry: float = 20.0
-    di_gap_min: float = 12.0
+    di_gap_min: float = 2.0
     base_lot: float = 0.03
     profit_base: float = 2.0
     profit_base_level_mode: bool = False
@@ -173,6 +173,14 @@ class SymbolState:
     realized_sell_profit: float = 0.0
     has_partial_buy: bool = False
     has_partial_sell: bool = False
+    buy_stop_active: bool = False
+    sell_stop_active: bool = False
+    buy_skip_levels: int = 0
+    sell_skip_levels: int = 0
+    buy_skip_distance: float = 0.0
+    sell_skip_distance: float = 0.0
+    buy_skip_price: float = 0.0
+    sell_skip_price: float = 0.0
 
 
 @dataclass
@@ -205,6 +213,9 @@ class AdxState:
     adx: float = 0.0
     plus_di: float = 0.0
     minus_di: float = 0.0
+    prev_adx: float = 0.0
+    prev_plus_di: float = 0.0
+    prev_minus_di: float = 0.0
 
 
 def normalize_lot(lot: float) -> float:
@@ -425,15 +436,29 @@ def update_atr_state(atr_state: AtrState, tick_time: dt.datetime, bid: float) ->
     return atr_current, atr_base, atr_slope
 
 
-def update_adx_state(adx_state: AdxState, tick_time: dt.datetime, bid: float) -> Tuple[float, float, float]:
+def update_adx_state(
+    adx_state: AdxState,
+    tick_time: dt.datetime,
+    bid: float,
+) -> Tuple[float, float, float, float, float, float]:
     bar_start = tick_time.replace(second=0, microsecond=0)
     if adx_state.current_bar is None:
         adx_state.current_bar = Bar(start=bar_start, open=bid, high=bid, low=bid, close=bid)
-        return adx_state.adx, adx_state.plus_di, adx_state.minus_di
+        return (
+            adx_state.adx,
+            adx_state.prev_adx,
+            adx_state.plus_di,
+            adx_state.prev_plus_di,
+            adx_state.minus_di,
+            adx_state.prev_minus_di,
+        )
 
     if adx_state.current_bar.start != bar_start:
         prev_bar = adx_state.bars[-1] if adx_state.bars else None
         if prev_bar is not None:
+            adx_state.prev_adx = adx_state.adx
+            adx_state.prev_plus_di = adx_state.plus_di
+            adx_state.prev_minus_di = adx_state.minus_di
             current_bar = adx_state.current_bar
             tr = max(
                 current_bar.high - current_bar.low,
@@ -484,7 +509,19 @@ def update_adx_state(adx_state: AdxState, tick_time: dt.datetime, bid: float) ->
         adx_state.current_bar.low = min(adx_state.current_bar.low, bid)
         adx_state.current_bar.close = bid
 
-    return adx_state.adx, adx_state.plus_di, adx_state.minus_di
+    if adx_state.prev_adx == 0.0 and adx_state.adx > 0.0:
+        adx_state.prev_adx = adx_state.adx
+        adx_state.prev_plus_di = adx_state.plus_di
+        adx_state.prev_minus_di = adx_state.minus_di
+
+    return (
+        adx_state.adx,
+        adx_state.prev_adx,
+        adx_state.plus_di,
+        adx_state.prev_plus_di,
+        adx_state.minus_di,
+        adx_state.prev_minus_di,
+    )
 
 
 def can_restart(last_close: Optional[dt.datetime], now: dt.datetime, delay: int) -> bool:
@@ -512,6 +549,54 @@ def adx_blocks_side(
     if side == "buy":
         return minus_di > plus_di + di_gap_min
     return plus_di > minus_di + di_gap_min
+
+
+def adx_nanpin_stop(
+    adx_now: float,
+    adx_prev: float,
+    plus_di_now: float,
+    plus_di_prev: float,
+    minus_di_now: float,
+    minus_di_prev: float,
+    adx_threshold: float,
+    di_gap_min: float,
+    side: str,
+) -> bool:
+    if adx_now < adx_threshold:
+        return False
+    if side == "buy":
+        gap = minus_di_now - plus_di_now
+        gap_prev = minus_di_prev - plus_di_prev
+    else:
+        gap = plus_di_now - minus_di_now
+        gap_prev = plus_di_prev - minus_di_prev
+    if gap < di_gap_min:
+        return False
+    if adx_now < adx_prev and gap < gap_prev:
+        return False
+    return True
+
+
+def ensure_buy_target(state: SymbolState, buy: BasketInfo, step: float, level_index: int) -> float:
+    target = state.buy_level_price[level_index]
+    if target <= 0.0:
+        base = state.buy_level_price[level_index - 1] if level_index > 0 else buy.min_price
+        if base <= 0.0:
+            base = buy.min_price
+        target = base - step
+        state.buy_level_price[level_index] = target
+    return target
+
+
+def ensure_sell_target(state: SymbolState, sell: BasketInfo, step: float, level_index: int) -> float:
+    target = state.sell_level_price[level_index]
+    if target <= 0.0:
+        base = state.sell_level_price[level_index - 1] if level_index > 0 else sell.max_price
+        if base <= 0.0:
+            base = sell.max_price
+        target = base + step
+        state.sell_level_price[level_index] = target
+    return target
 
 
 def open_position(
@@ -664,8 +749,11 @@ def process_tick(
     atr_base: float,
     atr_slope: float,
     adx: float,
+    adx_prev: float,
     plus_di: float,
+    plus_di_prev: float,
     minus_di: float,
+    minus_di_prev: float,
     debug: bool,
     start_time_by_side: Dict[str, Optional[dt.datetime]],
     level_max_duration: Dict[int, float],
@@ -694,6 +782,10 @@ def process_tick(
         state.last_buy_nanpin_time = None
         state.realized_buy_profit = 0.0
         state.has_partial_buy = False
+        state.buy_stop_active = False
+        state.buy_skip_levels = 0
+        state.buy_skip_distance = 0.0
+        state.buy_skip_price = 0.0
         state.flex_buy_refs = [FlexRef() for _ in range(K_MAX_LEVELS)]
         state.buy_level_price = [0.0 for _ in range(K_MAX_LEVELS)]
         state.buy_grid_step = 0.0
@@ -703,6 +795,10 @@ def process_tick(
         state.last_sell_nanpin_time = None
         state.realized_sell_profit = 0.0
         state.has_partial_sell = False
+        state.sell_stop_active = False
+        state.sell_skip_levels = 0
+        state.sell_skip_distance = 0.0
+        state.sell_skip_price = 0.0
         state.flex_sell_refs = [FlexRef() for _ in range(K_MAX_LEVELS)]
         state.sell_level_price = [0.0 for _ in range(K_MAX_LEVELS)]
         state.sell_grid_step = 0.0
@@ -811,24 +907,33 @@ def process_tick(
         state.prev_sell_count = sell.count
         return
 
-    nanpin_block_buy = adx_blocks_side(
-        adx,
-        plus_di,
-        minus_di,
-        params.adx_max_for_nanpin,
-        params.di_gap_min,
-        "buy",
-    )
-    nanpin_block_sell = adx_blocks_side(
-        adx,
-        plus_di,
-        minus_di,
-        params.adx_max_for_nanpin,
-        params.di_gap_min,
-        "sell",
-    )
-    allow_nanpin_buy = allow_nanpin and not nanpin_block_buy
-    allow_nanpin_sell = allow_nanpin and not nanpin_block_sell
+    buy_stop = False
+    sell_stop = False
+    if allow_nanpin:
+        buy_stop = adx_nanpin_stop(
+            adx,
+            adx_prev,
+            plus_di,
+            plus_di_prev,
+            minus_di,
+            minus_di_prev,
+            params.adx_max_for_nanpin,
+            params.di_gap_min,
+            "buy",
+        )
+        sell_stop = adx_nanpin_stop(
+            adx,
+            adx_prev,
+            plus_di,
+            plus_di_prev,
+            minus_di,
+            minus_di_prev,
+            params.adx_max_for_nanpin,
+            params.di_gap_min,
+            "sell",
+        )
+    allow_nanpin_buy = allow_nanpin and not buy_stop
+    allow_nanpin_sell = allow_nanpin and not sell_stop
 
     if atr_now <= 0.0:
         atr_now = atr_current
@@ -931,23 +1036,63 @@ def process_tick(
             start_time_by_side["sell"] = tick_time
 
     levels = effective_max_levels(params)
+    if buy.count > 0:
+        if buy_stop:
+            step = state.buy_grid_step if state.buy_grid_step > 0.0 else grid_step
+            if not state.buy_stop_active:
+                state.buy_stop_active = True
+                state.buy_skip_distance = 0.0
+                state.buy_skip_price = ask
+            if step > 0.0 and state.buy_skip_price > 0.0:
+                distance = state.buy_skip_price - ask
+                if distance < 0.0:
+                    distance = 0.0
+                while distance >= step and (buy.level_count + state.buy_skip_levels) < levels:
+                    distance -= step
+                    state.buy_skip_levels += 1
+                    state.buy_skip_price -= step
+                    skipped_index = buy.level_count + state.buy_skip_levels - 1
+                    if 0 <= skipped_index < K_MAX_LEVELS:
+                        ensure_buy_target(state, buy, step, skipped_index)
+                state.buy_skip_distance = distance
+        else:
+            state.buy_stop_active = False
+            state.buy_skip_price = 0.0
+
+    if sell.count > 0:
+        if sell_stop:
+            step = state.sell_grid_step if state.sell_grid_step > 0.0 else grid_step
+            if not state.sell_stop_active:
+                state.sell_stop_active = True
+                state.sell_skip_distance = 0.0
+                state.sell_skip_price = bid
+            if step > 0.0 and state.sell_skip_price > 0.0:
+                distance = bid - state.sell_skip_price
+                if distance < 0.0:
+                    distance = 0.0
+                while distance >= step and (sell.level_count + state.sell_skip_levels) < levels:
+                    distance -= step
+                    state.sell_skip_levels += 1
+                    state.sell_skip_price += step
+                    skipped_index = sell.level_count + state.sell_skip_levels - 1
+                    if 0 <= skipped_index < K_MAX_LEVELS:
+                        ensure_sell_target(state, sell, step, skipped_index)
+                state.sell_skip_distance = distance
+        else:
+            state.sell_stop_active = False
+            state.sell_skip_price = 0.0
+
     point = infer_point(bid)
     tol = point * 0.5
 
-    if buy.count > 0 and buy.level_count < levels:
+    if buy.count > 0 and (buy.level_count + state.buy_skip_levels) < levels:
         step = state.buy_grid_step if state.buy_grid_step > 0.0 else grid_step
-        level_index = buy.level_count
-        target = state.buy_level_price[level_index]
-        if target <= 0.0:
-            base = state.buy_level_price[level_index - 1] if level_index > 0 else buy.min_price
-            if base <= 0.0:
-                base = buy.min_price
-            target = base - step
-            state.buy_level_price[level_index] = target
+        level_index = buy.level_count + state.buy_skip_levels
+        target = ensure_buy_target(state, buy, step, level_index)
         if allow_nanpin_buy and can_nanpin(state.last_buy_nanpin_time, tick_time, params.nanpin_sleep_seconds):
             if ask <= target + tol:
-                lot = state.lot_seq[buy.level_count]
-                next_level = buy.level_count + 1
+                lot = state.lot_seq[level_index]
+                next_level = level_index + 1
                 if next_level >= params.core_flex_split_level:
                     core_lot, flex_lot = normalize_core_flex_lot(params, lot)
                     opened = False
@@ -990,20 +1135,14 @@ def process_tick(
                     )
                     state.last_buy_nanpin_time = tick_time
 
-    if sell.count > 0 and sell.level_count < levels:
+    if sell.count > 0 and (sell.level_count + state.sell_skip_levels) < levels:
         step = state.sell_grid_step if state.sell_grid_step > 0.0 else grid_step
-        level_index = sell.level_count
-        target = state.sell_level_price[level_index]
-        if target <= 0.0:
-            base = state.sell_level_price[level_index - 1] if level_index > 0 else sell.max_price
-            if base <= 0.0:
-                base = sell.max_price
-            target = base + step
-            state.sell_level_price[level_index] = target
+        level_index = sell.level_count + state.sell_skip_levels
+        target = ensure_sell_target(state, sell, step, level_index)
         if allow_nanpin_sell and can_nanpin(state.last_sell_nanpin_time, tick_time, params.nanpin_sleep_seconds):
             if bid >= target - tol:
-                lot = state.lot_seq[sell.level_count]
-                next_level = sell.level_count + 1
+                lot = state.lot_seq[level_index]
+                next_level = level_index + 1
                 if next_level >= params.core_flex_split_level:
                     core_lot, flex_lot = normalize_core_flex_lot(params, lot)
                     opened = False
@@ -1237,20 +1376,27 @@ def run_backtest(
                 print(
                     f"{current_hour.isoformat()} "
                     f"balance={last_balance:.2f} "
+                    f"equity={last_equity:.2f} "
                     f"remaining_funds={total_funds:.2f} "
                     f"dd_now=0.00 "
                     f"dd_max=0.00"
                 )
         elif tick_hour != current_hour:
-            drawdown_now = hour_peak_equity - last_equity
-            max_drawdown = hour_peak_equity - hour_min_equity
+            # dd_* are rates based on balance at log time.
+            if last_balance > 0.0:
+                drawdown_now = (last_balance - last_equity) / last_balance
+                max_drawdown = (last_balance - hour_min_equity) / last_balance
+            else:
+                drawdown_now = 0.0
+                max_drawdown = 0.0
             if log_mode:
                 print(
                     f"{tick_hour.isoformat()} "
                     f"balance={last_balance:.2f} "
+                    f"equity={last_equity:.2f} "
                     f"remaining_funds={total_funds:.2f} "
-                    f"dd_now={drawdown_now:.2f} "
-                    f"dd_max={max_drawdown:.2f}"
+                    f"dd_now={drawdown_now:.6f} "
+                    f"dd_max={max_drawdown:.6f}"
                 )
             current_hour = tick_hour
             hour_peak_equity = last_equity
@@ -1258,7 +1404,9 @@ def run_backtest(
 
         total_ticks += 1
         atr_current, atr_base, atr_slope = update_atr_state(atr_state, tick_time, bid)
-        adx, plus_di, minus_di = update_adx_state(adx_state, tick_time, bid)
+        adx, adx_prev, plus_di, plus_di_prev, minus_di, minus_di_prev = update_adx_state(
+            adx_state, tick_time, bid
+        )
         process_tick(
             state,
             positions,
@@ -1270,8 +1418,11 @@ def run_backtest(
             atr_base,
             atr_slope,
             adx,
+            adx_prev,
             plus_di,
+            plus_di_prev,
             minus_di,
+            minus_di_prev,
             debug,
             start_time_by_side,
             level_max_duration,
