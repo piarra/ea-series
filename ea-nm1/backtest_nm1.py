@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""NM1.mq5 backtest on XAUUSD tick data.
+"""NM1.mq5 backtest on tick data.
 
-Default range: last 30 days from latest available data in data/XAUUSD.
+Default range: last 30 days from latest available data in data/<SYMBOL>.
 """
 
 from __future__ import annotations
@@ -29,6 +29,27 @@ START_BALANCE = 50000.0
 OPTIMIZE_START_LOT = 0.05
 OPTIMIZE_STEP = 0.01
 LEVERAGE = 400.0
+DEFAULT_SYMBOL = "XAUUSD"
+
+SYMBOL_PARAM_PRESETS: Dict[str, Dict[str, object]] = {
+    "XAUUSD": {
+        "atr_multiplier": 1.4,
+        "min_atr": 1.6,
+        "base_lot": 0.03,
+        "profit_base": 1.0,
+        "max_levels": 12,
+        "contract_size": 100.0,
+    },
+    "BTCUSD": {
+        "atr_multiplier": 2.5,
+        "min_atr": 10.0,
+        "base_lot": 0.1,
+        "profit_base": 4.0,
+        "max_levels": 20,
+        "contract_size": 1.0,
+        "price_scale": 100.0,
+    },
+}
 
 def transfer_funds(
     balance: float,
@@ -90,15 +111,16 @@ class NM1Params:
     start_delay_seconds: int = 5
     atr_multiplier: float = 1.4
     min_atr: float = 1.6
+    contract_size: float = CONTRACT_SIZE
     safety_mode: bool = True
     safe_stop_mode: bool = False
     safe_k: float = 2.0
     safe_slope_k: float = 0.3
     adx_max_for_nanpin: float = 20.0
-    adx_max_for_entry: float = 20.0
+    adx_max_for_entry: float = 100.0
     di_gap_min: float = 2.0
     base_lot: float = 0.03
-    profit_base: float = 2.0
+    profit_base: float = 1.0
     profit_base_level_mode: bool = False
     profit_base_level_step: float = 0.05
     profit_base_level_min: float = 0.2
@@ -109,8 +131,7 @@ class NM1Params:
     core_flex_split_level: int = K_CORE_FLEX_SPLIT_LEVEL
     restart_delay_seconds: int = 1
     nanpin_sleep_seconds: int = 10
-    stop_buy_limit_price: float = 4000.0
-    stop_buy_limit_lot: float = 0.01
+    price_scale: float = 1.0
 
 
 @dataclass
@@ -153,6 +174,7 @@ class Bar:
 @dataclass
 class SymbolState:
     params: NM1Params
+    symbol: str
     start_time: Optional[dt.datetime] = None
     initial_started: bool = False
     lot_seq: List[float] = field(default_factory=list)
@@ -268,6 +290,8 @@ def effective_max_levels(params: NM1Params) -> int:
     return levels
 
 
+
+
 def build_lot_sequence(params: NM1Params) -> List[float]:
     levels = effective_max_levels(params)
     seq = [0.0] * levels
@@ -303,12 +327,22 @@ def extract_level_from_comment(comment: str) -> int:
     return level if level >= 0 else 0
 
 
-def infer_point(price: float) -> float:
-    # XAUUSD tick size is typically 0.01; keep a simple heuristic.
-    return 0.01 if price >= 10.0 else 0.00001
+def infer_point(price: float, symbol: str = "", price_scale: float = 1.0) -> float:
+    symbol = symbol.strip().upper()
+    if symbol == "USDJPY":
+        return 0.001 * (price_scale if price_scale > 0.0 else 1.0)
+    # Heuristic: large prices use 0.01, smaller use 0.00001.
+    base = 0.01 if price >= 10.0 else 0.00001
+    scale = price_scale if price_scale > 0.0 else 1.0
+    return base * scale
 
 
-def collect_basket_info(positions: List[Position], bid: float, ask: float) -> Tuple[BasketInfo, BasketInfo]:
+def collect_basket_info(
+    positions: List[Position],
+    bid: float,
+    ask: float,
+    contract_size: float,
+) -> Tuple[BasketInfo, BasketInfo]:
     buy = BasketInfo()
     sell = BasketInfo()
     buy_value = 0.0
@@ -327,7 +361,7 @@ def collect_basket_info(positions: List[Position], bid: float, ask: float) -> Tu
                 buy.level_count += 1
             buy.volume += pos.volume
             buy_value += pos.volume * price
-            buy.profit += (bid - price) * pos.volume * CONTRACT_SIZE
+            buy.profit += (bid - price) * pos.volume * contract_size
         else:
             price = pos.price
             if sell.count == 0:
@@ -341,7 +375,7 @@ def collect_basket_info(positions: List[Position], bid: float, ask: float) -> Tu
                 sell.level_count += 1
             sell.volume += pos.volume
             sell_value += pos.volume * price
-            sell.profit += (price - ask) * pos.volume * CONTRACT_SIZE
+            sell.profit += (price - ask) * pos.volume * contract_size
     if buy.volume > 0.0:
         buy.avg_price = buy_value / buy.volume
     if sell.volume > 0.0:
@@ -633,6 +667,7 @@ def close_positions(
     debug: bool,
     start_time_by_side: Dict[str, Optional[dt.datetime]],
     level_max_duration: Dict[int, float],
+    contract_size: float,
 ) -> None:
     remaining = []
     for pos in positions:
@@ -640,9 +675,9 @@ def close_positions(
             remaining.append(pos)
             continue
         if side == "buy":
-            profit = (bid - pos.price) * pos.volume * CONTRACT_SIZE
+            profit = (bid - pos.price) * pos.volume * contract_size
         else:
-            profit = (pos.price - ask) * pos.volume * CONTRACT_SIZE
+            profit = (pos.price - ask) * pos.volume * contract_size
         if not is_flex_comment(pos.comment):
             start_time = start_time_by_side.get(side)
             if start_time is not None:
@@ -671,6 +706,7 @@ def process_flex_partial(
     atr_now: float,
     tick_time: dt.datetime,
     debug: bool,
+    contract_size: float,
 ) -> None:
     params = state.params
     if atr_now <= 0.0 or params.flex_atr_profit_multiplier <= 0.0:
@@ -688,7 +724,7 @@ def process_flex_partial(
         if profit < target:
             remaining.append(pos)
             continue
-        realized = profit * pos.volume * CONTRACT_SIZE
+        realized = profit * pos.volume * contract_size
         if debug:
             print(
                 f"{tick_time.isoformat()} "
@@ -718,7 +754,7 @@ def process_flex_refill(
     side: str,
     trigger_price: float,
 ) -> None:
-    point = infer_point(trigger_price)
+    point = infer_point(trigger_price, state.symbol, state.params.price_scale)
     tol = point * 0.5
     refs = state.flex_buy_refs if side == "buy" else state.flex_sell_refs
     for ref in refs:
@@ -759,7 +795,8 @@ def process_tick(
     level_max_duration: Dict[int, float],
 ) -> None:
     params = state.params
-    buy, sell = collect_basket_info(positions, bid, ask)
+    contract_size = params.contract_size
+    buy, sell = collect_basket_info(positions, bid, ask, contract_size)
     entry_block_buy = adx_blocks_side(
         adx,
         plus_di,
@@ -813,6 +850,16 @@ def process_tick(
             state.start_time = tick_time
         if (tick_time - state.start_time).total_seconds() >= params.start_delay_seconds:
             if buy.count == 0 and sell.count == 0:
+                if debug:
+                    print(
+                        f"{tick_time.isoformat()} "
+                        f"INIT_ENTRY_CHECK "
+                        f"adx={adx:.2f} "
+                        f"plus_di={plus_di:.2f} "
+                        f"minus_di={minus_di:.2f} "
+                        f"entry_block_buy={int(entry_block_buy)} "
+                        f"entry_block_sell={int(entry_block_sell)}"
+                    )
                 opened_any = False
                 if not entry_block_buy:
                     open_position(
@@ -825,9 +872,20 @@ def process_tick(
                         1,
                         state,
                     )
+                    if debug:
+                        print(
+                            f"{tick_time.isoformat()} "
+                            f"OPEN BUY "
+                            f"lot={state.lot_seq[0]:.2f} "
+                            f"price={ask:.2f} "
+                            f"comment={make_level_comment(K_CORE_COMMENT, 1)} "
+                            f"level=1"
+                        )
                     if start_time_by_side.get("buy") is None:
                         start_time_by_side["buy"] = tick_time
                     opened_any = True
+                elif debug:
+                    print(f"{tick_time.isoformat()} OPEN BUY SKIP entry_block_buy=1")
                 if not entry_block_sell:
                     open_position(
                         positions,
@@ -839,9 +897,20 @@ def process_tick(
                         1,
                         state,
                     )
+                    if debug:
+                        print(
+                            f"{tick_time.isoformat()} "
+                            f"OPEN SELL "
+                            f"lot={state.lot_seq[0]:.2f} "
+                            f"price={bid:.2f} "
+                            f"comment={make_level_comment(K_CORE_COMMENT, 1)} "
+                            f"level=1"
+                        )
                     if start_time_by_side.get("sell") is None:
                         start_time_by_side["sell"] = tick_time
                     opened_any = True
+                elif debug:
+                    print(f"{tick_time.isoformat()} OPEN SELL SKIP entry_block_sell=1")
                 if positions:
                     state.initial_started = True
                 attempted_initial = opened_any
@@ -890,6 +959,7 @@ def process_tick(
                 debug,
                 start_time_by_side,
                 level_max_duration,
+                contract_size,
             )
         if sell.count > 0:
             close_positions(
@@ -902,6 +972,7 @@ def process_tick(
                 debug,
                 start_time_by_side,
                 level_max_duration,
+                contract_size,
             )
         state.prev_buy_count = buy.count
         state.prev_sell_count = sell.count
@@ -937,12 +1008,12 @@ def process_tick(
 
     if atr_now <= 0.0:
         atr_now = atr_current
-    process_flex_partial(state, positions, stats, bid, ask, atr_now, tick_time, debug)
+    process_flex_partial(state, positions, stats, bid, ask, atr_now, tick_time, debug, contract_size)
 
     if buy.count > 0:
         buy_profit_base = effective_profit_base(params, buy.level_count)
         if state.has_partial_buy:
-            target_profit = buy.volume * buy_profit_base * 0.5 * CONTRACT_SIZE
+            target_profit = buy.volume * buy_profit_base * 0.5 * contract_size
             if (buy.profit + state.realized_buy_profit) >= target_profit:
                 close_positions(
                     positions,
@@ -954,6 +1025,7 @@ def process_tick(
                     debug,
                     start_time_by_side,
                     level_max_duration,
+                    contract_size,
                 )
         else:
             target = buy.avg_price + buy_profit_base
@@ -968,12 +1040,13 @@ def process_tick(
                     debug,
                     start_time_by_side,
                     level_max_duration,
+                    contract_size,
                 )
 
     if sell.count > 0:
         sell_profit_base = effective_profit_base(params, sell.level_count)
         if state.has_partial_sell:
-            target_profit = sell.volume * sell_profit_base * 0.5 * CONTRACT_SIZE
+            target_profit = sell.volume * sell_profit_base * 0.5 * contract_size
             if (sell.profit + state.realized_sell_profit) >= target_profit:
                 close_positions(
                     positions,
@@ -985,6 +1058,7 @@ def process_tick(
                     debug,
                     start_time_by_side,
                     level_max_duration,
+                    contract_size,
                 )
         else:
             target = sell.avg_price - sell_profit_base
@@ -999,6 +1073,7 @@ def process_tick(
                     debug,
                     start_time_by_side,
                     level_max_duration,
+                    contract_size,
                 )
 
     if state.initial_started:
@@ -1082,7 +1157,7 @@ def process_tick(
             state.sell_stop_active = False
             state.sell_skip_price = 0.0
 
-    point = infer_point(bid)
+    point = infer_point(bid, state.symbol, params.price_scale)
     tol = point * 0.5
 
     if buy.count > 0 and (buy.level_count + state.buy_skip_levels) < levels:
@@ -1194,10 +1269,17 @@ def process_tick(
     state.prev_sell_count = sell.count
 
 
-def iter_ticks(data_dir: str, start: dt.datetime, end: dt.datetime) -> Iterator[Tuple[dt.datetime, float, float]]:
+def iter_ticks(
+    data_dir: str,
+    symbol: str,
+    start: dt.datetime,
+    end: dt.datetime,
+    price_scale: float = 1.0,
+) -> Iterator[Tuple[dt.datetime, float, float]]:
     current = start.date()
+    scale = price_scale if price_scale > 0.0 else 1.0
     while current <= end.date():
-        fname = f"XAUUSD_{current.isoformat()}.csv.gz"
+        fname = f"{symbol}_{current.isoformat()}.csv.gz"
         path = os.path.join(data_dir, str(current.year), fname)
         if os.path.exists(path):
             with gzip.open(path, "rt") as f:
@@ -1206,7 +1288,9 @@ def iter_ticks(data_dir: str, start: dt.datetime, end: dt.datetime) -> Iterator[
                     ts = dt.datetime.fromisoformat(row["datetime"])
                     if ts < start or ts > end:
                         continue
-                    yield ts, float(row["bid"]), float(row["ask"])
+                    bid = float(row["bid"]) * scale
+                    ask = float(row["ask"]) * scale
+                    yield ts, bid, ask
         current += dt.timedelta(days=1)
 
 
@@ -1222,13 +1306,13 @@ def parse_user_datetime(value: Optional[str], is_end: bool) -> Optional[dt.datet
     return dt.datetime.combine(date, dt.time(0, 0, 0))
 
 
-def find_latest_date(data_dir: str) -> Optional[dt.date]:
+def find_latest_date(data_dir: str, symbol: str) -> Optional[dt.date]:
     latest = None
     for root, _, files in os.walk(data_dir):
         for name in files:
-            if not name.startswith("XAUUSD_") or not name.endswith(".csv.gz"):
+            if not name.startswith(f"{symbol}_") or not name.endswith(".csv.gz"):
                 continue
-            date_str = name[len("XAUUSD_") : -len(".csv.gz")]
+            date_str = name[len(symbol) + 1 : -len(".csv.gz")]
             try:
                 d = dt.date.fromisoformat(date_str)
             except ValueError:
@@ -1238,8 +1322,8 @@ def find_latest_date(data_dir: str) -> Optional[dt.date]:
     return latest
 
 
-def build_default_range(data_dir: str) -> Tuple[dt.datetime, dt.datetime]:
-    latest = find_latest_date(data_dir)
+def build_default_range(data_dir: str, symbol: str) -> Tuple[dt.datetime, dt.datetime]:
+    latest = find_latest_date(data_dir, symbol)
     if latest is None:
         raise RuntimeError(f"No data found under {data_dir}")
     end = dt.datetime.combine(latest, dt.time(23, 59, 59, 999000))
@@ -1269,8 +1353,8 @@ def build_result_path(prefix: str = "") -> str:
     return os.path.join("result", f"{prefix}{timestamp}_{pid}.json")
 
 
-def init_symbol_state(params: NM1Params) -> SymbolState:
-    state = SymbolState(params=params)
+def init_symbol_state(params: NM1Params, symbol: str) -> SymbolState:
+    state = SymbolState(params=params, symbol=symbol)
     state.lot_seq = build_lot_sequence(params)
     state.flex_buy_refs = [FlexRef() for _ in range(K_MAX_LEVELS)]
     state.flex_sell_refs = [FlexRef() for _ in range(K_MAX_LEVELS)]
@@ -1289,8 +1373,42 @@ def apply_param_overrides(params: NM1Params, overrides: Optional[Dict[str, objec
     return params
 
 
+def normalize_symbol(symbol: str) -> str:
+    symbol = symbol.strip().upper()
+    if not symbol:
+        raise ValueError("Symbol must not be empty")
+    return symbol
+
+
+def load_symbol_param_file(path: str) -> Dict[str, Dict[str, object]]:
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError("Symbol params JSON must be an object of symbol -> params")
+    normalized: Dict[str, Dict[str, object]] = {}
+    for key, value in payload.items():
+        if not isinstance(value, dict):
+            raise ValueError(f"Symbol params for {key} must be an object")
+        normalized[normalize_symbol(str(key))] = value
+    return normalized
+
+
+def build_symbol_overrides(symbol: str, params_file: Optional[str]) -> Dict[str, object]:
+    overrides: Dict[str, object] = dict(SYMBOL_PARAM_PRESETS.get(symbol, {}))
+    file_path = params_file
+    if file_path is None:
+        default_path = "symbol_params.json"
+        if os.path.exists(default_path):
+            file_path = default_path
+    if file_path:
+        file_overrides = load_symbol_param_file(file_path)
+        overrides.update(file_overrides.get(symbol, {}))
+    return overrides
+
+
 def run_backtest(
     data_dir: str,
+    symbol: str,
     start: dt.datetime,
     end: dt.datetime,
     debug: bool,
@@ -1303,7 +1421,7 @@ def run_backtest(
     params = apply_param_overrides(NM1Params(), params_override)
     if base_lot_override is not None:
         params.base_lot = base_lot_override
-    state = init_symbol_state(params)
+    state = init_symbol_state(params, symbol)
 
     positions: List[Position] = []
     stats = Stats()
@@ -1313,11 +1431,12 @@ def run_backtest(
     reserve_funds = max(0.0, TOTAL_CAPITAL - START_BALANCE)
 
     max_lot = max(state.lot_seq) if state.lot_seq else params.base_lot
-    profit_amount = params.base_lot * params.profit_base * CONTRACT_SIZE
+    profit_amount = params.base_lot * params.profit_base * params.contract_size
     margin_call_detected = False
     if log_mode:
         print(
             "Backtest setup "
+            f"symbol={symbol} "
             f"base_lot={params.base_lot:.2f} "
             f"max_nanpin_lot={max_lot:.2f} "
             f"base_profit={params.profit_base:.8f} "
@@ -1325,7 +1444,7 @@ def run_backtest(
             f"profit_level_step={params.profit_base_level_step:.4f} "
             f"profit_level_min={params.profit_base_level_min:.4f} "
             f"profit_amount={profit_amount:.2f} "
-            f"contract_size={CONTRACT_SIZE:.0f} "
+            f"contract_size={params.contract_size:.0f} "
             f"start_balance={START_BALANCE:.2f} "
             f"total_capital={TOTAL_CAPITAL:.2f} "
             f"reserve_funds={reserve_funds:.2f} "
@@ -1333,7 +1452,7 @@ def run_backtest(
             f"stop_on_margin_call={int(stop_on_margin_call)}"
         )
 
-    ticks = iter_ticks(data_dir, start, end)
+    ticks = iter_ticks(data_dir, symbol, start, end, params.price_scale)
     total_ticks = 0
     balance = START_BALANCE
     last_closed_profit = 0.0
@@ -1353,6 +1472,7 @@ def run_backtest(
     start_time_by_side: Dict[str, Optional[dt.datetime]] = {"buy": None, "sell": None}
     level_max_duration: Dict[int, float] = {}
     for tick_time, bid, ask in ticks:
+        log_snapshot = False
         tick_date = tick_time.date()
         tick_hour = tick_time.replace(minute=0, second=0, microsecond=0)
         if last_date is not None and tick_date != last_date and fund_mode == 1:
@@ -1381,6 +1501,7 @@ def run_backtest(
                     f"dd_now=0.00 "
                     f"dd_max=0.00"
                 )
+                log_snapshot = True
         elif tick_hour != current_hour:
             # dd_* are rates based on balance at log time.
             if last_balance > 0.0:
@@ -1398,6 +1519,7 @@ def run_backtest(
                     f"dd_now={drawdown_now:.6f} "
                     f"dd_max={max_drawdown:.6f}"
                 )
+                log_snapshot = True
             current_hour = tick_hour
             hour_peak_equity = last_equity
             hour_min_equity = last_equity
@@ -1443,18 +1565,28 @@ def run_backtest(
         unrealized = 0.0
         for pos in positions:
             if pos.side == "buy":
-                unrealized += (bid - pos.price) * pos.volume * CONTRACT_SIZE
+                unrealized += (bid - pos.price) * pos.volume * params.contract_size
             else:
-                unrealized += (pos.price - ask) * pos.volume * CONTRACT_SIZE
+                unrealized += (pos.price - ask) * pos.volume * params.contract_size
         equity = balance + unrealized
         used_margin = 0.0
         if positions:
             for pos in positions:
                 price = bid if pos.side == "buy" else ask
-                used_margin += pos.volume * CONTRACT_SIZE * price / LEVERAGE
+                used_margin += pos.volume * params.contract_size * price / LEVERAGE
         margin_level = equity / used_margin if used_margin > 0.0 else float("inf")
         hour_peak_equity = max(hour_peak_equity, equity)
         hour_min_equity = min(hour_min_equity, equity)
+        if log_mode and log_snapshot:
+            buy_info, sell_info = collect_basket_info(positions, bid, ask, params.contract_size)
+            print(
+                f"{tick_time.isoformat()} "
+                f"POS_SNAPSHOT "
+                f"buy_count={buy_info.count} "
+                f"buy_avg={buy_info.avg_price:.2f} "
+                f"sell_count={sell_info.count} "
+                f"sell_avg={sell_info.avg_price:.2f}"
+            )
 
         drawdown = hour_peak_equity - equity
         if equity > peak_equity:
@@ -1483,7 +1615,7 @@ def run_backtest(
                     f"margin_level={margin_level:.3f}"
                 )
             positions.clear()
-            state = init_symbol_state(params)
+            state = init_symbol_state(params, symbol)
             balance = 0.0
             start_time_by_side = {"buy": None, "sell": None}
             if stop_on_margin_call:
@@ -1535,9 +1667,9 @@ def run_backtest(
         last_ask = ask
         for pos in positions:
             if pos.side == "buy":
-                unrealized += (last_bid - pos.price) * pos.volume * CONTRACT_SIZE
+                unrealized += (last_bid - pos.price) * pos.volume * params.contract_size
             else:
-                unrealized += (pos.price - last_ask) * pos.volume * CONTRACT_SIZE
+                unrealized += (pos.price - last_ask) * pos.volume * params.contract_size
 
     final_funds = total_funds + balance
     profit = final_funds - TOTAL_CAPITAL
@@ -1545,6 +1677,7 @@ def run_backtest(
     if log_mode:
         result = {
             "range": {"start": start.isoformat(), "end": end.isoformat()},
+            "symbol": symbol,
             "ticks": total_ticks,
             "opened_trades": stats.opened_trades,
             "closed_trades": stats.closed_trades,
@@ -1563,12 +1696,13 @@ def run_backtest(
             "drawdown_over_50_count": over_50_count,
             "core_close_max_duration_sec": level_max_duration,
             "settings": {
+                "symbol": symbol,
                 "params": asdict(params),
                 "base_lot_override": base_lot_override,
                 "fund_mode": fund_mode,
                 "total_capital": TOTAL_CAPITAL,
                 "start_balance": START_BALANCE,
-                "contract_size": CONTRACT_SIZE,
+                "contract_size": params.contract_size,
                 "stop_on_margin_call": stop_on_margin_call,
             },
         }
@@ -1605,6 +1739,7 @@ def run_backtest(
 
 def run_daily_backtest_task(args: Tuple[
     str,
+    str,
     dt.datetime,
     dt.datetime,
     bool,
@@ -1615,6 +1750,7 @@ def run_daily_backtest_task(args: Tuple[
 ]) -> Dict[str, object]:
     (
         data_dir,
+        symbol,
         start,
         end,
         debug,
@@ -1625,6 +1761,7 @@ def run_daily_backtest_task(args: Tuple[
     ) = args
     final_funds, margin_call_detected, max_drawdown_rate, profit, unrealized_loss = run_backtest(
         data_dir,
+        symbol,
         start,
         end,
         debug,
@@ -1647,6 +1784,7 @@ def run_daily_backtest_task(args: Tuple[
 
 def optimize_base_lot(
     data_dir: str,
+    symbol: str,
     start: dt.datetime,
     end: dt.datetime,
     debug: bool,
@@ -1661,6 +1799,7 @@ def optimize_base_lot(
     while True:
         final_funds, margin_call_detected, _max_drawdown_rate, _profit, _unrealized_loss = run_backtest(
             data_dir,
+            symbol,
             start,
             end,
             debug,
@@ -1693,8 +1832,13 @@ def optimize_base_lot(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="NM1 backtest (XAUUSD)")
-    parser.add_argument("--data-dir", default="data/XAUUSD", help="Root data directory")
+    parser = argparse.ArgumentParser(description="NM1 backtest")
+    parser.add_argument("--symbol", default=DEFAULT_SYMBOL, help="Symbol (e.g. XAUUSD, BTCUSD)")
+    parser.add_argument("--data-dir", help="Root data directory (default: data/<SYMBOL>)")
+    parser.add_argument(
+        "--params-file",
+        help="JSON file with per-symbol parameter overrides (default: symbol_params.json if present)",
+    )
     parser.add_argument("--from", dest="from_dt", help="Start date/time (YYYY-MM-DD or ISO)")
     parser.add_argument("--to", dest="to_dt", help="End date/time (YYYY-MM-DD or ISO)")
     parser.add_argument("--debug", action="store_true", help="Print trade-level debug logs")
@@ -1749,10 +1893,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    symbol = normalize_symbol(args.symbol)
+    data_dir = args.data_dir or os.path.join("data", symbol)
+
     start = parse_user_datetime(args.from_dt, is_end=False)
     end = parse_user_datetime(args.to_dt, is_end=True)
     if start is None or end is None:
-        default_start, default_end = build_default_range(args.data_dir)
+        default_start, default_end = build_default_range(data_dir, symbol)
         start = start or default_start
         end = end or default_end
 
@@ -1767,6 +1914,9 @@ def main() -> None:
     if args.profit_base_level_min is not None:
         params_override["profit_base_level_min"] = args.profit_base_level_min
 
+    symbol_overrides = build_symbol_overrides(symbol, args.params_file)
+    if symbol_overrides:
+        params_override = {**symbol_overrides, **params_override}
     if not params_override:
         params_override = None
 
@@ -1774,7 +1924,8 @@ def main() -> None:
         if args.parallel_days:
             raise SystemExit("--parallel-days cannot be used with --optimize-lot")
         optimize_base_lot(
-            args.data_dir,
+            data_dir,
+            symbol,
             start,
             end,
             args.debug,
@@ -1787,7 +1938,8 @@ def main() -> None:
         worker_count = max(1, args.workers)
         tasks = [
             (
-                args.data_dir,
+                data_dir,
+                symbol,
                 day_start,
                 day_end,
                 args.debug,
@@ -1823,7 +1975,8 @@ def main() -> None:
         print(f"Summary: {result_path}")
     else:
         run_backtest(
-            args.data_dir,
+            data_dir,
+            symbol,
             start,
             end,
             args.debug,
