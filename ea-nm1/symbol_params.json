@@ -1,0 +1,19 @@
+{
+  "XAUUSD": {
+    "atr_multiplier": 1.4,
+    "min_atr": 1.6,
+    "base_lot": 0.03,
+    "profit_base": 1.0,
+    "max_levels": 12,
+    "contract_size": 100.0
+  },
+  "BTCUSD": {
+    "atr_multiplier": 2.5,
+    "min_atr": 10.0,
+    "base_lot": 0.1,
+    "profit_base": 4.0,
+    "max_levels": 8,
+    "contract_size": 1.0,
+    "price_scale": 100.0
+  }
+}
