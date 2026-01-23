@@ -8,3 +8,5 @@ profit_baseレベル調整モード
 
 --profit-base-level-modeを指定すると、ナンピンlevelが上がるほどprofit_baseを減らします。
 減少幅は--profit-base-level-step、下限は--profit-base-level-minで調整できます。
+
+stop_buy_limitのロジックについてはBACKTESTでは実装しない
