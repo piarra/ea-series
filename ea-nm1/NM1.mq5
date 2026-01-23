@@ -1,8 +1,9 @@
 #property strict
-#property version   "1.25"
+#property version   "1.26"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
+// v1.26 no martingaleモードを用意
 
 #include <Trade/Trade.mqh>
 
@@ -50,6 +51,7 @@ input double ProfitBaseXAUUSD = 1.5;
 input int MaxLevelsXAUUSD = 12;
 input double StopBuyLimitPriceXAUUSD = 4000.0;
 input double StopBuyLimitLotXAUUSD = 0.01;
+input bool NoMartingaleXAUUSD = false;
 
 input group "EURUSD"
 input bool EnableEURUSD = false;
@@ -61,6 +63,7 @@ input double ProfitBaseEURUSD = 0.00005;
 input int MaxLevelsEURUSD = 10;
 input double StopBuyLimitPriceEURUSD = 4000.0;
 input double StopBuyLimitLotEURUSD = 0.01;
+input bool NoMartingaleEURUSD = false;
 
 input group "USDJPY"
 input bool EnableUSDJPY = false;
@@ -72,6 +75,7 @@ input double ProfitBaseUSDJPY = 0.01;
 input int MaxLevelsUSDJPY = 12;
 input double StopBuyLimitPriceUSDJPY = 4000.0;
 input double StopBuyLimitLotUSDJPY = 0.01;
+input bool NoMartingaleUSDJPY = false;
 
 input group "AUDUSD"
 input bool EnableAUDUSD = false;
@@ -83,6 +87,7 @@ input double ProfitBaseAUDUSD = 1.0;
 input int MaxLevelsAUDUSD = 10;
 input double StopBuyLimitPriceAUDUSD = 4000.0;
 input double StopBuyLimitLotAUDUSD = 0.01;
+input bool NoMartingaleAUDUSD = false;
 
 input group "BTCUSD"
 input bool EnableBTCUSD = false;
@@ -94,6 +99,7 @@ input double ProfitBaseBTCUSD = 4.0;
 input int MaxLevelsBTCUSD = 8;
 input double StopBuyLimitPriceBTCUSD = 4000.0;
 input double StopBuyLimitLotBTCUSD = 0.01;
+input bool NoMartingaleBTCUSD = true;
 
 input group "ETHUSD"
 input bool EnableETHUSD = false;
@@ -105,6 +111,7 @@ input double ProfitBaseETHUSD = 1.0;
 input int MaxLevelsETHUSD = 12;
 input double StopBuyLimitPriceETHUSD = 4000.0;
 input double StopBuyLimitLotETHUSD = 0.01;
+input bool NoMartingaleETHUSD = false;
 
 struct NM1Params
 {
@@ -133,6 +140,7 @@ struct NM1Params
   int close_retry_delay_ms;
   double stop_buy_limit_price;
   double stop_buy_limit_lot;
+  bool no_martingale;
 };
 
 struct BasketInfo
@@ -284,6 +292,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.max_levels = MaxLevelsXAUUSD;
     params.stop_buy_limit_price = StopBuyLimitPriceXAUUSD;
     params.stop_buy_limit_lot = StopBuyLimitLotXAUUSD;
+    params.no_martingale = NoMartingaleXAUUSD;
   }
   else if (index == 1)
   {
@@ -294,6 +303,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.max_levels = MaxLevelsEURUSD;
     params.stop_buy_limit_price = StopBuyLimitPriceEURUSD;
     params.stop_buy_limit_lot = StopBuyLimitLotEURUSD;
+    params.no_martingale = NoMartingaleEURUSD;
   }
   else if (index == 2)
   {
@@ -304,6 +314,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.max_levels = MaxLevelsUSDJPY;
     params.stop_buy_limit_price = StopBuyLimitPriceUSDJPY;
     params.stop_buy_limit_lot = StopBuyLimitLotUSDJPY;
+    params.no_martingale = NoMartingaleUSDJPY;
   }
   else if (index == 3)
   {
@@ -314,6 +325,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.max_levels = MaxLevelsAUDUSD;
     params.stop_buy_limit_price = StopBuyLimitPriceAUDUSD;
     params.stop_buy_limit_lot = StopBuyLimitLotAUDUSD;
+    params.no_martingale = NoMartingaleAUDUSD;
   }
   else if (index == 4)
   {
@@ -324,6 +336,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.max_levels = MaxLevelsBTCUSD;
     params.stop_buy_limit_price = StopBuyLimitPriceBTCUSD;
     params.stop_buy_limit_lot = StopBuyLimitLotBTCUSD;
+    params.no_martingale = NoMartingaleBTCUSD;
   }
   else if (index == 5)
   {
@@ -334,6 +347,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.max_levels = MaxLevelsETHUSD;
     params.stop_buy_limit_price = StopBuyLimitPriceETHUSD;
     params.stop_buy_limit_lot = StopBuyLimitLotETHUSD;
+    params.no_martingale = NoMartingaleETHUSD;
   }
 }
 
@@ -536,11 +550,17 @@ void BuildLotSequence(SymbolState &state, const string symbol)
   NM1Params params = state.params;
   int levels = EffectiveMaxLevels(state.params);
   state.lot_seq[0] = params.base_lot;
-  if (levels > 1)
-    state.lot_seq[1] = params.base_lot;
-  for (int i = 2; i < levels; ++i)
+  if (params.no_martingale)
   {
-    state.lot_seq[i] = state.lot_seq[i - 1] + state.lot_seq[i - 2];
+    for (int i = 1; i < levels; ++i)
+      state.lot_seq[i] = params.base_lot;
+  }
+  else
+  {
+    if (levels > 1)
+      state.lot_seq[1] = params.base_lot;
+    for (int i = 2; i < levels; ++i)
+      state.lot_seq[i] = state.lot_seq[i - 1] + state.lot_seq[i - 2];
   }
   for (int i = 0; i < levels; ++i)
   {
@@ -1265,6 +1285,20 @@ void ProcessSymbolTick(SymbolState &state)
   if (atr_now <= 0.0)
     atr_now = GetCurrentAtr(state);
   ProcessFlexPartial(state, symbol, bid, ask, atr_now);
+
+  if (params.no_martingale && buy.count > 0 && sell.count > 0)
+  {
+    int max_level = MathMax(buy.level_count, sell.level_count);
+    double total_profit = (buy.profit + state.realized_buy_profit) + (sell.profit + state.realized_sell_profit);
+    if (max_level >= 5 && total_profit > 0.0)
+    {
+      CloseBasket(state, POSITION_TYPE_BUY);
+      CloseBasket(state, POSITION_TYPE_SELL);
+      state.prev_buy_count = buy.count;
+      state.prev_sell_count = sell.count;
+      return;
+    }
+  }
 
   if (buy.count > 0)
   {
