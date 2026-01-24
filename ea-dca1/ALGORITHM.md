@@ -324,3 +324,10 @@ if price > cycleRecentHigh * 1.05:
 まず CloseFractionOnTP = 1.0（フルクローズ）から開始し、
 回転率とDDのバランスを見ながら Tp*Pct, BaseDcaPctPerDay, MaxSymbolExposurePct をチューニングしていく。
 
+---
+
+## 10. 実装ファイル
+
+- MT5 EA: `ea-dca1/DCA1.mq5`
+- Pythonバックテスト: `ea-dca1/backtest_dca1.py`
+- パラメータ例: `ea-dca1/params_example.json`

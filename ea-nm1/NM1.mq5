@@ -15,7 +15,7 @@ const int kAtrBasePeriod = 14;
 const int kLotDigits = 2;
 const double kMinLot = 0.01;
 const double kMaxLot = 100.0;
-const int kCoreFlexSplitLevel = 100; // 100 = no split
+const int kCoreFlexSplitLevel = 4;
 const string kFlexComment = "NM1_FLEX";
 const string kCoreComment = "NM1_CORE";
 }
@@ -56,10 +56,10 @@ input bool NoMartingaleXAUUSD = false;
 input group "EURUSD"
 input bool EnableEURUSD = false;
 input string SymbolEURUSD = "EURUSD";
-input double BaseLotEURUSD = 0.01;
-input double AtrMultiplierEURUSD = 1.3;
-input double MinAtrEURUSD = 0.00025;
-input double ProfitBaseEURUSD = 0.00005;
+input double BaseLotEURUSD = 0.3;
+input double AtrMultiplierEURUSD = 3.0;
+input double MinAtrEURUSD = 0.00050;
+input double ProfitBaseEURUSD = 0.00010;
 input int MaxLevelsEURUSD = 10;
 input double StopBuyLimitPriceEURUSD = 4000.0;
 input double StopBuyLimitLotEURUSD = 0.01;
