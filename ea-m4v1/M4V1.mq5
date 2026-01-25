@@ -2,11 +2,21 @@
 //| BollingerBand Cross Long/Short EA (MT5)                         |
 //| H4ロジック固定 / ショートはEnableShortがtrueなら実施             |
 //+------------------------------------------------------------------+
+
+// TP	annualProfit
+// 5000	2821
+// 6000	3337
+// 7000	3586
+// 8000	3787
+// 9000	3986
+// 10000	3792
+
 #property strict
 
 input double Lots          = 0.10;
 input int    Slippage      = 3;
 input int    MagicNumber   = 12345;
+input int    TakeProfitPips = 9000;
 
 // ボリンジャーバンド設定
 input int    BandsPeriod   = 20;
@@ -126,6 +136,16 @@ void Open(string sym, double lots, int slippage, int magic, ENUM_POSITION_TYPE t
    double price = (type==POSITION_TYPE_BUY)
       ? SymbolInfoDouble(sym, SYMBOL_ASK)
       : SymbolInfoDouble(sym, SYMBOL_BID);
+   int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   double point = SymbolInfoDouble(sym, SYMBOL_POINT);
+   double pip = (digits==3 || digits==5) ? point*10.0 : point;
+   double tp = 0.0;
+   if(TakeProfitPips > 0)
+   {
+      double dist = TakeProfitPips * pip;
+      tp = (type==POSITION_TYPE_BUY) ? price + dist : price - dist;
+      tp = NormalizeDouble(tp, digits);
+   }
 
    MqlTradeRequest req;
    MqlTradeResult  res;
@@ -138,6 +158,8 @@ void Open(string sym, double lots, int slippage, int magic, ENUM_POSITION_TYPE t
    req.deviation = slippage;
    req.type     = (type==POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    req.price    = price;
+   if(tp > 0.0)
+      req.tp    = tp;
 
    if(!OrderSend(req, res))
    {
