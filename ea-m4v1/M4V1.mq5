@@ -13,7 +13,7 @@ input double BreakEvenK    = 1; // TP * k 利益で建値SL
 input bool   EnableTrailOnTakeProfit = false; // BBタッチ時にトレーリングへ移行
 input int    TrailingStopPips = 300; // トレーリングの最小幅(pips)
 input int    TrailingATRPeriod  = 14;  // ATR計算期間
-input double TrailingATRMultiplier = 2.5; // ATR倍率（ボラ依存の追随距離）
+input double TrailingATRMultiplier = 2.2; // ATR倍率（ボラ依存の追随距離）
 input int    TrailingStepPips = 5; // SLを更新する最小刻み(pips)
 
 // ボリンジャーバンド設定
@@ -21,7 +21,7 @@ input int    BandsPeriod   = 20;
 input double BandsDev      = 2.0;
 
 // ★ ショート可否フラグ
-input bool   EnableShort   = true;
+input bool   EnableShort   = false;
 
 // 内部制御
 datetime lastTradeBarTimeLong = 0;
