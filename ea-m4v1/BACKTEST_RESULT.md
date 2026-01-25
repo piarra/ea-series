@@ -27,24 +27,38 @@ TP: 9000, k = 1
 
 # USDJPY
 USDJPY
+trailingなし, both side
+   tp: 
 	150	1428
 	200	1580
 	250	1278
+* Trailingなしのほうがパフォーマンスがよい
 
 # GBPUSD 
 TP 200
+
 buy only = 882
+buy only = 1745 *Trailingあり 最小幅20
+buy only = 1745 *Trailingあり 最小幅30 
+buy only = 1385 *Trailingあり 最小幅300
+* 最小幅も通貨ごとに設定する必要がある
 
 # GBPJPY
 TP 200
 buy only = 503
+buy only = 604 * Trailingあり 最小幅30
 
 # EURUSD
 TP 200
 buy only = 518
+buy only = 87 * Trailingあり 最小幅305
+
 
 # BTCUSD
 TP 500000
 buy only = 2202
 both side = 3471 max dd 6.15
+
+buy only = 2028 * Trailingあり 最小幅
+both side = 5257 * Trailingあり
 

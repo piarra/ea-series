@@ -96,7 +96,12 @@ void OnTick()
    if(hasLong && bid >= upper[0])
    {
       if(EnableTrailOnTakeProfit)
-         trailLongActive = true;
+      {
+         if(HasLosingPosition(sym, MagicNumber, POSITION_TYPE_BUY))
+            CloseAll(sym, MagicNumber, POSITION_TYPE_BUY);
+         else
+            trailLongActive = true;
+      }
       else
          CloseAll(sym, MagicNumber, POSITION_TYPE_BUY);
    }
@@ -105,7 +110,12 @@ void OnTick()
    if(hasShort && ask <= lower[0])
    {
       if(EnableTrailOnTakeProfit)
-         trailShortActive = true;
+      {
+         if(HasLosingPosition(sym, MagicNumber, POSITION_TYPE_SELL))
+            CloseAll(sym, MagicNumber, POSITION_TYPE_SELL);
+         else
+            trailShortActive = true;
+      }
       else
          CloseAll(sym, MagicNumber, POSITION_TYPE_SELL);
    }
@@ -153,6 +163,38 @@ bool HasOpen(string sym, int magic, ENUM_POSITION_TYPE type)
          if(PositionGetString(POSITION_SYMBOL)==sym &&
             PositionGetInteger(POSITION_MAGIC)==magic &&
             PositionGetInteger(POSITION_TYPE)==type)
+            return true;
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+bool HasLosingPosition(string sym, int magic, ENUM_POSITION_TYPE type)
+{
+   double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+   double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL)!=sym ||
+         PositionGetInteger(POSITION_MAGIC)!=magic ||
+         PositionGetInteger(POSITION_TYPE)!=type)
+         continue;
+
+      double open = PositionGetDouble(POSITION_PRICE_OPEN);
+      if(type==POSITION_TYPE_BUY)
+      {
+         if(bid < open)
+            return true;
+      }
+      else if(type==POSITION_TYPE_SELL)
+      {
+         if(ask > open)
             return true;
       }
    }
