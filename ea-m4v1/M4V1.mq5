@@ -3,20 +3,19 @@
 //| H4ロジック固定 / ショートはEnableShortがtrueなら実施             |
 //+------------------------------------------------------------------+
 
-// TP	annualProfit
-// 5000	2821
-// 6000	3337
-// 7000	3586
-// 8000	3787
-// 9000	3986
-// 10000	3792
-
 #property strict
 
 input double Lots          = 0.10;
 input int    Slippage      = 3;
 input int    MagicNumber   = 12345;
 input int    TakeProfitPips = 9000;
+input double BreakEvenK    = 1; // TP * k 利益で建値SL
+input bool   EnableTrailOnTakeProfit = false; // 利確条件でトレーリングを有効化
+input int    TrailingStopPips = 300; // トレーリングの最小幅(pips)
+input double TrailingActivationK = 0.35; // TP * k 利益でトレーリング開始
+input int    TrailingATRPeriod  = 14;  // ATR計算期間
+input double TrailingATRMultiplier = 2.5; // ATR倍率（ボラ依存の追随距離）
+input int    TrailingStepPips = 5; // SLを更新する最小刻み(pips)
 
 // ボリンジャーバンド設定
 input int    BandsPeriod   = 20;
@@ -29,12 +28,17 @@ input bool   EnableShort   = true;
 datetime lastTradeBarTimeLong = 0;
 datetime lastTradeBarTimeShort = 0;
 int bandsHandle = INVALID_HANDLE;
+int atrHandle   = INVALID_HANDLE;
 
 //+------------------------------------------------------------------+
 int OnInit()
 {
    bandsHandle = iBands(_Symbol, PERIOD_H4, BandsPeriod, 0, BandsDev, PRICE_CLOSE);
    if(bandsHandle == INVALID_HANDLE)
+      return(INIT_FAILED);
+
+   atrHandle = iATR(_Symbol, PERIOD_H4, TrailingATRPeriod);
+   if(atrHandle == INVALID_HANDLE)
       return(INIT_FAILED);
    return(INIT_SUCCEEDED);
 }
@@ -43,6 +47,8 @@ void OnDeinit(const int reason)
 {
    if(bandsHandle != INVALID_HANDLE)
       IndicatorRelease(bandsHandle);
+   if(atrHandle != INVALID_HANDLE)
+      IndicatorRelease(atrHandle);
 }
 //+------------------------------------------------------------------+
 void OnTick()
@@ -70,13 +76,29 @@ void OnTick()
    double bid = SymbolInfoDouble(sym, SYMBOL_BID);
    double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
 
+   // ======= 建値SL：TP*k利益到達時 =======
+   ApplyBreakEven(sym, MagicNumber, BreakEvenK);
+
+    // ======= トレーリング（ボラ対応） =======
+   if(EnableTrailOnTakeProfit)
+   {
+      ApplyTrailing(sym, MagicNumber, POSITION_TYPE_BUY, TrailingStopPips);
+      ApplyTrailing(sym, MagicNumber, POSITION_TYPE_SELL, TrailingStopPips);
+   }
+
    // ======= ロング決済：上バンドタッチ =======
    if(hasLong && bid >= upper[0])
-      CloseAll(sym, MagicNumber, POSITION_TYPE_BUY);
+   {
+      if(!EnableTrailOnTakeProfit)
+         CloseAll(sym, MagicNumber, POSITION_TYPE_BUY);
+   }
 
    // ======= ショート決済：下バンドタッチ =======
    if(hasShort && ask <= lower[0])
-      CloseAll(sym, MagicNumber, POSITION_TYPE_SELL);
+   {
+      if(!EnableTrailOnTakeProfit)
+         CloseAll(sym, MagicNumber, POSITION_TYPE_SELL);
+   }
 
    // ======= エントリー =======
 
@@ -87,7 +109,7 @@ void OnTick()
 
    bool newBarLong = (time1 != lastTradeBarTimeLong);
 
-   if(!hasLong && !hasShort && crossLong && newBarLong)
+   if(!hasLong && crossLong && newBarLong)
    {
       Open(sym, Lots, Slippage, MagicNumber, POSITION_TYPE_BUY);
       lastTradeBarTimeLong = time1;
@@ -101,7 +123,7 @@ void OnTick()
 
    bool newBarShort = (time1 != lastTradeBarTimeShort);
 
-   if(!hasLong && !hasShort && crossShort && newBarShort)
+   if(!hasShort && crossShort && newBarShort)
    {
       Open(sym, Lots, Slippage, MagicNumber, POSITION_TYPE_SELL);
       lastTradeBarTimeShort = time1;
@@ -156,6 +178,7 @@ void Open(string sym, double lots, int slippage, int magic, ENUM_POSITION_TYPE t
    req.volume   = lots;
    req.magic    = magic;
    req.deviation = slippage;
+   req.comment  = "M4V1";
    req.type     = (type==POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    req.price    = price;
    if(tp > 0.0)
@@ -192,6 +215,7 @@ void CloseAll(string sym, int magic, ENUM_POSITION_TYPE type)
             req.magic  = magic;
             req.volume = PositionGetDouble(POSITION_VOLUME);
             req.position = ticket; // Close the specific position in hedging mode
+            req.comment = "M4V1";
             req.type   = (type==POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
             req.price  = price;
 
@@ -200,6 +224,156 @@ void CloseAll(string sym, int magic, ENUM_POSITION_TYPE type)
                PrintFormat("OrderSend failed in CloseAll: retcode=%d, last_error=%d", res.retcode, GetLastError());
             }
          }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+void ApplyBreakEven(string sym, int magic, double k)
+{
+   if(k <= 0.0 || TakeProfitPips <= 0)
+      return;
+
+   int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   double point = SymbolInfoDouble(sym, SYMBOL_POINT);
+   double pip = (digits==3 || digits==5) ? point*10.0 : point;
+   double threshold = TakeProfitPips * pip * k;
+   double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+   double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL)!=sym ||
+         PositionGetInteger(POSITION_MAGIC)!=magic)
+         continue;
+
+      ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      double open = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+
+      if(type==POSITION_TYPE_BUY)
+      {
+         if(sl >= open) continue;
+         if((bid - open) < threshold) continue;
+      }
+      else if(type==POSITION_TYPE_SELL)
+      {
+         if(sl > 0.0 && sl <= open) continue;
+         if((open - ask) < threshold) continue;
+      }
+      else
+      {
+         continue;
+      }
+
+      MqlTradeRequest req;
+      MqlTradeResult  res;
+      ZeroMemory(req);
+
+      req.action   = TRADE_ACTION_SLTP;
+      req.symbol   = sym;
+      req.position = ticket;
+      req.sl       = NormalizeDouble(open, digits);
+      if(tp > 0.0)
+         req.tp    = NormalizeDouble(tp, digits);
+
+      if(!OrderSend(req, res))
+      {
+         PrintFormat("OrderSend failed in ApplyBreakEven: retcode=%d, last_error=%d", res.retcode, GetLastError());
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+void ApplyTrailing(string sym, int magic, ENUM_POSITION_TYPE type, int trailingPips)
+{
+   if(trailingPips <= 0 || TakeProfitPips <= 0)
+      return;
+
+   // 価格関連
+   int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   double point = SymbolInfoDouble(sym, SYMBOL_POINT);
+   double pip = (digits==3 || digits==5) ? point*10.0 : point;
+   double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+   double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+
+   // 開始条件：TP * TrailingActivationK 利益
+   double activation = TakeProfitPips * pip * TrailingActivationK;
+   if(activation <= 0.0)
+      return;
+
+   // ボラティリティに応じたトレイル幅（ATRベース）
+   double atrBuf[];
+   ArraySetAsSeries(atrBuf, true);
+   if(CopyBuffer(atrHandle, 0, 0, 1, atrBuf) < 1)
+      return;
+   double volTrail = atrBuf[0] * TrailingATRMultiplier;
+   double minTrail = trailingPips * pip;
+   double trail = MathMax(minTrail, volTrail);
+
+   // 最小更新刻み
+   double step = TrailingStepPips * pip;
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL)!=sym ||
+         PositionGetInteger(POSITION_MAGIC)!=magic ||
+         PositionGetInteger(POSITION_TYPE)!=type)
+         continue;
+
+      double open = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+      double new_sl = 0.0;
+      double move_th = step > 0 ? step : point; // 更新最小幅
+
+      if(type==POSITION_TYPE_BUY)
+      {
+         // 利益が閾値未達ならスキップ
+         if((bid - open) < activation)
+            continue;
+         new_sl = bid - trail;
+         // 少なくとも建値以上を維持（損益を食わない）
+         if(new_sl < open) new_sl = open;
+         // 十分に前進した時のみ更新
+         if(sl > 0.0 && new_sl <= sl + move_th) continue;
+      }
+      else if(type==POSITION_TYPE_SELL)
+      {
+         if((open - ask) < activation)
+            continue;
+         new_sl = ask + trail;
+         if(new_sl > open) new_sl = open;
+         if(sl > 0.0 && new_sl >= sl - move_th) continue;
+      }
+      else
+      {
+         continue;
+      }
+
+      MqlTradeRequest req;
+      MqlTradeResult  res;
+      ZeroMemory(req);
+
+      req.action   = TRADE_ACTION_SLTP;
+      req.symbol   = sym;
+      req.position = ticket;
+      req.sl       = NormalizeDouble(new_sl, digits);
+      if(tp > 0.0)
+         req.tp    = NormalizeDouble(tp, digits);
+
+      if(!OrderSend(req, res))
+      {
+         PrintFormat("OrderSend failed in ApplyTrailing: retcode=%d, last_error=%d", res.retcode, GetLastError());
       }
    }
 }

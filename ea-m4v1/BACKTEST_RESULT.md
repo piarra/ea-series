@@ -1,5 +1,7 @@
-# XAUUSD
+# ロット
+すべて50000USD開始,0.1ロットでの結果
 
+# XAUUSD
 XAUUSD	TP	profit	Max DD
 	5000	2821	-5.22
 	6000	3337	same
@@ -8,12 +10,21 @@ XAUUSD	TP	profit	Max DD
 	9000	3986	same
 	10000	3792	same
 
+TP: 9000 
+   k = 1   3986 -5.22
+   k = 0.5  3401
+   k = 0.25 3880
+   k = 0.1 2796 -3.51(max dd)
+
+トレーリングありの場合
+TP: 9000, k = 1
+   profit = 8383
+
 # USDJPY
-USDJPY	
+USDJPY
 	150	1428
 	200	1580
 	250	1278
-
 
 # GBPUSD 
 TP 200
