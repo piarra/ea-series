@@ -339,28 +339,40 @@ void ApplyTrailing(string sym, int magic, ENUM_POSITION_TYPE type, int trailingP
 
       double open = PositionGetDouble(POSITION_PRICE_OPEN);
       double sl = PositionGetDouble(POSITION_SL);
-      double tp = PositionGetDouble(POSITION_TP);
-      double new_sl = 0.0;
+      double new_sl = sl;
+      bool update_sl = false;
       double move_th = step > 0 ? step : point; // 更新最小幅
 
       if(type==POSITION_TYPE_BUY)
       {
-         new_sl = bid - trail;
+         double cand_sl = bid - trail;
          // 少なくとも建値以上を維持（損益を食わない）
-         if(new_sl < open) new_sl = open;
+         if(cand_sl < open) cand_sl = open;
          // 十分に前進した時のみ更新
-         if(sl > 0.0 && new_sl <= sl + move_th) continue;
+         if(sl <= 0.0 || cand_sl > sl + move_th)
+         {
+            new_sl = cand_sl;
+            update_sl = true;
+         }
+
       }
       else if(type==POSITION_TYPE_SELL)
       {
-         new_sl = ask + trail;
-         if(new_sl > open) new_sl = open;
-         if(sl > 0.0 && new_sl >= sl - move_th) continue;
+         double cand_sl = ask + trail;
+         if(cand_sl > open) cand_sl = open;
+         if(sl <= 0.0 || cand_sl < sl - move_th)
+         {
+            new_sl = cand_sl;
+            update_sl = true;
+         }
       }
       else
       {
          continue;
       }
+
+      if(!update_sl)
+         continue;
 
       MqlTradeRequest req;
       MqlTradeResult  res;
@@ -369,9 +381,8 @@ void ApplyTrailing(string sym, int magic, ENUM_POSITION_TYPE type, int trailingP
       req.action   = TRADE_ACTION_SLTP;
       req.symbol   = sym;
       req.position = ticket;
-      req.sl       = NormalizeDouble(new_sl, digits);
-      if(tp > 0.0)
-         req.tp    = NormalizeDouble(tp, digits);
+      if(new_sl > 0.0)
+         req.sl    = NormalizeDouble(new_sl, digits);
 
       if(!OrderSend(req, res))
       {

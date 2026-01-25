@@ -18,7 +18,10 @@ TP: 9000
 
 トレーリングありの場合
 TP: 9000, k = 1
-   profit = 8383
+   profit = 8051 (sl pip 300, atr幅2.4)
+   profit = 7873 (sl pip 300, atr幅2.5)
+   profit = 7701 (sl pip 300, atr幅2.6)
+
 
 # USDJPY
 USDJPY
