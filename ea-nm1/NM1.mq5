@@ -44,12 +44,12 @@ input double DiGapMin = 2.0;
 input group "XAUUSD"
 input bool EnableXAUUSD = true;
 input string SymbolXAUUSD = "XAUUSD";
-input double BaseLotXAUUSD = 0.03;
-input double AtrMultiplierXAUUSD = 1.4;
+input double BaseLotXAUUSD = 0.04;
+input double AtrMultiplierXAUUSD = 1.2;
 input double NanpinLevelRatioXAUUSD = 1.1;
 input bool StrictNanpinSpacingXAUUSD = true;
 input double MinAtrXAUUSD = 1.6;
-input double ProfitBaseXAUUSD = 1.5;
+input double ProfitBaseXAUUSD = 2.0;
 input int MaxLevelsXAUUSD = 12;
 input double StopBuyLimitPriceXAUUSD = 4000.0;
 input double StopBuyLimitLotXAUUSD = 0.01;
@@ -73,7 +73,7 @@ input group "USDJPY"
 input bool EnableUSDJPY = false;
 input string SymbolUSDJPY = "USDJPY";
 input double BaseLotUSDJPY = 0.3;
-input double AtrMultiplierUSDJPY = 1.6;
+input double AtrMultiplierUSDJPY = 3.0;
 input double NanpinLevelRatioUSDJPY = 1.1;
 input bool StrictNanpinSpacingUSDJPY = true;
 input double MinAtrUSDJPY = 0.05;
