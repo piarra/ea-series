@@ -46,6 +46,8 @@ input bool EnableXAUUSD = true;
 input string SymbolXAUUSD = "XAUUSD";
 input double BaseLotXAUUSD = 0.03;
 input double AtrMultiplierXAUUSD = 1.4;
+input double NanpinLevelRatioXAUUSD = 1.1;
+input bool StrictNanpinSpacingXAUUSD = true;
 input double MinAtrXAUUSD = 1.6;
 input double ProfitBaseXAUUSD = 1.5;
 input int MaxLevelsXAUUSD = 12;
@@ -58,6 +60,8 @@ input bool EnableEURUSD = false;
 input string SymbolEURUSD = "EURUSD";
 input double BaseLotEURUSD = 0.3;
 input double AtrMultiplierEURUSD = 3.0;
+input double NanpinLevelRatioEURUSD = 1.1;
+input bool StrictNanpinSpacingEURUSD = true;
 input double MinAtrEURUSD = 0.00050;
 input double ProfitBaseEURUSD = 0.00010;
 input int MaxLevelsEURUSD = 10;
@@ -70,6 +74,8 @@ input bool EnableUSDJPY = false;
 input string SymbolUSDJPY = "USDJPY";
 input double BaseLotUSDJPY = 0.3;
 input double AtrMultiplierUSDJPY = 1.6;
+input double NanpinLevelRatioUSDJPY = 1.1;
+input bool StrictNanpinSpacingUSDJPY = true;
 input double MinAtrUSDJPY = 0.05;
 input double ProfitBaseUSDJPY = 0.01;
 input int MaxLevelsUSDJPY = 12;
@@ -82,6 +88,8 @@ input bool EnableAUDUSD = false;
 input string SymbolAUDUSD = "AUDUSD";
 input double BaseLotAUDUSD = 0.01;
 input double AtrMultiplierAUDUSD = 1.2;
+input double NanpinLevelRatioAUDUSD = 1.1;
+input bool StrictNanpinSpacingAUDUSD = true;
 input double MinAtrAUDUSD = 0.00015;
 input double ProfitBaseAUDUSD = 1.0;
 input int MaxLevelsAUDUSD = 10;
@@ -94,6 +102,8 @@ input bool EnableBTCUSD = false;
 input string SymbolBTCUSD = "BTCUSD";
 input double BaseLotBTCUSD = 0.3;
 input double AtrMultiplierBTCUSD = 2.5;
+input double NanpinLevelRatioBTCUSD = 1.1;
+input bool StrictNanpinSpacingBTCUSD = true;
 input double MinAtrBTCUSD = 10.0;
 input double ProfitBaseBTCUSD = 4.0;
 input int MaxLevelsBTCUSD = 8;
@@ -106,6 +116,8 @@ input bool EnableETHUSD = false;
 input string SymbolETHUSD = "ETHUSD";
 input double BaseLotETHUSD = 0.1;
 input double AtrMultiplierETHUSD = 1.6;
+input double NanpinLevelRatioETHUSD = 1.1;
+input bool StrictNanpinSpacingETHUSD = true;
 input double MinAtrETHUSD = 1.2;
 input double ProfitBaseETHUSD = 1.0;
 input int MaxLevelsETHUSD = 12;
@@ -119,6 +131,8 @@ struct NM1Params
   int slippage_points;
   int start_delay_seconds;
   double atr_multiplier;
+  double nanpin_level_ratio;
+  bool strict_nanpin_spacing;
   double min_atr;
   bool safety_mode;
   bool safe_stop_mode;
@@ -286,6 +300,8 @@ void LoadParamsForIndex(int index, NM1Params &params)
   if (index == 0)
   {
     params.atr_multiplier = AtrMultiplierXAUUSD;
+    params.nanpin_level_ratio = NanpinLevelRatioXAUUSD;
+    params.strict_nanpin_spacing = StrictNanpinSpacingXAUUSD;
     params.min_atr = MinAtrXAUUSD;
     params.base_lot = BaseLotXAUUSD;
     params.profit_base = ProfitBaseXAUUSD;
@@ -297,6 +313,8 @@ void LoadParamsForIndex(int index, NM1Params &params)
   else if (index == 1)
   {
     params.atr_multiplier = AtrMultiplierEURUSD;
+    params.nanpin_level_ratio = NanpinLevelRatioEURUSD;
+    params.strict_nanpin_spacing = StrictNanpinSpacingEURUSD;
     params.min_atr = MinAtrEURUSD;
     params.base_lot = BaseLotEURUSD;
     params.profit_base = ProfitBaseEURUSD;
@@ -308,6 +326,8 @@ void LoadParamsForIndex(int index, NM1Params &params)
   else if (index == 2)
   {
     params.atr_multiplier = AtrMultiplierUSDJPY;
+    params.nanpin_level_ratio = NanpinLevelRatioUSDJPY;
+    params.strict_nanpin_spacing = StrictNanpinSpacingUSDJPY;
     params.min_atr = MinAtrUSDJPY;
     params.base_lot = BaseLotUSDJPY;
     params.profit_base = ProfitBaseUSDJPY;
@@ -319,6 +339,8 @@ void LoadParamsForIndex(int index, NM1Params &params)
   else if (index == 3)
   {
     params.atr_multiplier = AtrMultiplierAUDUSD;
+    params.nanpin_level_ratio = NanpinLevelRatioAUDUSD;
+    params.strict_nanpin_spacing = StrictNanpinSpacingAUDUSD;
     params.min_atr = MinAtrAUDUSD;
     params.base_lot = BaseLotAUDUSD;
     params.profit_base = ProfitBaseAUDUSD;
@@ -330,6 +352,8 @@ void LoadParamsForIndex(int index, NM1Params &params)
   else if (index == 4)
   {
     params.atr_multiplier = AtrMultiplierBTCUSD;
+    params.nanpin_level_ratio = NanpinLevelRatioBTCUSD;
+    params.strict_nanpin_spacing = StrictNanpinSpacingBTCUSD;
     params.min_atr = MinAtrBTCUSD;
     params.base_lot = BaseLotBTCUSD;
     params.profit_base = ProfitBaseBTCUSD;
@@ -341,6 +365,8 @@ void LoadParamsForIndex(int index, NM1Params &params)
   else if (index == 5)
   {
     params.atr_multiplier = AtrMultiplierETHUSD;
+    params.nanpin_level_ratio = NanpinLevelRatioETHUSD;
+    params.strict_nanpin_spacing = StrictNanpinSpacingETHUSD;
     params.min_atr = MinAtrETHUSD;
     params.base_lot = BaseLotETHUSD;
     params.profit_base = ProfitBaseETHUSD;
@@ -838,6 +864,33 @@ double EnsureSellTarget(SymbolState &state, const BasketInfo &sell, double step,
     state.sell_level_price[level_index] = target;
   }
   return target;
+}
+
+double LevelStepFactor(const NM1Params &params, int level)
+{
+  if (level <= 1)
+    return 1.0;
+  double ratio = params.nanpin_level_ratio;
+  if (ratio <= 0.0)
+    return 1.0;
+  return MathPow(ratio, level - 1);
+}
+
+double AdjustNanpinStep(const double &level_prices[], int level_index, double step, bool enabled)
+{
+  if (!enabled || level_index < 3)
+    return step;
+  double p1 = level_prices[level_index - 1];
+  double p2 = level_prices[level_index - 2];
+  double p3 = level_prices[level_index - 3];
+  if (p1 <= 0.0 || p2 <= 0.0 || p3 <= 0.0)
+    return step;
+  double w1 = MathAbs(p1 - p2);
+  double w2 = MathAbs(p2 - p3);
+  double min_w = MathMin(w1, w2);
+  if (min_w <= 0.0)
+    return step;
+  return MathMax(step, min_w);
 }
 
 void CloseBasket(const SymbolState &state, ENUM_POSITION_TYPE type)
@@ -1375,68 +1428,102 @@ void ProcessSymbolTick(SymbolState &state)
     {
       if (buy_stop)
       {
-        double step = state.buy_grid_step > 0.0 ? state.buy_grid_step : grid_step;
-        if (!state.buy_stop_active)
+        if (params.strict_nanpin_spacing)
         {
-          state.buy_stop_active = true;
-          state.buy_skip_distance = 0.0;
-          state.buy_skip_price = ask;
-        }
-        if (step > 0.0 && state.buy_skip_price > 0.0)
-        {
-          double distance = state.buy_skip_price - ask;
-          if (distance < 0.0)
-            distance = 0.0;
-          while (distance >= step && (buy.level_count + state.buy_skip_levels) < levels)
+          double base_step = state.buy_grid_step > 0.0 ? state.buy_grid_step : grid_step;
+          int level_index = buy.level_count + state.buy_skip_levels;
+          double step = base_step * LevelStepFactor(params, level_index + 1);
+          if (!state.buy_stop_active)
           {
-            distance -= step;
-            state.buy_skip_levels++;
-            state.buy_skip_price -= step;
-            int skipped_index = buy.level_count + state.buy_skip_levels - 1;
-            if (skipped_index >= 0 && skipped_index < NM1::kMaxLevels)
-              EnsureBuyTarget(state, buy, step, skipped_index);
+            state.buy_stop_active = true;
+            state.buy_skip_distance = 0.0;
+            state.buy_skip_price = ask;
           }
-          state.buy_skip_distance = distance;
+          if (step > 0.0 && state.buy_skip_price > 0.0)
+          {
+            double distance = state.buy_skip_price - ask;
+            if (distance < 0.0)
+              distance = 0.0;
+            while (distance >= step && (buy.level_count + state.buy_skip_levels) < levels)
+            {
+              distance -= step;
+              state.buy_skip_levels++;
+              state.buy_skip_price -= step;
+              int skipped_index = buy.level_count + state.buy_skip_levels - 1;
+              if (skipped_index >= 0 && skipped_index < NM1::kMaxLevels)
+                EnsureBuyTarget(state, buy, step, skipped_index);
+              level_index = buy.level_count + state.buy_skip_levels;
+              step = base_step * LevelStepFactor(params, level_index + 1);
+            }
+            state.buy_skip_distance = distance;
+          }
+        }
+        else
+        {
+          if (!state.buy_stop_active)
+            state.buy_stop_active = true;
+          state.buy_skip_levels = 0;
+          state.buy_skip_distance = 0.0;
+          state.buy_skip_price = 0.0;
         }
       }
       else
       {
         state.buy_stop_active = false;
         state.buy_skip_price = 0.0;
+        if (!params.strict_nanpin_spacing)
+          state.buy_skip_levels = 0;
       }
     }
     if (sell.count > 0)
     {
       if (sell_stop)
       {
-        double step = state.sell_grid_step > 0.0 ? state.sell_grid_step : grid_step;
-        if (!state.sell_stop_active)
+        if (params.strict_nanpin_spacing)
         {
-          state.sell_stop_active = true;
-          state.sell_skip_distance = 0.0;
-          state.sell_skip_price = bid;
-        }
-        if (step > 0.0 && state.sell_skip_price > 0.0)
-        {
-          double distance = bid - state.sell_skip_price;
-          if (distance < 0.0)
-            distance = 0.0;
-          while (distance >= step && (sell.level_count + state.sell_skip_levels) < levels)
+          double base_step = state.sell_grid_step > 0.0 ? state.sell_grid_step : grid_step;
+          int level_index = sell.level_count + state.sell_skip_levels;
+          double step = base_step * LevelStepFactor(params, level_index + 1);
+          if (!state.sell_stop_active)
           {
-            distance -= step;
-            state.sell_skip_levels++;
-            state.sell_skip_price += step;
-            int skipped_index = sell.level_count + state.sell_skip_levels - 1;
-            if (skipped_index >= 0 && skipped_index < NM1::kMaxLevels)
-              EnsureSellTarget(state, sell, step, skipped_index);
+            state.sell_stop_active = true;
+            state.sell_skip_distance = 0.0;
+            state.sell_skip_price = bid;
           }
-          state.sell_skip_distance = distance;
+          if (step > 0.0 && state.sell_skip_price > 0.0)
+          {
+            double distance = bid - state.sell_skip_price;
+            if (distance < 0.0)
+              distance = 0.0;
+            while (distance >= step && (sell.level_count + state.sell_skip_levels) < levels)
+            {
+              distance -= step;
+              state.sell_skip_levels++;
+              state.sell_skip_price += step;
+              int skipped_index = sell.level_count + state.sell_skip_levels - 1;
+              if (skipped_index >= 0 && skipped_index < NM1::kMaxLevels)
+                EnsureSellTarget(state, sell, step, skipped_index);
+              level_index = sell.level_count + state.sell_skip_levels;
+              step = base_step * LevelStepFactor(params, level_index + 1);
+            }
+            state.sell_skip_distance = distance;
+          }
+        }
+        else
+        {
+          if (!state.sell_stop_active)
+            state.sell_stop_active = true;
+          state.sell_skip_levels = 0;
+          state.sell_skip_distance = 0.0;
+          state.sell_skip_price = 0.0;
         }
       }
       else
       {
         state.sell_stop_active = false;
         state.sell_skip_price = 0.0;
+        if (!params.strict_nanpin_spacing)
+          state.sell_skip_levels = 0;
       }
     }
 
@@ -1445,6 +1532,9 @@ void ProcessSymbolTick(SymbolState &state)
       // Buy orders fill at ask, so compare ask to the grid.
       double step = state.buy_grid_step > 0.0 ? state.buy_grid_step : grid_step;
       int level_index = buy.level_count + state.buy_skip_levels;
+      step *= LevelStepFactor(params, level_index + 1);
+      bool apply_min_width = !params.strict_nanpin_spacing || state.buy_skip_levels > 0;
+      step = AdjustNanpinStep(state.buy_level_price, level_index, step, apply_min_width);
       double target = 0.0;
       target = EnsureBuyTarget(state, buy, step, level_index);
       double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
@@ -1481,6 +1571,9 @@ void ProcessSymbolTick(SymbolState &state)
       // Sell orders fill at bid, so compare bid to the grid.
       double step = state.sell_grid_step > 0.0 ? state.sell_grid_step : grid_step;
       int level_index = sell.level_count + state.sell_skip_levels;
+      step *= LevelStepFactor(params, level_index + 1);
+      bool apply_min_width = !params.strict_nanpin_spacing || state.sell_skip_levels > 0;
+      step = AdjustNanpinStep(state.sell_level_price, level_index, step, apply_min_width);
       double target = 0.0;
       target = EnsureSellTarget(state, sell, step, level_index);
       double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
