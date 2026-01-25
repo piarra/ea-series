@@ -48,8 +48,8 @@ void OnTick()
    ArraySetAsSeries(lower, true);
    ArraySetAsSeries(upper, true);
    ArraySetAsSeries(close, true);
-   if(CopyBuffer(bandsHandle, 1, 0, 3, lower) < 3) return;
-   if(CopyBuffer(bandsHandle, 2, 0, 3, upper) < 3) return;
+   if(CopyBuffer(bandsHandle, 2, 0, 3, lower) < 3) return;
+   if(CopyBuffer(bandsHandle, 1, 0, 3, upper) < 3) return;
    if(CopyClose(sym, TF, 0, 3, close) < 3) return;
 
    datetime time1 = iTime(sym, TF, 1);
@@ -169,6 +169,7 @@ void CloseAll(string sym, int magic, ENUM_POSITION_TYPE type)
             req.symbol = sym;
             req.magic  = magic;
             req.volume = PositionGetDouble(POSITION_VOLUME);
+            req.position = ticket; // Close the specific position in hedging mode
             req.type   = (type==POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
             req.price  = price;
 
