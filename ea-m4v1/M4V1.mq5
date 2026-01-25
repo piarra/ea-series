@@ -10,9 +10,8 @@ input int    Slippage      = 3;
 input int    MagicNumber   = 12345;
 input int    TakeProfitPips = 9000;
 input double BreakEvenK    = 1; // TP * k 利益で建値SL
-input bool   EnableTrailOnTakeProfit = false; // 利確条件でトレーリングを有効化
+input bool   EnableTrailOnTakeProfit = false; // BBタッチ時にトレーリングへ移行
 input int    TrailingStopPips = 300; // トレーリングの最小幅(pips)
-input double TrailingActivationK = 0.35; // TP * k 利益でトレーリング開始
 input int    TrailingATRPeriod  = 14;  // ATR計算期間
 input double TrailingATRMultiplier = 2.5; // ATR倍率（ボラ依存の追随距離）
 input int    TrailingStepPips = 5; // SLを更新する最小刻み(pips)
@@ -29,6 +28,8 @@ datetime lastTradeBarTimeLong = 0;
 datetime lastTradeBarTimeShort = 0;
 int bandsHandle = INVALID_HANDLE;
 int atrHandle   = INVALID_HANDLE;
+bool trailLongActive = false;
+bool trailShortActive = false;
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -79,24 +80,33 @@ void OnTick()
    // ======= 建値SL：TP*k利益到達時 =======
    ApplyBreakEven(sym, MagicNumber, BreakEvenK);
 
-    // ======= トレーリング（ボラ対応） =======
+   if(!hasLong)  trailLongActive = false;
+   if(!hasShort) trailShortActive = false;
+
+   // ======= トレーリング（BBタッチ後に発動） =======
    if(EnableTrailOnTakeProfit)
    {
-      ApplyTrailing(sym, MagicNumber, POSITION_TYPE_BUY, TrailingStopPips);
-      ApplyTrailing(sym, MagicNumber, POSITION_TYPE_SELL, TrailingStopPips);
+      if(hasLong && trailLongActive)
+         ApplyTrailing(sym, MagicNumber, POSITION_TYPE_BUY, TrailingStopPips);
+      if(hasShort && trailShortActive)
+         ApplyTrailing(sym, MagicNumber, POSITION_TYPE_SELL, TrailingStopPips);
    }
 
    // ======= ロング決済：上バンドタッチ =======
    if(hasLong && bid >= upper[0])
    {
-      if(!EnableTrailOnTakeProfit)
+      if(EnableTrailOnTakeProfit)
+         trailLongActive = true;
+      else
          CloseAll(sym, MagicNumber, POSITION_TYPE_BUY);
    }
 
    // ======= ショート決済：下バンドタッチ =======
    if(hasShort && ask <= lower[0])
    {
-      if(!EnableTrailOnTakeProfit)
+      if(EnableTrailOnTakeProfit)
+         trailShortActive = true;
+      else
          CloseAll(sym, MagicNumber, POSITION_TYPE_SELL);
    }
 
@@ -113,6 +123,7 @@ void OnTick()
    {
       Open(sym, Lots, Slippage, MagicNumber, POSITION_TYPE_BUY);
       lastTradeBarTimeLong = time1;
+      trailLongActive = false;
    }
 
    // ショート：上バンド下抜け（フラグがtrueなら）
@@ -127,6 +138,7 @@ void OnTick()
    {
       Open(sym, Lots, Slippage, MagicNumber, POSITION_TYPE_SELL);
       lastTradeBarTimeShort = time1;
+      trailShortActive = false;
    }
 }
 
@@ -292,7 +304,7 @@ void ApplyBreakEven(string sym, int magic, double k)
 //+------------------------------------------------------------------+
 void ApplyTrailing(string sym, int magic, ENUM_POSITION_TYPE type, int trailingPips)
 {
-   if(trailingPips <= 0 || TakeProfitPips <= 0)
+   if(trailingPips <= 0)
       return;
 
    // 価格関連
@@ -301,11 +313,6 @@ void ApplyTrailing(string sym, int magic, ENUM_POSITION_TYPE type, int trailingP
    double pip = (digits==3 || digits==5) ? point*10.0 : point;
    double bid = SymbolInfoDouble(sym, SYMBOL_BID);
    double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
-
-   // 開始条件：TP * TrailingActivationK 利益
-   double activation = TakeProfitPips * pip * TrailingActivationK;
-   if(activation <= 0.0)
-      return;
 
    // ボラティリティに応じたトレイル幅（ATRベース）
    double atrBuf[];
@@ -338,9 +345,6 @@ void ApplyTrailing(string sym, int magic, ENUM_POSITION_TYPE type, int trailingP
 
       if(type==POSITION_TYPE_BUY)
       {
-         // 利益が閾値未達ならスキップ
-         if((bid - open) < activation)
-            continue;
          new_sl = bid - trail;
          // 少なくとも建値以上を維持（損益を食わない）
          if(new_sl < open) new_sl = open;
@@ -349,8 +353,6 @@ void ApplyTrailing(string sym, int magic, ENUM_POSITION_TYPE type, int trailingP
       }
       else if(type==POSITION_TYPE_SELL)
       {
-         if((open - ask) < activation)
-            continue;
          new_sl = ask + trail;
          if(new_sl > open) new_sl = open;
          if(sl > 0.0 && new_sl >= sl - move_th) continue;
