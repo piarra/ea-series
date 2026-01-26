@@ -16,7 +16,6 @@ const int kAtrBasePeriod = 14;
 const int kLotDigits = 2;
 const double kMinLot = 0.01;
 const double kMaxLot = 100.0;
-const int kCoreFlexSplitLevel = 100;
 const string kFlexComment = "NM1_FLEX";
 const string kCoreComment = "NM1_CORE";
 }
@@ -33,6 +32,7 @@ input bool SafetyMode = true;
 input bool SafeStopMode = false;
 input double SafeK = 2.0;
 input double SafeSlopeK = 0.3;
+input int CoreSplitLevel = 100;
 input double CoreRatio = 1.0;
 input double FlexRatio = 0;
 input double FlexAtrProfitMultiplier = 0.8;
@@ -1546,7 +1546,7 @@ void ProcessSymbolTick(SymbolState &state)
       {
         double lot = state.lot_seq[level_index];
         int next_level = level_index + 1;
-        if (next_level >= NM1::kCoreFlexSplitLevel)
+        if (next_level >= CoreSplitLevel)
         {
           double core_lot = 0.0;
           double flex_lot = 0.0;
@@ -1585,7 +1585,7 @@ void ProcessSymbolTick(SymbolState &state)
       {
         double lot = state.lot_seq[level_index];
         int next_level = level_index + 1;
-        if (next_level >= NM1::kCoreFlexSplitLevel)
+        if (next_level >= CoreSplitLevel)
         {
           double core_lot = 0.0;
           double flex_lot = 0.0;
