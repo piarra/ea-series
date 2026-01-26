@@ -1,9 +1,10 @@
 #property strict
-#property version   "1.26"
+#property version   "1.27"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
 // v1.26 no martingaleモードを用意
+// v1.27 strictモード(ナンピン幅厳格モード)を用意
 
 #include <Trade/Trade.mqh>
 
@@ -15,7 +16,7 @@ const int kAtrBasePeriod = 14;
 const int kLotDigits = 2;
 const double kMinLot = 0.01;
 const double kMaxLot = 100.0;
-const int kCoreFlexSplitLevel = 4;
+const int kCoreFlexSplitLevel = 100;
 const string kFlexComment = "NM1_FLEX";
 const string kCoreComment = "NM1_CORE";
 }
@@ -56,7 +57,7 @@ input double StopBuyLimitLotXAUUSD = 0.01;
 input bool NoMartingaleXAUUSD = false;
 
 input group "EURUSD"
-input bool EnableEURUSD = false;
+input bool EnableEURUSD = true;
 input string SymbolEURUSD = "EURUSD";
 input double BaseLotEURUSD = 0.3;
 input double AtrMultiplierEURUSD = 3.0;
@@ -70,7 +71,7 @@ input double StopBuyLimitLotEURUSD = 0.01;
 input bool NoMartingaleEURUSD = false;
 
 input group "USDJPY"
-input bool EnableUSDJPY = false;
+input bool EnableUSDJPY = true;
 input string SymbolUSDJPY = "USDJPY";
 input double BaseLotUSDJPY = 0.3;
 input double AtrMultiplierUSDJPY = 3.0;
