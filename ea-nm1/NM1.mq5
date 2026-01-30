@@ -1,10 +1,11 @@
 #property strict
-#property version   "1.27"
+#property version   "1.28"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
 // v1.26 no martingaleモードを用意
 // v1.27 strictモード(ナンピン幅厳格モード)を用意
+// v1.28 moneyManagementモードを追加
 
 #include <Trade/Trade.mqh>
 
@@ -42,6 +43,12 @@ input int AdxPeriod = 14;
 input double AdxMaxForNanpin = 20.0;
 input double DiGapMin = 2.0;
 
+input group "MONEY MANAGEMENT"
+input bool EnableMoneyManagement = true;
+input double SessionMaxDD = 2000.0;
+input double SessionTargetMultiplier = 10.0;
+input int SessionFailureIntervalSeconds = 120;
+
 input group "XAUUSD"
 input bool EnableXAUUSD = true;
 input string SymbolXAUUSD = "XAUUSD";
@@ -57,7 +64,7 @@ input double StopBuyLimitLotXAUUSD = 0.01;
 input bool NoMartingaleXAUUSD = false;
 
 input group "EURUSD"
-input bool EnableEURUSD = true;
+input bool EnableEURUSD = false;
 input string SymbolEURUSD = "EURUSD";
 input double BaseLotEURUSD = 0.3;
 input double AtrMultiplierEURUSD = 3.0;
@@ -71,7 +78,7 @@ input double StopBuyLimitLotEURUSD = 0.01;
 input bool NoMartingaleEURUSD = false;
 
 input group "USDJPY"
-input bool EnableUSDJPY = true;
+input bool EnableUSDJPY = false;
 input string SymbolUSDJPY = "USDJPY";
 input double BaseLotUSDJPY = 0.3;
 input double AtrMultiplierUSDJPY = 3.0;
@@ -179,6 +186,16 @@ struct FlexRef
 
 CTrade trade;
 CTrade close_trade;
+
+bool mm_session_active = false;
+bool mm_session_end_pending = false;
+bool mm_session_end_success = false;
+bool mm_session_waiting = false;
+datetime mm_session_wait_until = 0;
+datetime mm_session_start_time = 0;
+double mm_session_start_equity = 0.0;
+int mm_session_id = 0;
+int mm_session_id_current = 0;
 
 struct SymbolState
 {
@@ -663,8 +680,11 @@ int OnInit()
   }
   if (active == 0)
     return INIT_FAILED;
-  if (!EventSetMillisecondTimer(500))
-    Print("EventSetMillisecondTimer failed");
+  if (!MQLInfoInteger(MQL_TESTER))
+  {
+    if (!EventSetMillisecondTimer(500))
+      Print("EventSetMillisecondTimer failed");
+  }
 
   for (int i = 0; i < symbols_count; ++i)
   {
@@ -673,6 +693,8 @@ int OnInit()
     if (HasOpenPosition(symbols[i]))
       symbols[i].initial_started = true;
   }
+  if (EnableMoneyManagement)
+    StartSession();
   return INIT_SUCCEEDED;
 }
 
@@ -690,39 +712,31 @@ void OnDeinit(const int reason)
   }
 }
 
-double GetAtrBase(SymbolState &state)
+bool GetAtrSnapshot(SymbolState &state, double &atr_base, double &atr_now, double &atr_slope)
 {
+  atr_base = 0.0;
+  atr_now = 0.0;
+  atr_slope = 0.0;
   if (state.atr_handle == INVALID_HANDLE)
-    return 0.0;
+    return false;
+
   double buffer[];
-  if (CopyBuffer(state.atr_handle, 0, 5, 50, buffer) < 50)
-    return 0.0;
-  double sum = 0.0;
-  for (int i = 0; i < 50; ++i)
-    sum += buffer[i];
-  return sum / 50.0;
-}
+  const int kNeeded = 55;
+  int copied = CopyBuffer(state.atr_handle, 0, 0, kNeeded, buffer);
+  if (copied <= 0)
+    return false;
 
-double GetCurrentAtr(SymbolState &state)
-{
-  if (state.atr_handle == INVALID_HANDLE)
-    return 0.0;
-  double buffer[];
-  if (CopyBuffer(state.atr_handle, 0, 0, 1, buffer) <= 0)
-    return 0.0;
-  return buffer[0];
-}
-
-double GetAtrSlope(SymbolState &state)
-{
-  if (state.atr_handle == INVALID_HANDLE)
-    return 0.0;
-
-  double buf[3];
-  if (CopyBuffer(state.atr_handle, 0, 0, 3, buf) < 3)
-    return 0.0;
-
-  return buf[0] - buf[2];
+  atr_now = buffer[0];
+  if (copied >= 3)
+    atr_slope = buffer[0] - buffer[2];
+  if (copied >= kNeeded)
+  {
+    double sum = 0.0;
+    for (int i = 5; i < kNeeded; ++i)
+      sum += buffer[i];
+    atr_base = sum / 50.0;
+  }
+  return true;
 }
 
 bool GetAdxSnapshot(SymbolState &state,
@@ -954,10 +968,11 @@ bool TryOpen(const SymbolState &state, const string symbol, ENUM_ORDER_TYPE orde
   if (filling == ORDER_FILLING_FOK || filling == ORDER_FILLING_IOC || filling == ORDER_FILLING_RETURN)
     trade.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
   bool ok = false;
+  string final_comment = AppendSessionSuffix(comment);
   if (order_type == ORDER_TYPE_BUY)
-    ok = trade.Buy(lot, symbol, 0.0, 0.0, 0.0, comment);
+    ok = trade.Buy(lot, symbol, 0.0, 0.0, 0.0, final_comment);
   else if (order_type == ORDER_TYPE_SELL)
-    ok = trade.Sell(lot, symbol, 0.0, 0.0, 0.0, comment);
+    ok = trade.Sell(lot, symbol, 0.0, 0.0, 0.0, final_comment);
 
   if (!ok)
   {
@@ -1036,6 +1051,167 @@ bool CanRestart(const NM1Params &params, datetime last_close_time)
   if (last_close_time == 0)
     return true;
   return (TimeCurrent() - last_close_time) >= params.restart_delay_seconds;
+}
+
+string AppendSessionSuffix(const string comment)
+{
+  if (!EnableMoneyManagement || mm_session_id_current <= 0)
+    return comment;
+  string suffix = StringFormat("_S%d", mm_session_id_current);
+  if (StringLen(comment) == 0)
+    return suffix;
+  return comment + suffix;
+}
+
+bool HasAnyPositionByMagic(const int magic)
+{
+  for (int i = PositionsTotal() - 1; i >= 0; --i)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if (!PositionSelectByTicket(ticket))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != magic)
+      continue;
+    return true;
+  }
+  return false;
+}
+
+void CloseAllPositionsByMagic(const int magic)
+{
+  close_trade.SetExpertMagicNumber(magic);
+  close_trade.SetDeviationInPoints(SlippagePoints);
+  close_trade.SetAsyncMode(UseAsyncClose);
+  ulong tickets[];
+  string symbols[];
+  int count = 0;
+  for (int i = PositionsTotal() - 1; i >= 0; --i)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if (!PositionSelectByTicket(ticket))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != magic)
+      continue;
+    ArrayResize(tickets, ++count);
+    ArrayResize(symbols, count);
+    tickets[count - 1] = ticket;
+    symbols[count - 1] = PositionGetString(POSITION_SYMBOL);
+  }
+
+  for (int i = 0; i < count; ++i)
+  {
+    bool closed = false;
+    int attempts = 0;
+    int filling = (int)SymbolInfoInteger(symbols[i], SYMBOL_FILLING_MODE);
+    if (filling == ORDER_FILLING_FOK || filling == ORDER_FILLING_IOC || filling == ORDER_FILLING_RETURN)
+      close_trade.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
+    while (attempts <= CloseRetryCount)
+    {
+      if (close_trade.PositionClose(tickets[i]))
+      {
+        closed = true;
+        break;
+      }
+      attempts++;
+      if (attempts <= CloseRetryCount && CloseRetryDelayMs > 0)
+        Sleep(CloseRetryDelayMs);
+    }
+    if (!closed)
+    {
+      PrintFormat("Close failed after retries: ticket=%I64u retcode=%d %s",
+                  tickets[i], close_trade.ResultRetcode(), close_trade.ResultRetcodeDescription());
+    }
+  }
+}
+
+void StartSession()
+{
+  mm_session_id++;
+  mm_session_id_current = mm_session_id;
+  mm_session_active = true;
+  mm_session_end_pending = false;
+  mm_session_end_success = false;
+  mm_session_waiting = false;
+  mm_session_wait_until = 0;
+  mm_session_start_time = TimeCurrent();
+  mm_session_start_equity = AccountInfoDouble(ACCOUNT_EQUITY);
+  PrintFormat("Session started: id=%d equity=%.2f", mm_session_id_current, mm_session_start_equity);
+}
+
+void EndSession(const bool success)
+{
+  mm_session_active = false;
+  mm_session_end_pending = true;
+  mm_session_end_success = success;
+  CloseAllPositionsByMagic(MagicNumber);
+  if (success)
+    Print("Session success: closing all positions.");
+  else
+    Print("Session failed: closing all positions.");
+}
+
+bool UpdateMoneyManagement()
+{
+  if (!EnableMoneyManagement)
+    return true;
+
+  if (!mm_session_active && !mm_session_end_pending && !mm_session_waiting)
+    StartSession();
+
+  if (mm_session_end_pending)
+  {
+    CloseAllPositionsByMagic(MagicNumber);
+    if (!HasAnyPositionByMagic(MagicNumber))
+    {
+      mm_session_end_pending = false;
+      if (mm_session_end_success)
+      {
+        StartSession();
+        return true;
+      }
+      mm_session_waiting = true;
+      mm_session_wait_until = TimeCurrent() + SessionFailureIntervalSeconds;
+      PrintFormat("Session cooldown started: %d seconds", SessionFailureIntervalSeconds);
+    }
+    return false;
+  }
+
+  if (mm_session_waiting)
+  {
+    if (TimeCurrent() >= mm_session_wait_until)
+    {
+      mm_session_waiting = false;
+      StartSession();
+      return true;
+    }
+    return false;
+  }
+
+  if (!mm_session_active)
+    return false;
+
+  double max_dd = MathMax(SessionMaxDD, 0.0);
+  double target_multiplier = MathMax(SessionTargetMultiplier, 0.0);
+  double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+  double pnl = equity - mm_session_start_equity;
+
+  if (max_dd > 0.0 && equity <= (mm_session_start_equity - max_dd))
+  {
+    EndSession(false);
+    return false;
+  }
+
+  if (max_dd > 0.0 && target_multiplier > 0.0)
+  {
+    double target = max_dd * target_multiplier;
+    if (pnl >= target)
+    {
+      EndSession(true);
+      return false;
+    }
+  }
+
+  return true;
 }
 
 bool CanNanpin(const NM1Params &params, datetime last_nanpin_time)
@@ -1251,7 +1427,10 @@ void ProcessSymbolTick(SymbolState &state)
   }
 
   double grid_step = 0.0;
-  double atr_base = GetAtrBase(state);
+  double atr_base = 0.0;
+  double atr_now = 0.0;
+  double atr_slope = 0.0;
+  GetAtrSnapshot(state, atr_base, atr_now, atr_slope);
   double atr_ref = atr_base;
   if (params.min_atr > atr_ref)
     atr_ref = params.min_atr;
@@ -1265,17 +1444,14 @@ void ProcessSymbolTick(SymbolState &state)
 
   bool allow_nanpin = true;
   bool safety_triggered = false;
-  double atr_now = 0.0;
   if (params.safety_mode && atr_base > 0.0)
   {
-    atr_now = GetCurrentAtr(state);
     if (atr_now >= atr_base * params.safe_k)
     {
       safety_triggered = true;
       if (!params.safe_stop_mode)
         allow_nanpin = false;
     }
-    double atr_slope = GetAtrSlope(state);
     if (atr_slope > atr_base * params.safe_slope_k)
     {
       safety_triggered = true;
@@ -1336,8 +1512,6 @@ void ProcessSymbolTick(SymbolState &state)
   allow_buy_trigger = allow_nanpin && !buy_stop;
   allow_sell_trigger = allow_nanpin && !sell_stop;
 
-  if (atr_now <= 0.0)
-    atr_now = GetCurrentAtr(state);
   ProcessFlexPartial(state, symbol, bid, ask, atr_now);
 
   if (params.no_martingale && buy.count > 0 && sell.count > 0)
@@ -1624,6 +1798,8 @@ void ProcessSymbolTick(SymbolState &state)
 
 void OnTick()
 {
+  if (!UpdateMoneyManagement())
+    return;
   for (int i = 0; i < symbols_count; ++i)
     ProcessSymbolTick(symbols[i]);
 }
