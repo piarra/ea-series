@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.28"
+#property version   "1.29"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -19,7 +19,16 @@ const double kMinLot = 0.01;
 const double kMaxLot = 100.0;
 const string kFlexComment = "NM1_FLEX";
 const string kCoreComment = "NM1_CORE";
+const string kHedgeComment = "NM1_HEDGE";
 }
+
+enum RegimeState
+{
+  REGIME_NORMAL = 0,
+  REGIME_TREND_UP,
+  REGIME_TREND_DOWN,
+  REGIME_COOLING
+};
 
 input group "COMMON"
 input string SymbolSuffix = "c";
@@ -42,6 +51,23 @@ input int NanpinSleepSeconds = 10;
 input int AdxPeriod = 14;
 input double AdxMaxForNanpin = 20.0;
 input double DiGapMin = 2.0;
+
+input group "REGIME FILTER"
+input int RegimeOnBars = 3;
+input int RegimeOffBars = 3;
+input int RegimeCoolingBars = 5;
+input double RegimeAdxOn = 25.0;
+input double RegimeDiGapOn = 6.0;
+input double RegimeAdxOff = 18.0;
+input double RegimeDiGapOff = 3.0;
+
+input group "TREND HEDGE"
+input bool EnableTrendHedge = true;
+input double HedgeRatio = 0.5;
+input int HedgeMagicOffset = 10000;
+input int HedgeCooldownSeconds = 5;
+input int HedgeRecoveryMinutes = 360;
+input double HedgeRecoveryPercent = 10.0;
 
 input group "MONEY MANAGEMENT"
 input bool EnableMoneyManagement = true;
@@ -154,6 +180,17 @@ struct NM1Params
   int adx_period;
   double adx_max_for_nanpin;
   double di_gap_min;
+  int regime_on_bars;
+  int regime_off_bars;
+  int regime_cooling_bars;
+  double regime_adx_on;
+  double regime_di_gap_on;
+  double regime_adx_off;
+  double regime_di_gap_off;
+  bool enable_trend_hedge;
+  double hedge_ratio;
+  int hedge_magic_offset;
+  int hedge_cooldown_seconds;
   int max_levels;
   int restart_delay_seconds;
   int nanpin_sleep_seconds;
@@ -196,6 +233,8 @@ datetime mm_session_start_time = 0;
 double mm_session_start_equity = 0.0;
 int mm_session_id = 0;
 int mm_session_id_current = 0;
+datetime hedge_mode_start_time = 0;
+double hedge_mode_start_equity = 0.0;
 
 struct SymbolState
 {
@@ -203,6 +242,15 @@ struct SymbolState
   string broker_symbol;
   bool enabled;
   NM1Params params;
+  bool symbol_info_ready;
+  double point;
+  int digits;
+  double volume_step;
+  double volume_min;
+  double volume_max;
+  double tick_value;
+  double tick_size;
+  int filling_mode;
   datetime start_time;
   bool initial_started;
   double lot_seq[NM1::kMaxLevels];
@@ -233,6 +281,13 @@ struct SymbolState
   double sell_skip_distance;
   double buy_skip_price;
   double sell_skip_price;
+  int regime;
+  int regime_up_count;
+  int regime_down_count;
+  int regime_off_count;
+  int regime_cooling_left;
+  datetime last_bar_time;
+  datetime last_hedge_time;
 };
 
 SymbolState symbols[NM1::kMaxSymbols];
@@ -259,6 +314,15 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.broker_symbol = broker;
   state.enabled = enabled;
   state.params = params;
+  state.symbol_info_ready = false;
+  state.point = 0.0;
+  state.digits = 0;
+  state.volume_step = 0.0;
+  state.volume_min = 0.0;
+  state.volume_max = 0.0;
+  state.tick_value = 0.0;
+  state.tick_size = 0.0;
+  state.filling_mode = 0;
   state.start_time = TimeCurrent();
   state.initial_started = false;
   state.last_buy_close_time = 0;
@@ -282,12 +346,33 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.sell_skip_distance = 0.0;
   state.buy_skip_price = 0.0;
   state.sell_skip_price = 0.0;
+  state.regime = REGIME_NORMAL;
+  state.regime_up_count = 0;
+  state.regime_down_count = 0;
+  state.regime_off_count = 0;
+  state.regime_cooling_left = 0;
+  state.last_bar_time = 0;
+  state.last_hedge_time = 0;
   ClearFlexRefs(state.flex_buy_refs);
   ClearFlexRefs(state.flex_sell_refs);
   ClearLevelPrices(state.buy_level_price);
   ClearLevelPrices(state.sell_level_price);
   state.buy_grid_step = 0.0;
   state.sell_grid_step = 0.0;
+}
+
+void RefreshSymbolInfo(SymbolState &state)
+{
+  const string symbol = state.broker_symbol;
+  state.point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+  state.digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+  state.volume_step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+  state.volume_min = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+  state.volume_max = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+  state.tick_value = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
+  state.tick_size = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+  state.filling_mode = (int)SymbolInfoInteger(symbol, SYMBOL_FILLING_MODE);
+  state.symbol_info_ready = true;
 }
 
 void ApplyCommonParams(NM1Params &params)
@@ -305,6 +390,17 @@ void ApplyCommonParams(NM1Params &params)
   params.adx_period = AdxPeriod;
   params.adx_max_for_nanpin = AdxMaxForNanpin;
   params.di_gap_min = DiGapMin;
+  params.regime_on_bars = RegimeOnBars;
+  params.regime_off_bars = RegimeOffBars;
+  params.regime_cooling_bars = RegimeCoolingBars;
+  params.regime_adx_on = RegimeAdxOn;
+  params.regime_di_gap_on = RegimeDiGapOn;
+  params.regime_adx_off = RegimeAdxOff;
+  params.regime_di_gap_off = RegimeDiGapOff;
+  params.enable_trend_hedge = EnableTrendHedge;
+  params.hedge_ratio = HedgeRatio;
+  params.hedge_magic_offset = HedgeMagicOffset;
+  params.hedge_cooldown_seconds = HedgeCooldownSeconds;
   params.restart_delay_seconds = RestartDelaySeconds;
   params.nanpin_sleep_seconds = NanpinSleepSeconds;
   params.use_async_close = UseAsyncClose;
@@ -434,6 +530,8 @@ void BuildSymbols()
     }
     InitSymbolState(symbols[symbols_count], logical, broker_symbol, enabled, params);
     if (enabled)
+      RefreshSymbolInfo(symbols[symbols_count]);
+    if (enabled)
       symbols_count++;
   }
   if (symbols_count == 0)
@@ -454,11 +552,11 @@ bool IsTradingTime()
   return !in_stop;
 }
 
-double NormalizeLot(const string symbol, double lot)
+double NormalizeLotCached(const SymbolState &state, double lot)
 {
-  double step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
-  double minlot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
-  double maxlot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+  double step = state.volume_step;
+  double minlot = state.volume_min;
+  double maxlot = state.volume_max;
   if (step <= 0.0)
     step = 0.01;
   if (minlot <= 0.0)
@@ -477,10 +575,10 @@ double NormalizeRatio(double value, double fallback)
   return value;
 }
 
-void NormalizeCoreFlexLot(const NM1Params &params, const string symbol, double lot, double &core, double &flex)
+void NormalizeCoreFlexLot(const SymbolState &state, double lot, double &core, double &flex)
 {
-  double core_ratio = NormalizeRatio(params.core_ratio, 0.7);
-  double flex_ratio = NormalizeRatio(params.flex_ratio, 0.3);
+  double core_ratio = NormalizeRatio(state.params.core_ratio, 0.7);
+  double flex_ratio = NormalizeRatio(state.params.flex_ratio, 0.3);
   double ratio_sum = core_ratio + flex_ratio;
   if (ratio_sum <= 0.0)
   {
@@ -491,12 +589,12 @@ void NormalizeCoreFlexLot(const NM1Params &params, const string symbol, double l
   core_ratio /= ratio_sum;
   flex_ratio /= ratio_sum;
   double raw_flex = lot * flex_ratio;
-  flex = NormalizeLot(symbol, raw_flex);
-  core = NormalizeLot(symbol, lot - flex);
+  flex = NormalizeLotCached(state, raw_flex);
+  core = NormalizeLotCached(state, lot - flex);
   if (flex <= 0.0)
   {
     flex = 0.0;
-    core = NormalizeLot(symbol, lot);
+    core = NormalizeLotCached(state, lot);
   }
 }
 
@@ -555,9 +653,12 @@ void SyncLevelPricesFromPositions(SymbolState &state)
     state.sell_grid_step = MathAbs(state.sell_level_price[0] - state.sell_level_price[1]);
 }
 
-bool AddFlexRef(const string symbol, FlexRef &refs[], double price, double lot, int level)
+bool AddFlexRef(const SymbolState &state, FlexRef &refs[], double price, double lot, int level)
 {
-  double tol = SymbolInfoDouble(symbol, SYMBOL_POINT) * 0.5;
+  double point = state.point;
+  if (point <= 0.0)
+    point = 0.00001;
+  double tol = point * 0.5;
   for (int i = 0; i < NM1::kMaxLevels; ++i)
   {
     if (!refs[i].active)
@@ -589,7 +690,7 @@ int EffectiveMaxLevels(const NM1Params &params)
   return levels;
 }
 
-void BuildLotSequence(SymbolState &state, const string symbol)
+void BuildLotSequence(SymbolState &state)
 {
   NM1Params params = state.params;
   int levels = EffectiveMaxLevels(state.params);
@@ -608,7 +709,7 @@ void BuildLotSequence(SymbolState &state, const string symbol)
   }
   for (int i = 0; i < levels; ++i)
   {
-    state.lot_seq[i] = NormalizeLot(symbol, state.lot_seq[i]);
+    state.lot_seq[i] = NormalizeLotCached(state, state.lot_seq[i]);
   }
 }
 
@@ -665,7 +766,9 @@ int OnInit()
   {
     if (!symbols[i].enabled)
       continue;
-    BuildLotSequence(symbols[i], symbols[i].broker_symbol);
+    if (!symbols[i].symbol_info_ready)
+      RefreshSymbolInfo(symbols[i]);
+    BuildLotSequence(symbols[i]);
     symbols[i].atr_handle = iATR(symbols[i].broker_symbol, _Period, NM1::kAtrBasePeriod);
     if (symbols[i].atr_handle == INVALID_HANDLE)
     {
@@ -720,7 +823,7 @@ bool GetAtrSnapshot(SymbolState &state, double &atr_base, double &atr_now, doubl
   if (state.atr_handle == INVALID_HANDLE)
     return false;
 
-  double buffer[];
+  double buffer[55];
   const int kNeeded = 55;
   int copied = CopyBuffer(state.atr_handle, 0, 0, kNeeded, buffer);
   if (copied <= 0)
@@ -908,18 +1011,289 @@ double AdjustNanpinStep(const double &level_prices[], int level_index, double st
   return MathMax(step, min_w);
 }
 
+string RegimeName(const int regime)
+{
+  if (regime == REGIME_TREND_UP)
+    return "TREND_UP";
+  if (regime == REGIME_TREND_DOWN)
+    return "TREND_DOWN";
+  if (regime == REGIME_COOLING)
+    return "COOLING";
+  return "NORMAL";
+}
+
+bool IsNewBar(SymbolState &state)
+{
+  datetime bar_time = iTime(state.broker_symbol, _Period, 0);
+  if (bar_time == 0)
+    return false;
+  if (state.last_bar_time == 0 || bar_time != state.last_bar_time)
+  {
+    state.last_bar_time = bar_time;
+    return true;
+  }
+  return false;
+}
+
+void UpdateRegime(SymbolState &state, double adx_now, double di_plus_now, double di_minus_now, bool new_bar)
+{
+  if (!new_bar)
+    return;
+  int prev = state.regime;
+  int on_bars = MathMax(state.params.regime_on_bars, 1);
+  int off_bars = MathMax(state.params.regime_off_bars, 1);
+  int cooling_bars = MathMax(state.params.regime_cooling_bars, 0);
+  double di_gap = MathAbs(di_plus_now - di_minus_now);
+  bool on_cond = (adx_now >= state.params.regime_adx_on && di_gap >= state.params.regime_di_gap_on);
+  bool off_cond = (adx_now <= state.params.regime_adx_off || di_gap <= state.params.regime_di_gap_off);
+
+  if (state.regime == REGIME_COOLING)
+  {
+    if (state.regime_cooling_left > 0)
+      state.regime_cooling_left--;
+    if (state.regime_cooling_left <= 0)
+    {
+      state.regime = REGIME_NORMAL;
+      state.regime_up_count = 0;
+      state.regime_down_count = 0;
+      state.regime_off_count = 0;
+    }
+  }
+  else if (state.regime == REGIME_TREND_UP || state.regime == REGIME_TREND_DOWN)
+  {
+    if (off_cond)
+      state.regime_off_count++;
+    else
+      state.regime_off_count = 0;
+    if (state.regime_off_count >= off_bars)
+    {
+      state.regime = REGIME_COOLING;
+      state.regime_cooling_left = cooling_bars;
+      state.regime_off_count = 0;
+    }
+  }
+  else
+  {
+    if (on_cond)
+    {
+      if (di_plus_now > di_minus_now)
+      {
+        state.regime_up_count++;
+        state.regime_down_count = 0;
+      }
+      else if (di_minus_now > di_plus_now)
+      {
+        state.regime_down_count++;
+        state.regime_up_count = 0;
+      }
+    }
+    else
+    {
+      state.regime_up_count = 0;
+      state.regime_down_count = 0;
+    }
+    if (state.regime_up_count >= on_bars)
+    {
+      state.regime = REGIME_TREND_UP;
+      state.regime_up_count = 0;
+      state.regime_down_count = 0;
+    }
+    else if (state.regime_down_count >= on_bars)
+    {
+      state.regime = REGIME_TREND_DOWN;
+      state.regime_up_count = 0;
+      state.regime_down_count = 0;
+    }
+  }
+
+  if (state.regime != prev)
+    PrintFormat("Regime changed: %s -> %s (%s)", RegimeName(prev), RegimeName(state.regime), state.broker_symbol);
+}
+
+int HedgeMagic(const SymbolState &state)
+{
+  return state.params.magic_number + state.params.hedge_magic_offset;
+}
+
+double GetHedgeVolume(const SymbolState &state, ENUM_POSITION_TYPE type)
+{
+  if (state.params.hedge_magic_offset == 0)
+    return 0.0;
+  const string symbol = state.broker_symbol;
+  const int magic = HedgeMagic(state);
+  double volume = 0.0;
+  for (int i = PositionsTotal() - 1; i >= 0; --i)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if (!PositionSelectByTicket(ticket))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != magic)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != symbol)
+      continue;
+    if ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != type)
+      continue;
+    volume += PositionGetDouble(POSITION_VOLUME);
+  }
+  return volume;
+}
+
+void CloseHedgePositions(const SymbolState &state, ENUM_POSITION_TYPE type)
+{
+  if (state.params.hedge_magic_offset == 0)
+    return;
+  const string symbol = state.broker_symbol;
+  const int magic = HedgeMagic(state);
+  close_trade.SetExpertMagicNumber(magic);
+  close_trade.SetDeviationInPoints(state.params.slippage_points);
+  close_trade.SetAsyncMode(state.params.use_async_close);
+  int filling = state.filling_mode;
+  if (filling == ORDER_FILLING_FOK || filling == ORDER_FILLING_IOC || filling == ORDER_FILLING_RETURN)
+    close_trade.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
+  ulong tickets[];
+  int count = 0;
+  int total = PositionsTotal();
+  if (total > 0)
+    ArrayResize(tickets, total);
+  for (int i = total - 1; i >= 0; --i)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if (!PositionSelectByTicket(ticket))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != magic)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != symbol)
+      continue;
+    if ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != type)
+      continue;
+    tickets[count++] = ticket;
+  }
+  if (count > 0)
+    ArrayResize(tickets, count);
+
+  for (int i = 0; i < count; ++i)
+  {
+    bool closed = false;
+    int attempts = 0;
+    while (attempts <= state.params.close_retry_count)
+    {
+      if (close_trade.PositionClose(tickets[i]))
+      {
+        closed = true;
+        break;
+      }
+      attempts++;
+      if (attempts <= state.params.close_retry_count && state.params.close_retry_delay_ms > 0)
+        Sleep(state.params.close_retry_delay_ms);
+    }
+    if (!closed)
+    {
+      PrintFormat("Hedge close failed after retries: ticket=%I64u retcode=%d %s",
+                  tickets[i], close_trade.ResultRetcode(), close_trade.ResultRetcodeDescription());
+    }
+  }
+}
+
+bool TryOpenHedge(const SymbolState &state, ENUM_ORDER_TYPE order_type, double lot)
+{
+  if (state.params.hedge_magic_offset == 0)
+    return false;
+  lot = NormalizeLotCached(state, lot);
+  if (lot <= 0.0)
+    return false;
+  trade.SetExpertMagicNumber(HedgeMagic(state));
+  trade.SetDeviationInPoints(state.params.slippage_points);
+  int filling = state.filling_mode;
+  if (filling == ORDER_FILLING_FOK || filling == ORDER_FILLING_IOC || filling == ORDER_FILLING_RETURN)
+    trade.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
+  string comment = AppendSessionSuffix(NM1::kHedgeComment);
+  bool ok = false;
+  if (order_type == ORDER_TYPE_BUY)
+    ok = trade.Buy(lot, state.broker_symbol, 0.0, 0.0, 0.0, comment);
+  else if (order_type == ORDER_TYPE_SELL)
+    ok = trade.Sell(lot, state.broker_symbol, 0.0, 0.0, 0.0, comment);
+  if (!ok)
+  {
+    PrintFormat("Hedge order failed: type=%d lot=%.2f retcode=%d %s",
+                order_type, lot, trade.ResultRetcode(), trade.ResultRetcodeDescription());
+  }
+  return ok;
+}
+
+void ProcessTrendHedge(SymbolState &state, const BasketInfo &buy, const BasketInfo &sell)
+{
+  if (!state.params.enable_trend_hedge)
+    return;
+  if (state.params.hedge_ratio <= 0.0)
+    return;
+  if (state.params.hedge_magic_offset == 0)
+    return;
+
+  if (state.regime != REGIME_TREND_UP && state.regime != REGIME_TREND_DOWN)
+  {
+    if (GetHedgeVolume(state, POSITION_TYPE_BUY) > 0.0)
+      CloseHedgePositions(state, POSITION_TYPE_BUY);
+    if (GetHedgeVolume(state, POSITION_TYPE_SELL) > 0.0)
+      CloseHedgePositions(state, POSITION_TYPE_SELL);
+    return;
+  }
+
+  datetime now = TimeCurrent();
+  if (state.params.hedge_cooldown_seconds > 0 && state.last_hedge_time > 0 &&
+      (now - state.last_hedge_time) < state.params.hedge_cooldown_seconds)
+    return;
+
+  if (state.regime == REGIME_TREND_UP)
+  {
+    if (GetHedgeVolume(state, POSITION_TYPE_SELL) > 0.0)
+      CloseHedgePositions(state, POSITION_TYPE_SELL);
+    double losing = (sell.profit + state.realized_sell_profit) < 0.0 ? sell.volume : 0.0;
+    if (losing <= 0.0)
+      return;
+    double target = losing * state.params.hedge_ratio;
+    double current = GetHedgeVolume(state, POSITION_TYPE_BUY);
+    double need = target - current;
+    double minlot = state.volume_min > 0.0 ? state.volume_min : NM1::kMinLot;
+    if (need > minlot * 0.5)
+    {
+      if (TryOpenHedge(state, ORDER_TYPE_BUY, need))
+        state.last_hedge_time = now;
+    }
+  }
+  else if (state.regime == REGIME_TREND_DOWN)
+  {
+    if (GetHedgeVolume(state, POSITION_TYPE_BUY) > 0.0)
+      CloseHedgePositions(state, POSITION_TYPE_BUY);
+    double losing = (buy.profit + state.realized_buy_profit) < 0.0 ? buy.volume : 0.0;
+    if (losing <= 0.0)
+      return;
+    double target = losing * state.params.hedge_ratio;
+    double current = GetHedgeVolume(state, POSITION_TYPE_SELL);
+    double need = target - current;
+    double minlot = state.volume_min > 0.0 ? state.volume_min : NM1::kMinLot;
+    if (need > minlot * 0.5)
+    {
+      if (TryOpenHedge(state, ORDER_TYPE_SELL, need))
+        state.last_hedge_time = now;
+    }
+  }
+}
+
 void CloseBasket(const SymbolState &state, ENUM_POSITION_TYPE type)
 {
   const string symbol = state.broker_symbol;
   close_trade.SetExpertMagicNumber(state.params.magic_number);
   close_trade.SetDeviationInPoints(state.params.slippage_points);
   close_trade.SetAsyncMode(state.params.use_async_close);
-  int filling = (int)SymbolInfoInteger(symbol, SYMBOL_FILLING_MODE);
+  int filling = state.filling_mode;
   if (filling == ORDER_FILLING_FOK || filling == ORDER_FILLING_IOC || filling == ORDER_FILLING_RETURN)
     close_trade.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
   ulong tickets[];
   int count = 0;
-  for (int i = PositionsTotal() - 1; i >= 0; --i)
+  int total = PositionsTotal();
+  if (total > 0)
+    ArrayResize(tickets, total);
+  for (int i = total - 1; i >= 0; --i)
   {
     ulong ticket = PositionGetTicket(i);
     if (!PositionSelectByTicket(ticket))
@@ -930,9 +1304,10 @@ void CloseBasket(const SymbolState &state, ENUM_POSITION_TYPE type)
       continue;
     if ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != type)
       continue;
-    ArrayResize(tickets, ++count);
-    tickets[count - 1] = ticket;
+    tickets[count++] = ticket;
   }
+  if (count > 0)
+    ArrayResize(tickets, count);
 
   for (int i = 0; i < count; ++i)
   {
@@ -959,12 +1334,12 @@ void CloseBasket(const SymbolState &state, ENUM_POSITION_TYPE type)
 
 bool TryOpen(const SymbolState &state, const string symbol, ENUM_ORDER_TYPE order_type, double lot, const string comment = "")
 {
-  lot = NormalizeLot(symbol, lot);
+  lot = NormalizeLotCached(state, lot);
   if (lot <= 0.0)
     return false;
   trade.SetExpertMagicNumber(state.params.magic_number);
   trade.SetDeviationInPoints(state.params.slippage_points);
-  int filling = (int)SymbolInfoInteger(symbol, SYMBOL_FILLING_MODE);
+  int filling = state.filling_mode;
   if (filling == ORDER_FILLING_FOK || filling == ORDER_FILLING_IOC || filling == ORDER_FILLING_RETURN)
     trade.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
   bool ok = false;
@@ -982,22 +1357,23 @@ bool TryOpen(const SymbolState &state, const string symbol, ENUM_ORDER_TYPE orde
   return ok;
 }
 
-bool ShouldStopOnBuyLimit(const NM1Params &params, const string symbol, double limit_price, double limit_lot)
+bool ShouldStopOnBuyLimit(const SymbolState &state, double limit_price, double limit_lot)
 {
   if (limit_price <= 0.0 || limit_lot <= 0.0)
     return false;
-  double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+  const string symbol = state.broker_symbol;
+  double point = state.point;
   if (point <= 0.0)
     point = 0.00001;
   double price_tol = point * 0.5;
-  double norm_lot = NormalizeLot(symbol, limit_lot);
+  double norm_lot = NormalizeLotCached(state, limit_lot);
   for (int i = OrdersTotal() - 1; i >= 0; --i)
   {
     ulong ticket = OrderGetTicket(i);
     if (!OrderSelect(ticket))
       continue;
     long magic = OrderGetInteger(ORDER_MAGIC);
-    if (magic != params.magic_number && magic != 0)
+    if (magic != state.params.magic_number && magic != 0)
       continue;
     if (OrderGetString(ORDER_SYMBOL) != symbol)
       continue;
@@ -1009,15 +1385,6 @@ bool ShouldStopOnBuyLimit(const NM1Params &params, const string symbol, double l
       return true;
   }
   return false;
-}
-
-double PipPointSize(const string symbol)
-{
-  int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
-  double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
-  if (digits == 3 || digits == 5)
-    return point * 10.0;
-  return point;
 }
 
 double DealNetProfit(ulong deal_ticket)
@@ -1037,13 +1404,11 @@ double DealNetProfit(ulong deal_ticket)
          + HistoryDealGetDouble(deal_ticket, DEAL_COMMISSION);
 }
 
-double PriceValuePerUnit(const string symbol)
+double PriceValuePerUnitCached(const SymbolState &state)
 {
-  double tick_value = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
-  double tick_size = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
-  if (tick_value <= 0.0 || tick_size <= 0.0)
+  if (state.tick_value <= 0.0 || state.tick_size <= 0.0)
     return 0.0;
-  return tick_value / tick_size;
+  return state.tick_value / state.tick_size;
 }
 
 bool CanRestart(const NM1Params &params, datetime last_close_time)
@@ -1077,6 +1442,31 @@ bool HasAnyPositionByMagic(const int magic)
   return false;
 }
 
+bool HasAnyHedgePosition()
+{
+  if (HedgeMagicOffset == 0)
+    return false;
+  return HasAnyPositionByMagic(MagicNumber + HedgeMagicOffset);
+}
+
+void UpdateHedgeModeTracking()
+{
+  bool has_hedge = HasAnyHedgePosition();
+  if (has_hedge)
+  {
+    if (hedge_mode_start_time == 0)
+    {
+      hedge_mode_start_time = TimeCurrent();
+      hedge_mode_start_equity = AccountInfoDouble(ACCOUNT_EQUITY);
+    }
+  }
+  else
+  {
+    hedge_mode_start_time = 0;
+    hedge_mode_start_equity = 0.0;
+  }
+}
+
 void CloseAllPositionsByMagic(const int magic)
 {
   close_trade.SetExpertMagicNumber(magic);
@@ -1085,17 +1475,27 @@ void CloseAllPositionsByMagic(const int magic)
   ulong tickets[];
   string symbols[];
   int count = 0;
-  for (int i = PositionsTotal() - 1; i >= 0; --i)
+  int total = PositionsTotal();
+  if (total > 0)
+  {
+    ArrayResize(tickets, total);
+    ArrayResize(symbols, total);
+  }
+  for (int i = total - 1; i >= 0; --i)
   {
     ulong ticket = PositionGetTicket(i);
     if (!PositionSelectByTicket(ticket))
       continue;
     if (PositionGetInteger(POSITION_MAGIC) != magic)
       continue;
-    ArrayResize(tickets, ++count);
+    tickets[count] = ticket;
+    symbols[count] = PositionGetString(POSITION_SYMBOL);
+    count++;
+  }
+  if (count > 0)
+  {
+    ArrayResize(tickets, count);
     ArrayResize(symbols, count);
-    tickets[count - 1] = ticket;
-    symbols[count - 1] = PositionGetString(POSITION_SYMBOL);
   }
 
   for (int i = 0; i < count; ++i)
@@ -1124,6 +1524,13 @@ void CloseAllPositionsByMagic(const int magic)
   }
 }
 
+void CloseAllPositionsForEA()
+{
+  CloseAllPositionsByMagic(MagicNumber);
+  if (HedgeMagicOffset != 0)
+    CloseAllPositionsByMagic(MagicNumber + HedgeMagicOffset);
+}
+
 void StartSession()
 {
   mm_session_id++;
@@ -1143,11 +1550,44 @@ void EndSession(const bool success)
   mm_session_active = false;
   mm_session_end_pending = true;
   mm_session_end_success = success;
-  CloseAllPositionsByMagic(MagicNumber);
+  CloseAllPositionsForEA();
   if (success)
     Print("Session success: closing all positions.");
   else
     Print("Session failed: closing all positions.");
+}
+
+bool CheckHedgeRecoveryClose()
+{
+  UpdateHedgeModeTracking();
+  if (HedgeRecoveryMinutes <= 0 || HedgeRecoveryPercent <= 0.0)
+    return false;
+  if (hedge_mode_start_time == 0)
+    return false;
+  int elapsed = (int)(TimeCurrent() - hedge_mode_start_time);
+  if (elapsed < HedgeRecoveryMinutes * 60)
+    return false;
+
+  double base_equity = hedge_mode_start_equity;
+  if (base_equity <= 0.0)
+    base_equity = AccountInfoDouble(ACCOUNT_EQUITY);
+  double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+  double threshold = base_equity * (1.0 - HedgeRecoveryPercent / 100.0);
+  if (threshold <= 0.0)
+    return false;
+  if (equity < threshold)
+    return false;
+
+  double equity_ratio = base_equity > 0.0 ? (equity / base_equity) * 100.0 : 0.0;
+  PrintFormat("Hedge recovery close triggered: elapsed=%d min equity=%.2f (%.2f%%) base=%.2f equity=%.2f",
+              elapsed / 60, threshold, equity_ratio, base_equity, equity);
+  if (EnableMoneyManagement)
+    EndSession(false);
+  else
+    CloseAllPositionsForEA();
+  hedge_mode_start_time = 0;
+  hedge_mode_start_equity = 0.0;
+  return true;
 }
 
 bool UpdateMoneyManagement()
@@ -1268,13 +1708,13 @@ void ProcessFlexPartial(SymbolState &state, const string symbol, double bid, dou
       {
         state.realized_buy_profit += realized;
         state.has_partial_buy = true;
-        AddFlexRef(symbol, state.flex_buy_refs, price, volume, level);
+        AddFlexRef(state, state.flex_buy_refs, price, volume, level);
       }
       else
       {
         state.realized_sell_profit += realized;
         state.has_partial_sell = true;
-        AddFlexRef(symbol, state.flex_sell_refs, price, volume, level);
+        AddFlexRef(state, state.flex_sell_refs, price, volume, level);
       }
     }
     else
@@ -1287,7 +1727,7 @@ void ProcessFlexPartial(SymbolState &state, const string symbol, double bid, dou
 
 void ProcessFlexRefill(SymbolState &state, const string symbol, ENUM_ORDER_TYPE order_type, FlexRef &refs[], double trigger_price)
 {
-  double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+  double point = state.point;
   if (point <= 0.0)
     point = 0.00001;
   double tol = point * 0.5;
@@ -1326,9 +1766,10 @@ void ProcessSymbolTick(SymbolState &state)
   double bid = t.bid;
   double ask = t.ask;
   bool is_trading_time = IsTradingTime();
+  bool new_bar = IsNewBar(state);
   if (!is_trading_time)
   {
-    double value_per_unit = PriceValuePerUnit(symbol);
+    double value_per_unit = PriceValuePerUnitCached(state);
     double threshold = -0.5 * params.profit_base;
     if (buy.count > 0)
     {
@@ -1361,7 +1802,7 @@ void ProcessSymbolTick(SymbolState &state)
         CloseBasket(state, POSITION_TYPE_SELL);
     }
   }
-  if (ShouldStopOnBuyLimit(params, symbol, params.stop_buy_limit_price, params.stop_buy_limit_lot))
+  if (ShouldStopOnBuyLimit(state, params.stop_buy_limit_price, params.stop_buy_limit_lot))
   {
     PrintFormat("StopBuyLimit triggered: %s buy limit %.2f lots at price %.2f detected.",
                 symbol, params.stop_buy_limit_lot, params.stop_buy_limit_price);
@@ -1486,29 +1927,33 @@ void ProcessSymbolTick(SymbolState &state)
   bool allow_sell_trigger = allow_nanpin;
   bool buy_stop = false;
   bool sell_stop = false;
-  if (allow_nanpin)
+  double adx_now = 0.0;
+  double adx_prev = 0.0;
+  double di_plus_now = 0.0;
+  double di_plus_prev = 0.0;
+  double di_minus_now = 0.0;
+  double di_minus_prev = 0.0;
+  bool has_adx = GetAdxSnapshot(state, adx_now, adx_prev, di_plus_now, di_plus_prev, di_minus_now, di_minus_prev);
+  if (has_adx)
+    UpdateRegime(state, adx_now, di_plus_now, di_minus_now, new_bar);
+  if (allow_nanpin && has_adx)
   {
-    double adx_now = 0.0;
-    double adx_prev = 0.0;
-    double di_plus_now = 0.0;
-    double di_plus_prev = 0.0;
-    double di_minus_now = 0.0;
-    double di_minus_prev = 0.0;
-    if (GetAdxSnapshot(state, adx_now, adx_prev, di_plus_now, di_plus_prev, di_minus_now, di_minus_prev))
-    {
-      double buy_gap = di_minus_now - di_plus_now;
-      double buy_gap_prev = di_minus_prev - di_plus_prev;
-      double sell_gap = di_plus_now - di_minus_now;
-      double sell_gap_prev = di_plus_prev - di_minus_prev;
-      buy_stop = (adx_now >= params.adx_max_for_nanpin && buy_gap >= params.di_gap_min);
-      sell_stop = (adx_now >= params.adx_max_for_nanpin && sell_gap >= params.di_gap_min);
-      bool adx_falling = adx_now < adx_prev;
-      if (buy_stop && adx_falling && buy_gap < buy_gap_prev)
-        buy_stop = false;
-      if (sell_stop && adx_falling && sell_gap < sell_gap_prev)
-        sell_stop = false;
-    }
+    double buy_gap = di_minus_now - di_plus_now;
+    double buy_gap_prev = di_minus_prev - di_plus_prev;
+    double sell_gap = di_plus_now - di_minus_now;
+    double sell_gap_prev = di_plus_prev - di_minus_prev;
+    buy_stop = (adx_now >= params.adx_max_for_nanpin && buy_gap >= params.di_gap_min);
+    sell_stop = (adx_now >= params.adx_max_for_nanpin && sell_gap >= params.di_gap_min);
+    bool adx_falling = adx_now < adx_prev;
+    if (buy_stop && adx_falling && buy_gap < buy_gap_prev)
+      buy_stop = false;
+    if (sell_stop && adx_falling && sell_gap < sell_gap_prev)
+      sell_stop = false;
   }
+  if (state.regime == REGIME_TREND_UP)
+    sell_stop = true;
+  else if (state.regime == REGIME_TREND_DOWN)
+    buy_stop = true;
   allow_buy_trigger = allow_nanpin && !buy_stop;
   allow_sell_trigger = allow_nanpin && !sell_stop;
 
@@ -1532,7 +1977,7 @@ void ProcessSymbolTick(SymbolState &state)
   {
     if (state.has_partial_buy)
     {
-      double value_per_unit = PriceValuePerUnit(symbol);
+      double value_per_unit = PriceValuePerUnitCached(state);
       double target_profit = buy.volume * params.profit_base * 0.5 * value_per_unit;
       if (value_per_unit > 0.0)
       {
@@ -1558,7 +2003,7 @@ void ProcessSymbolTick(SymbolState &state)
   {
     if (state.has_partial_sell)
     {
-      double value_per_unit = PriceValuePerUnit(symbol);
+      double value_per_unit = PriceValuePerUnitCached(state);
       double target_profit = sell.volume * params.profit_base * 0.5 * value_per_unit;
       if (value_per_unit > 0.0)
       {
@@ -1582,6 +2027,8 @@ void ProcessSymbolTick(SymbolState &state)
 
   if (is_trading_time)
   {
+    ProcessTrendHedge(state, buy, sell);
+
     if (state.initial_started)
     {
       if (buy.count == 0 && CanRestart(params, state.last_buy_close_time))
@@ -1712,7 +2159,7 @@ void ProcessSymbolTick(SymbolState &state)
       step = AdjustNanpinStep(state.buy_level_price, level_index, step, apply_min_width);
       double target = 0.0;
       target = EnsureBuyTarget(state, buy, step, level_index);
-      double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+      double point = state.point;
       if (point <= 0.0)
         point = 0.00001;
       double tol = point * 0.5;
@@ -1724,7 +2171,7 @@ void ProcessSymbolTick(SymbolState &state)
         {
           double core_lot = 0.0;
           double flex_lot = 0.0;
-          NormalizeCoreFlexLot(params, symbol, lot, core_lot, flex_lot);
+          NormalizeCoreFlexLot(state, lot, core_lot, flex_lot);
           bool opened = false;
           if (core_lot > 0.0)
             opened |= TryOpen(state, symbol, ORDER_TYPE_BUY, core_lot, MakeLevelComment(NM1::kCoreComment, next_level));
@@ -1751,7 +2198,7 @@ void ProcessSymbolTick(SymbolState &state)
       step = AdjustNanpinStep(state.sell_level_price, level_index, step, apply_min_width);
       double target = 0.0;
       target = EnsureSellTarget(state, sell, step, level_index);
-      double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+      double point = state.point;
       if (point <= 0.0)
         point = 0.00001;
       double tol = point * 0.5;
@@ -1763,7 +2210,7 @@ void ProcessSymbolTick(SymbolState &state)
         {
           double core_lot = 0.0;
           double flex_lot = 0.0;
-          NormalizeCoreFlexLot(params, symbol, lot, core_lot, flex_lot);
+          NormalizeCoreFlexLot(state, lot, core_lot, flex_lot);
           bool opened = false;
           if (core_lot > 0.0)
             opened |= TryOpen(state, symbol, ORDER_TYPE_SELL, core_lot, MakeLevelComment(NM1::kCoreComment, next_level));
@@ -1798,6 +2245,8 @@ void ProcessSymbolTick(SymbolState &state)
 
 void OnTick()
 {
+  if (CheckHedgeRecoveryClose())
+    return;
   if (!UpdateMoneyManagement())
     return;
   for (int i = 0; i < symbols_count; ++i)
