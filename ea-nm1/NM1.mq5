@@ -54,14 +54,14 @@ input double DiGapMin = 2.0;
 
 input group "REGIME FILTER"
 input int RegimeOnBars = 3;
-input int RegimeOffBars = 3;
-input int RegimeCoolingBars = 5;
-input double RegimeAdxOn = 25.0;
-input double RegimeDiGapOn = 6.0;
-input double RegimeAdxOff = 18.0;
-input double RegimeDiGapOff = 3.0;
+input int RegimeOffBars = 5;
+input int RegimeCoolingBars = 15;
+input double RegimeAdxOn = 25.0; // not fixed
+input double RegimeDiGapOn = 6.0; // not fixed
+input double RegimeAdxOff = 18.0; // not fixed
+input double RegimeDiGapOff = 3.0; // not fixed
 input bool CloseOppositeOnTrend = false;
-input double TrendLotMultiplier = 2.0;
+input double TrendLotMultiplier = 1.0; // not fixed
 
 input group "TREND HEDGE"
 input bool EnableTrendHedge = false;
@@ -84,7 +84,7 @@ enum HedgeProfitMode
 input HedgeProfitMode HedgeProfitModeInput = HEDGE_PROFIT_FIXED;
 
 input group "MONEY MANAGEMENT"
-input bool EnableMoneyManagement = true;
+input bool EnableMoneyManagement = false;
 input double SessionMaxDD = 2000.0;
 input double SessionTargetMultiplier = 10.0;
 input int SessionFailureIntervalSeconds = 120;
@@ -92,9 +92,9 @@ input int SessionFailureIntervalSeconds = 120;
 input group "XAUUSD"
 input bool EnableXAUUSD = true;
 input string SymbolXAUUSD = "XAUUSD";
-input double BaseLotXAUUSD = 0.04;
+input double BaseLotXAUUSD = 0.05;
 input double AtrMultiplierXAUUSD = 1.2;
-input double NanpinLevelRatioXAUUSD = 1.1;
+input double NanpinLevelRatioXAUUSD = 1.1; // not fixed
 input bool StrictNanpinSpacingXAUUSD = true;
 input double MinAtrXAUUSD = 1.6;
 input double ProfitBaseXAUUSD = 2.0;
