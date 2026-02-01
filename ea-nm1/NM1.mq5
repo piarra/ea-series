@@ -56,12 +56,12 @@ input group "REGIME FILTER"
 input int RegimeOnBars = 3;
 input int RegimeOffBars = 5;
 input int RegimeCoolingBars = 15;
-input double RegimeAdxOn = 25.0; // not fixed
-input double RegimeDiGapOn = 6.0; // not fixed
-input double RegimeAdxOff = 18.0; // not fixed
-input double RegimeDiGapOff = 3.0; // not fixed
+input double RegimeAdxOn = 25.0;
+input double RegimeDiGapOn = 6.0;
+input double RegimeAdxOff = 18.0;
+input double RegimeDiGapOff = 3.0;
 input bool CloseOppositeOnTrend = false;
-input double TrendLotMultiplier = 1.0; // not fixed
+input double TrendLotMultiplier = 1.0;
 
 input group "TREND HEDGE"
 input bool EnableTrendHedge = false;
@@ -94,7 +94,7 @@ input bool EnableXAUUSD = true;
 input string SymbolXAUUSD = "XAUUSD";
 input double BaseLotXAUUSD = 0.05;
 input double AtrMultiplierXAUUSD = 1.2;
-input double NanpinLevelRatioXAUUSD = 1.1; // not fixed
+input double NanpinLevelRatioXAUUSD = 1.1;
 input bool StrictNanpinSpacingXAUUSD = true;
 input double MinAtrXAUUSD = 1.6;
 input double ProfitBaseXAUUSD = 2.0;
