@@ -633,6 +633,25 @@ def ensure_sell_target(state: SymbolState, sell: BasketInfo, step: float, level_
     return target
 
 
+def adjust_nanpin_step(
+    level_prices: List[float], level_index: int, step: float, skip_levels: int
+) -> float:
+    if skip_levels <= 0 or level_index < 3:
+        return step
+    p1 = level_prices[level_index - 1]
+    p2 = level_prices[level_index - 2]
+    p3 = level_prices[level_index - 3]
+    if p1 <= 0.0 or p2 <= 0.0 or p3 <= 0.0:
+        return step
+    w1 = abs(p1 - p2)
+    w2 = abs(p2 - p3)
+    min_w = min(w1, w2)
+    if min_w <= 0.0:
+        return step
+    min_step = min_w
+    return max(step, min_step)
+
+
 def open_position(
     positions: List[Position],
     stats: Stats,
@@ -1163,6 +1182,7 @@ def process_tick(
     if buy.count > 0 and (buy.level_count + state.buy_skip_levels) < levels:
         step = state.buy_grid_step if state.buy_grid_step > 0.0 else grid_step
         level_index = buy.level_count + state.buy_skip_levels
+        step = adjust_nanpin_step(state.buy_level_price, level_index, step, state.buy_skip_levels)
         target = ensure_buy_target(state, buy, step, level_index)
         if allow_nanpin_buy and can_nanpin(state.last_buy_nanpin_time, tick_time, params.nanpin_sleep_seconds):
             if ask <= target + tol:
@@ -1213,6 +1233,7 @@ def process_tick(
     if sell.count > 0 and (sell.level_count + state.sell_skip_levels) < levels:
         step = state.sell_grid_step if state.sell_grid_step > 0.0 else grid_step
         level_index = sell.level_count + state.sell_skip_levels
+        step = adjust_nanpin_step(state.sell_level_price, level_index, step, state.sell_skip_levels)
         target = ensure_sell_target(state, sell, step, level_index)
         if allow_nanpin_sell and can_nanpin(state.last_sell_nanpin_time, tick_time, params.nanpin_sleep_seconds):
             if bid >= target - tol:
