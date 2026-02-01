@@ -60,7 +60,7 @@ input double RegimeAdxOn = 25.0;
 input double RegimeDiGapOn = 6.0;
 input double RegimeAdxOff = 18.0;
 input double RegimeDiGapOff = 3.0;
-input bool CloseOppositeOnTrend = false;
+input bool CloseOppositeOnTrend = true;
 input double TrendLotMultiplier = 1.0;
 
 input group "TREND HEDGE"
