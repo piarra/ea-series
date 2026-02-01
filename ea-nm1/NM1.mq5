@@ -49,9 +49,9 @@ input group "REGIME FILTER"
 input int RegimeOnBars = 3;
 input int RegimeOffBars = 5;
 input int RegimeCoolingBars = 15;
-input double RegimeAdxOn = 25.0;
+input double RegimeAdxOn = 32.5;
 input double RegimeDiGapOn = 6.0;
-input double RegimeAdxOff = 18.0;
+input double RegimeAdxOff = 14.0;
 input double RegimeDiGapOff = 3.0;
 input bool CloseOppositeOnTrend = true;
 input double TrendLotMultiplier = 4.0;
@@ -62,12 +62,12 @@ input bool DebugMode = false;
 input group "XAUUSD"
 input bool EnableXAUUSD = true;
 input string SymbolXAUUSD = "XAUUSD";
-input double BaseLotXAUUSD = 0.08;
+input double BaseLotXAUUSD = 0.1;
 input double AtrMultiplierXAUUSD = 1.2;
 input double NanpinLevelRatioXAUUSD = 1.1;
 input bool StrictNanpinSpacingXAUUSD = true;
 input double MinAtrXAUUSD = 1.6;
-input double ProfitBaseXAUUSD = 2.0;
+input double ProfitBaseXAUUSD = 1.0;
 input int MaxLevelsXAUUSD = 12;
 input bool NoMartingaleXAUUSD = false;
 
@@ -744,7 +744,7 @@ int OnInit()
   }
   if (active == 0)
     return INIT_FAILED;
-  if (!MQLInfoInteger(MQL_TESTER))
+  if (!MQLInfoInteger(MQL_TESTER) && active > 1)
   {
     if (!EventSetMillisecondTimer(500))
       Print("EventSetMillisecondTimer failed");
