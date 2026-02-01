@@ -61,7 +61,7 @@ input double RegimeDiGapOn = 6.0;
 input double RegimeAdxOff = 18.0;
 input double RegimeDiGapOff = 3.0;
 input bool CloseOppositeOnTrend = true;
-input double TrendLotMultiplier = 1.0;
+input double TrendLotMultiplier = 4.0;
 
 input group "TREND HEDGE"
 input bool EnableTrendHedge = false;
@@ -70,7 +70,7 @@ input int HedgeMagicOffset = 10000;
 input int HedgeCooldownSeconds = 5;
 input int HedgeRecoveryMinutes = 360;
 input double HedgeRecoveryPercent = 10.0;
-input bool EnableLonelyL1Close = true;
+input bool EnableLonelyL1Close = false;
 input int LonelyL1CloseMinutes = 60;
 input int MultiLevelCloseMinutes = 180;
 
