@@ -40,6 +40,7 @@ input double SafeK = 2.0;
 input double SafeSlopeK = 0.3;
 input int RestartDelaySeconds = 1;
 input int NanpinSleepSeconds = 10;
+input int OrderPendingTimeoutSeconds = 2;
 input int AdxPeriod = 14;
 input double AdxMaxForNanpin = 20.0;
 input double DiGapMin = 2.0;
@@ -159,6 +160,7 @@ struct NM1Params
   int max_levels;
   int restart_delay_seconds;
   int nanpin_sleep_seconds;
+  int order_pending_timeout_seconds;
   int close_retry_count;
   int close_retry_delay_ms;
   bool no_martingale;
@@ -209,6 +211,10 @@ struct SymbolState
   datetime last_sell_nanpin_time;
   datetime buy_open_time;
   datetime sell_open_time;
+  bool buy_order_pending;
+  bool sell_order_pending;
+  datetime buy_order_pending_time;
+  datetime sell_order_pending_time;
   int prev_buy_count;
   int prev_sell_count;
   int atr_handle;
@@ -374,6 +380,10 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.last_sell_nanpin_time = 0;
   state.buy_open_time = 0;
   state.sell_open_time = 0;
+  state.buy_order_pending = false;
+  state.sell_order_pending = false;
+  state.buy_order_pending_time = 0;
+  state.sell_order_pending_time = 0;
   state.prev_buy_count = 0;
   state.prev_sell_count = 0;
   state.atr_handle = INVALID_HANDLE;
@@ -439,6 +449,7 @@ void ApplyCommonParams(NM1Params &params)
   params.trend_lot_multiplier = TrendLotMultiplier;
   params.restart_delay_seconds = RestartDelaySeconds;
   params.nanpin_sleep_seconds = NanpinSleepSeconds;
+  params.order_pending_timeout_seconds = OrderPendingTimeoutSeconds;
   params.close_retry_count = CloseRetryCount;
   params.close_retry_delay_ms = CloseRetryDelayMs;
 }
@@ -1261,6 +1272,23 @@ void ProcessSymbolTick(SymbolState &state)
     return;
   double bid = t.bid;
   double ask = t.ask;
+  datetime now = TimeCurrent();
+  if (state.buy_order_pending)
+  {
+    if (buy.count > state.prev_buy_count)
+      state.buy_order_pending = false;
+    else if (state.buy_order_pending_time > 0
+             && (now - state.buy_order_pending_time) >= params.order_pending_timeout_seconds)
+      state.buy_order_pending = false;
+  }
+  if (state.sell_order_pending)
+  {
+    if (sell.count > state.prev_sell_count)
+      state.sell_order_pending = false;
+    else if (state.sell_order_pending_time > 0
+             && (now - state.sell_order_pending_time) >= params.order_pending_timeout_seconds)
+      state.sell_order_pending = false;
+  }
   if (DebugMode)
   {
     string regime_name = RegimeName(state.regime);
@@ -1360,12 +1388,30 @@ void ProcessSymbolTick(SymbolState &state)
   {
     if (buy.count == 0 && sell.count == 0 && is_trading_time)
     {
-      bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
-      if (opened_buy && state.buy_level_price[0] <= 0.0)
-        state.buy_level_price[0] = ask;
-      bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
-      if (opened_sell && state.sell_level_price[0] <= 0.0)
-        state.sell_level_price[0] = bid;
+      bool opened_buy = false;
+      bool opened_sell = false;
+      if (!state.buy_order_pending)
+      {
+        opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
+        if (opened_buy)
+        {
+          state.buy_order_pending = true;
+          state.buy_order_pending_time = now;
+          if (state.buy_level_price[0] <= 0.0)
+            state.buy_level_price[0] = ask;
+        }
+      }
+      if (!state.sell_order_pending)
+      {
+        opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
+        if (opened_sell)
+        {
+          state.sell_order_pending = true;
+          state.sell_order_pending_time = now;
+          if (state.sell_level_price[0] <= 0.0)
+            state.sell_level_price[0] = bid;
+        }
+      }
       bool opened = opened_buy || opened_sell;
       if (opened)
         state.initial_started = true;
@@ -1526,17 +1572,27 @@ void ProcessSymbolTick(SymbolState &state)
   {
     if (state.initial_started)
     {
-      if (buy.count == 0 && CanRestart(params, state.last_buy_close_time))
+      if (buy.count == 0 && !state.buy_order_pending && CanRestart(params, state.last_buy_close_time))
       {
         bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
-        if (opened_buy && state.buy_level_price[0] <= 0.0)
-          state.buy_level_price[0] = ask;
+        if (opened_buy)
+        {
+          state.buy_order_pending = true;
+          state.buy_order_pending_time = now;
+          if (state.buy_level_price[0] <= 0.0)
+            state.buy_level_price[0] = ask;
+        }
       }
-      if (sell.count == 0 && CanRestart(params, state.last_sell_close_time))
+      if (sell.count == 0 && !state.sell_order_pending && CanRestart(params, state.last_sell_close_time))
       {
         bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
-        if (opened_sell && state.sell_level_price[0] <= 0.0)
-          state.sell_level_price[0] = bid;
+        if (opened_sell)
+        {
+          state.sell_order_pending = true;
+          state.sell_order_pending_time = now;
+          if (state.sell_level_price[0] <= 0.0)
+            state.sell_level_price[0] = bid;
+        }
       }
     }
 
@@ -1660,10 +1716,17 @@ void ProcessSymbolTick(SymbolState &state)
       double tol = point * 0.5;
       if (allow_buy_trigger && CanNanpin(params, state.last_buy_nanpin_time) && ask <= target + tol)
       {
-        double lot = state.lot_seq[level_index];
-        int next_level = level_index + 1;
-        if (TryOpen(state, symbol, ORDER_TYPE_BUY, lot, MakeLevelComment(NM1::kCoreComment, next_level)))
-          state.last_buy_nanpin_time = TimeCurrent();
+        if (!state.buy_order_pending)
+        {
+          double lot = state.lot_seq[level_index];
+          int next_level = level_index + 1;
+          if (TryOpen(state, symbol, ORDER_TYPE_BUY, lot, MakeLevelComment(NM1::kCoreComment, next_level)))
+          {
+            state.buy_order_pending = true;
+            state.buy_order_pending_time = now;
+            state.last_buy_nanpin_time = now;
+          }
+        }
       }
     }
 
@@ -1683,10 +1746,17 @@ void ProcessSymbolTick(SymbolState &state)
       double tol = point * 0.5;
       if (allow_sell_trigger && CanNanpin(params, state.last_sell_nanpin_time) && bid >= target - tol)
       {
-        double lot = state.lot_seq[level_index];
-        int next_level = level_index + 1;
-        if (TryOpen(state, symbol, ORDER_TYPE_SELL, lot, MakeLevelComment(NM1::kCoreComment, next_level)))
-          state.last_sell_nanpin_time = TimeCurrent();
+        if (!state.sell_order_pending)
+        {
+          double lot = state.lot_seq[level_index];
+          int next_level = level_index + 1;
+          if (TryOpen(state, symbol, ORDER_TYPE_SELL, lot, MakeLevelComment(NM1::kCoreComment, next_level)))
+          {
+            state.sell_order_pending = true;
+            state.sell_order_pending_time = now;
+            state.last_sell_nanpin_time = now;
+          }
+        }
       }
     }
 
