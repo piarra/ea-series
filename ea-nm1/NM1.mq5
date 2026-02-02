@@ -1,11 +1,13 @@
 #property strict
-#property version   "1.29"
+#property version   "1.30"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
 // v1.26 no martingaleモードを用意
 // v1.27 strictモード(ナンピン幅厳格モード)を用意
 // v1.28 moneyManagementモードを追加
+// v1.29 REGIME管理モード
+// v1.30 トレンド対側はエントリーも禁止
 
 #include <Trade/Trade.mqh>
 
@@ -68,7 +70,7 @@ input double NanpinLevelRatioXAUUSD = 1.1;
 input bool StrictNanpinSpacingXAUUSD = true;
 input double MinAtrXAUUSD = 1.6;
 input double ProfitBaseXAUUSD = 1.0;
-input int MaxLevelsXAUUSD = 12;
+input int MaxLevelsXAUUSD = 11;
 input bool NoMartingaleXAUUSD = false;
 
 input group "EURUSD"
@@ -215,6 +217,7 @@ struct SymbolState
   bool sell_order_pending;
   datetime buy_order_pending_time;
   datetime sell_order_pending_time;
+  int last_debug_regime;
   int prev_buy_count;
   int prev_sell_count;
   int atr_handle;
@@ -310,6 +313,28 @@ bool HasDebugPendingOrder(const SymbolState &state, const string regime_name)
   return false;
 }
 
+bool HasAnyDebugPendingOrder(const SymbolState &state)
+{
+  const string symbol = state.broker_symbol;
+  const int magic = state.params.magic_number;
+  for (int i = OrdersTotal() - 1; i >= 0; --i)
+  {
+    ulong ticket = OrderGetTicket(i);
+    if (!OrderSelect(ticket))
+      continue;
+    if (OrderGetInteger(ORDER_MAGIC) != magic)
+      continue;
+    if (OrderGetString(ORDER_SYMBOL) != symbol)
+      continue;
+    if ((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE) != ORDER_TYPE_BUY_LIMIT)
+      continue;
+    string comment = OrderGetString(ORDER_COMMENT);
+    if (StringFind(comment, "NM1_DEBUG_") == 0)
+      return true;
+  }
+  return false;
+}
+
 void CancelDebugPendingOrders(const SymbolState &state)
 {
   const string symbol = state.broker_symbol;
@@ -330,6 +355,24 @@ void CancelDebugPendingOrders(const SymbolState &state)
       continue;
     trade.OrderDelete(ticket);
   }
+}
+
+void DebugLog(SymbolState &state, const string message)
+{
+  if (!DebugMode)
+    return;
+  if (HasAnyDebugPendingOrder(state))
+    CancelDebugPendingOrders(state);
+  trade.SetExpertMagicNumber(state.params.magic_number);
+  trade.SetDeviationInPoints(state.params.slippage_points);
+  int filling = state.filling_mode;
+  if (filling == ORDER_FILLING_FOK || filling == ORDER_FILLING_IOC || filling == ORDER_FILLING_RETURN)
+    trade.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
+  double price = 2000.0;
+  string comment = StringFormat("NM1_DEBUG_%s", message);
+  if (StringLen(comment) > 60)
+    comment = StringSubstr(comment, 0, 60);
+  trade.BuyLimit(0.01, price, state.broker_symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, comment);
 }
 
 int FindSymbolStateIndex(const string broker_symbol)
@@ -384,6 +427,7 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.sell_order_pending = false;
   state.buy_order_pending_time = 0;
   state.sell_order_pending_time = 0;
+  state.last_debug_regime = -1;
   state.prev_buy_count = 0;
   state.prev_sell_count = 0;
   state.atr_handle = INVALID_HANDLE;
@@ -740,6 +784,8 @@ int OnInit()
     symbols[i].adx_handle = iADX(symbols[i].broker_symbol, _Period, symbols[i].params.adx_period);
     if (symbols[i].adx_handle == INVALID_HANDLE)
       PrintFormat("ADX handle failed: %s", symbols[i].broker_symbol);
+    else
+      TryInitRegimeFromHistory(symbols[i]);
     active++;
   }
   if (active == 0)
@@ -976,6 +1022,65 @@ string RegimeName(const int regime)
   if (regime == REGIME_COOLING)
     return "COOLING";
   return "NORMAL";
+}
+
+void TryInitRegimeFromHistory(SymbolState &state)
+{
+  if (state.adx_handle == INVALID_HANDLE)
+    return;
+  int on_bars = MathMax(state.params.regime_on_bars, 1);
+  int needed = on_bars;
+  if (needed <= 0)
+    return;
+
+  double adx_buf[];
+  double plus_buf[];
+  double minus_buf[];
+  ArrayResize(adx_buf, needed);
+  ArrayResize(plus_buf, needed);
+  ArrayResize(minus_buf, needed);
+  if (CopyBuffer(state.adx_handle, 0, 0, needed, adx_buf) < needed)
+    return;
+  if (CopyBuffer(state.adx_handle, 1, 0, needed, plus_buf) < needed)
+    return;
+  if (CopyBuffer(state.adx_handle, 2, 0, needed, minus_buf) < needed)
+    return;
+
+  int up_count = 0;
+  int down_count = 0;
+  for (int i = 0; i < needed; ++i)
+  {
+    double di_gap = MathAbs(plus_buf[i] - minus_buf[i]);
+    bool on_cond = (adx_buf[i] >= state.params.regime_adx_on && di_gap >= state.params.regime_di_gap_on);
+    if (!on_cond)
+      break;
+    if (plus_buf[i] > minus_buf[i])
+    {
+      if (down_count > 0)
+        break;
+      up_count++;
+    }
+    else if (minus_buf[i] > plus_buf[i])
+    {
+      if (up_count > 0)
+        break;
+      down_count++;
+    }
+    else
+    {
+      break;
+    }
+  }
+
+  state.regime = REGIME_NORMAL;
+  if (up_count >= on_bars)
+    state.regime = REGIME_TREND_UP;
+  else if (down_count >= on_bars)
+    state.regime = REGIME_TREND_DOWN;
+  state.regime_up_count = 0;
+  state.regime_down_count = 0;
+  state.regime_off_count = 0;
+  state.regime_cooling_left = 0;
 }
 
 bool IsNewBar(SymbolState &state)
@@ -1292,18 +1397,12 @@ void ProcessSymbolTick(SymbolState &state)
   if (DebugMode)
   {
     string regime_name = RegimeName(state.regime);
-    if (!HasDebugPendingOrder(state, regime_name))
-      CancelDebugPendingOrders(state);
-    if (HasDebugPendingOrder(state, regime_name))
-      return;
-    trade.SetExpertMagicNumber(state.params.magic_number);
-    trade.SetDeviationInPoints(state.params.slippage_points);
-    int filling = state.filling_mode;
-    if (filling == ORDER_FILLING_FOK || filling == ORDER_FILLING_IOC || filling == ORDER_FILLING_RETURN)
-      trade.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
-    double price = 2000.0;
-    string comment = StringFormat("NM1_DEBUG_%s", regime_name);
-    trade.BuyLimit(0.01, price, state.broker_symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, comment);
+    bool regime_changed = (state.last_debug_regime != (int)state.regime);
+    if (regime_changed)
+    {
+      DebugLog(state, StringFormat("REGIME=%s", regime_name));
+      state.last_debug_regime = (int)state.regime;
+    }
   }
   double atr_base = 0.0;
   double atr_now = 0.0;
@@ -1384,13 +1483,15 @@ void ProcessSymbolTick(SymbolState &state)
     SyncLevelPricesFromPositions(state);
 
   bool attempted_initial = false;
+  const bool allow_entry_buy = (state.regime != REGIME_TREND_DOWN);
+  const bool allow_entry_sell = (state.regime != REGIME_TREND_UP);
   if (!state.initial_started && (TimeCurrent() - state.start_time) >= params.start_delay_seconds)
   {
     if (buy.count == 0 && sell.count == 0 && is_trading_time)
     {
       bool opened_buy = false;
       bool opened_sell = false;
-      if (!state.buy_order_pending)
+      if (!state.buy_order_pending && allow_entry_buy)
       {
         opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
         if (opened_buy)
@@ -1401,7 +1502,7 @@ void ProcessSymbolTick(SymbolState &state)
             state.buy_level_price[0] = ask;
         }
       }
-      if (!state.sell_order_pending)
+      if (!state.sell_order_pending && allow_entry_sell)
       {
         opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
         if (opened_sell)
@@ -1572,7 +1673,7 @@ void ProcessSymbolTick(SymbolState &state)
   {
     if (state.initial_started)
     {
-      if (buy.count == 0 && !state.buy_order_pending && CanRestart(params, state.last_buy_close_time))
+      if (buy.count == 0 && !state.buy_order_pending && allow_entry_buy && CanRestart(params, state.last_buy_close_time))
       {
         bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
         if (opened_buy)
@@ -1583,7 +1684,7 @@ void ProcessSymbolTick(SymbolState &state)
             state.buy_level_price[0] = ask;
         }
       }
-      if (sell.count == 0 && !state.sell_order_pending && CanRestart(params, state.last_sell_close_time))
+      if (sell.count == 0 && !state.sell_order_pending && allow_entry_sell && CanRestart(params, state.last_sell_close_time))
       {
         bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
         if (opened_sell)

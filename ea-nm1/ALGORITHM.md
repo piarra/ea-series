@@ -21,10 +21,14 @@ NM1.mq5 実装アルゴリズム
   buy/sell を同時発注する。
 - 初期ロットは `lot_seq[0]` (実質 `BaseLot`)。
 - 起動時に既存ポジションがある場合は初期エントリーをスキップする。
+- REGIME がトレンド判定の間は、逆方向の初期エントリーを禁止する
+  (TREND_UP なら sell を禁止、TREND_DOWN なら buy を禁止)。
 
 再スタート
 - 片側のバスケットが全決済された後、`RestartDelaySeconds` 経過で
   その方向のみ再エントリーする。
+- REGIME がトレンド判定の間は、逆方向の再エントリーを禁止する
+  (TREND_UP なら sell を禁止、TREND_DOWN なら buy を禁止)。
 
 追加エントリー (ナンピン)
 - グリッド幅は `max(ATR_base, MinAtr) * AtrMultiplier`。
@@ -45,6 +49,8 @@ NM1.mq5 実装アルゴリズム
   - `SafetyMode = true` の場合、`ATR(14) >= ATR_base * SafeK` または
     `ATR(14) の傾き > ATR_base * SafeSlopeK` の間は
     ナンピン追加を停止する (初回エントリーや決済は継続)。
+  - REGIME がトレンド判定の間は、逆方向のナンピンを停止する
+    (TREND_UP なら sell を停止、TREND_DOWN なら buy を停止)。
 - ナンピンの連続発注は `NanpinSleepSeconds` で抑制する。
 - レベル3以降のナンピンはロットを分離する。
   - `CoreRatio` と `FlexRatio` で分割 (デフォルト 70/30)。
@@ -75,3 +81,13 @@ NM1.mq5 実装アルゴリズム
   - `ATR(14) >= ATR_base * SafeK` または `ATR(14) の傾き > ATR_base * SafeSlopeK` の間は
     ナンピン追加を停止する。
   - `SafeStopMode = true` の場合、上記トリガーで保有バスケットを即時クローズする。
+
+REGIME フィルタ
+- ADX/DI ギャップでトレンド判定を行い、一定本数の条件成立で
+  `REGIME_TREND_UP/DOWN` に遷移する。
+  - トレンド解除条件が連続して満たされたら `REGIME_COOLING` に入り、
+    `RegimeCoolingBars` 経過で `REGIME_NORMAL` に戻る。
+- `CloseOppositeOnTrend = true` の場合、トレンド判定に切り替わった瞬間に
+  逆方向バスケットをクローズする。
+- トレンド判定中は、同方向の新規注文に `TrendLotMultiplier` を乗せる
+  (初期/再エントリー/ナンピンすべて対象)。
