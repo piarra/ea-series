@@ -241,6 +241,7 @@ struct SymbolState
   int regime_off_count;
   int regime_cooling_left;
   datetime last_bar_time;
+  datetime last_regime_bar_time;
 };
 
 SymbolState symbols[NM1::kMaxSymbols];
@@ -451,6 +452,7 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.regime_off_count = 0;
   state.regime_cooling_left = 0;
   state.last_bar_time = 0;
+  state.last_regime_bar_time = 0;
   ClearLevelPrices(state.buy_level_price);
   ClearLevelPrices(state.sell_level_price);
   state.buy_grid_step = 0.0;
@@ -700,6 +702,18 @@ int EffectiveMaxLevels(const NM1Params &params)
   return levels;
 }
 
+int EffectiveMaxLevelsRuntime(const SymbolState &state)
+{
+  int levels = EffectiveMaxLevels(state.params);
+  // In TREND regime, cap nanpin depth to 3 to avoid over-amplifying with grid
+  if (state.regime == REGIME_TREND_UP || state.regime == REGIME_TREND_DOWN)
+  {
+    if (levels > 3)
+      levels = 3;
+  }
+  return levels;
+}
+
 void BuildLotSequence(SymbolState &state)
 {
   NM1Params params = state.params;
@@ -861,11 +875,14 @@ bool GetAdxSnapshot(SymbolState &state,
   double adx_buf[2];
   double plus_buf[2];
   double minus_buf[2];
-  if (CopyBuffer(state.adx_handle, 0, 0, 2, adx_buf) < 2)
+  // Use confirmed bars (shift=1) to avoid intra-bar noise and missed new_bar detection
+  const int kStartPos = 1;
+  const int kCount = 2;
+  if (CopyBuffer(state.adx_handle, 0, kStartPos, kCount, adx_buf) < kCount)
     return false;
-  if (CopyBuffer(state.adx_handle, 1, 0, 2, plus_buf) < 2)
+  if (CopyBuffer(state.adx_handle, 1, kStartPos, kCount, plus_buf) < kCount)
     return false;
-  if (CopyBuffer(state.adx_handle, 2, 0, 2, minus_buf) < 2)
+  if (CopyBuffer(state.adx_handle, 2, kStartPos, kCount, minus_buf) < kCount)
     return false;
   adx_now = adx_buf[0];
   adx_prev = adx_buf[1];
@@ -1096,10 +1113,14 @@ bool IsNewBar(SymbolState &state)
   return false;
 }
 
-void UpdateRegime(SymbolState &state, double adx_now, double di_plus_now, double di_minus_now, bool new_bar)
+void UpdateRegime(SymbolState &state, double adx_now, double di_plus_now, double di_minus_now, datetime confirmed_bar_time)
 {
-  if (!new_bar)
+  // Process once per confirmed bar (shift=1) to avoid missing regime changes when new_bar detection lags.
+  if (confirmed_bar_time <= 0)
     return;
+  if (state.last_regime_bar_time != 0 && confirmed_bar_time == state.last_regime_bar_time)
+    return;
+  state.last_regime_bar_time = confirmed_bar_time;
   int prev = state.regime;
   int on_bars = MathMax(state.params.regime_on_bars, 1);
   int off_bars = MathMax(state.params.regime_off_bars, 1);
@@ -1233,10 +1254,15 @@ void CloseBasket(const SymbolState &state, ENUM_POSITION_TYPE type)
   }
 }
 
-bool TryOpen(const SymbolState &state, const string symbol, ENUM_ORDER_TYPE order_type, double lot, const string comment = "")
+bool TryOpen(const SymbolState &state,
+             const string symbol,
+             ENUM_ORDER_TYPE order_type,
+             double lot,
+             const string comment = "",
+             int level = 0)
 {
   double multiplier = state.params.trend_lot_multiplier;
-  if (multiplier > 1.0)
+  if (multiplier > 1.0 && level == 1)
   {
     if (order_type == ORDER_TYPE_BUY && state.regime == REGIME_TREND_UP)
       lot *= multiplier;
@@ -1409,8 +1435,8 @@ void ProcessSymbolTick(SymbolState &state)
   double atr_slope = 0.0;
   GetAtrSnapshot(state, atr_base, atr_now, atr_slope);
   bool is_trading_time = IsTradingTime();
-  bool new_bar = IsNewBar(state);
   double value_per_unit = PriceValuePerUnitCached(state);
+  datetime confirmed_bar_time = iTime(state.broker_symbol, _Period, 1);
   if (!is_trading_time)
   {
     double threshold = -0.5 * params.profit_base;
@@ -1493,7 +1519,7 @@ void ProcessSymbolTick(SymbolState &state)
       bool opened_sell = false;
       if (!state.buy_order_pending && allow_entry_buy)
       {
-        opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
+        opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1), 1);
         if (opened_buy)
         {
           state.buy_order_pending = true;
@@ -1504,7 +1530,7 @@ void ProcessSymbolTick(SymbolState &state)
       }
       if (!state.sell_order_pending && allow_entry_sell)
       {
-        opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
+        opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1), 1);
         if (opened_sell)
         {
           state.sell_order_pending = true;
@@ -1581,7 +1607,7 @@ void ProcessSymbolTick(SymbolState &state)
   double di_minus_prev = 0.0;
   bool has_adx = GetAdxSnapshot(state, adx_now, adx_prev, di_plus_now, di_plus_prev, di_minus_now, di_minus_prev);
   if (has_adx)
-    UpdateRegime(state, adx_now, di_plus_now, di_minus_now, new_bar);
+    UpdateRegime(state, adx_now, di_plus_now, di_minus_now, confirmed_bar_time);
   if (allow_nanpin && has_adx)
   {
     double buy_gap = di_minus_now - di_plus_now;
@@ -1675,7 +1701,7 @@ void ProcessSymbolTick(SymbolState &state)
     {
       if (buy.count == 0 && !state.buy_order_pending && allow_entry_buy && CanRestart(params, state.last_buy_close_time))
       {
-        bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
+        bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1), 1);
         if (opened_buy)
         {
           state.buy_order_pending = true;
@@ -1686,7 +1712,7 @@ void ProcessSymbolTick(SymbolState &state)
       }
       if (sell.count == 0 && !state.sell_order_pending && allow_entry_sell && CanRestart(params, state.last_sell_close_time))
       {
-        bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1));
+        bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1), 1);
         if (opened_sell)
         {
           state.sell_order_pending = true;
@@ -1697,7 +1723,7 @@ void ProcessSymbolTick(SymbolState &state)
       }
     }
 
-    int levels = EffectiveMaxLevels(params);
+    int levels = EffectiveMaxLevelsRuntime(state);
     if (buy.count > 0)
     {
       if (buy_stop)
@@ -1821,7 +1847,7 @@ void ProcessSymbolTick(SymbolState &state)
         {
           double lot = state.lot_seq[level_index];
           int next_level = level_index + 1;
-          if (TryOpen(state, symbol, ORDER_TYPE_BUY, lot, MakeLevelComment(NM1::kCoreComment, next_level)))
+          if (TryOpen(state, symbol, ORDER_TYPE_BUY, lot, MakeLevelComment(NM1::kCoreComment, next_level), next_level))
           {
             state.buy_order_pending = true;
             state.buy_order_pending_time = now;
@@ -1851,7 +1877,7 @@ void ProcessSymbolTick(SymbolState &state)
         {
           double lot = state.lot_seq[level_index];
           int next_level = level_index + 1;
-          if (TryOpen(state, symbol, ORDER_TYPE_SELL, lot, MakeLevelComment(NM1::kCoreComment, next_level)))
+          if (TryOpen(state, symbol, ORDER_TYPE_SELL, lot, MakeLevelComment(NM1::kCoreComment, next_level), next_level))
           {
             state.sell_order_pending = true;
             state.sell_order_pending_time = now;
