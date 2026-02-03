@@ -1,0 +1,29 @@
+{
+  "name": "ea-logserver",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"vite build --watch\" \"wrangler dev --local --port 8787 --no-inspect\"",
+    "dev:worker": "wrangler dev --local --port 8787 --no-inspect",
+    "dev:client": "vite dev",
+    "build": "vite build",
+    "deploy": "npm run build && wrangler deploy",
+    "format": "prettier -w ."
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240129.0",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^5.0.4",
+    "concurrently": "^8.2.2",
+    "prettier": "^3.2.5",
+    "typescript": "^5.4.0",
+    "vite": "^5.2.0",
+    "wrangler": "^4.61.1"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}

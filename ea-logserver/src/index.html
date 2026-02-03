@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Log Stream</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600&family=IBM+Plex+Mono:wght@400;600&display=swap');
+    :root {
+      --bg: radial-gradient(120% 120% at 20% 20%, #0f172a 0%, #0b1224 50%, #050915 100%);
+      --card: rgba(255, 255, 255, 0.04);
+      --border: rgba(255, 255, 255, 0.08);
+      --text: #e6edf7;
+      --muted: #9fb0c7;
+      --accent: #7bf1a8;
+      --warn: #f7d358;
+      --error: #ff8ba7;
+      --mono: 'IBM Plex Mono', monospace;
+      --sans: 'Space Grotesk', 'Helvetica Neue', sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      padding: 18px;
+      display: flex;
+      justify-content: center;
+    }
+    .shell {
+      width: min(980px, 100%);
+      display: grid;
+      gap: 14px;
+    }
+    header {
+      padding: 16px 18px;
+      border: 1px solid var(--border);
+      background: linear-gradient(145deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02));
+      border-radius: 16px;
+      display: grid;
+      gap: 10px;
+    }
+    .headline {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.95rem;
+      color: var(--muted);
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--warn);
+      box-shadow: 0 0 10px rgba(247, 211, 88, 0.8);
+      transition: all 0.2s ease;
+    }
+    .dot.ok { background: var(--accent); box-shadow: 0 0 10px rgba(123, 241, 168, 0.8); }
+    h1 {
+      margin: 0;
+      letter-spacing: 0.5px;
+      font-size: 1.4rem;
+    }
+    .guide {
+      font-family: var(--mono);
+      white-space: pre-wrap;
+      background: var(--card);
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px dashed var(--border);
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.5;
+    }
+    .logs {
+      background: rgba(0,0,0,0.2);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 10px;
+      max-height: 72vh;
+      overflow: auto;
+    }
+    .log-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: grid;
+      gap: 10px;
+    }
+    .log {
+      padding: 10px 12px;
+      background: rgba(255,255,255,0.03);
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      display: grid;
+      gap: 6px;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .ts {
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    .level {
+      font-size: 0.82rem;
+      letter-spacing: 0.4px;
+      padding: 4px 8px;
+      border-radius: 10px;
+      text-transform: uppercase;
+      font-weight: 600;
+      border: 1px solid var(--border);
+    }
+    .level.info { color: var(--accent); }
+    .level.warn { color: var(--warn); }
+    .level.error { color: var(--error); }
+    .message {
+      font-family: var(--mono);
+      word-break: break-word;
+      line-height: 1.4;
+    }
+    .context {
+      font-family: var(--mono);
+      font-size: 0.83rem;
+      color: var(--muted);
+      background: rgba(255,255,255,0.03);
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px dashed var(--border);
+      white-space: pre-wrap;
+    }
+    @media (max-width: 720px) {
+      body { padding: 12px; }
+      .logs { max-height: 65vh; }
+      h1 { font-size: 1.2rem; }
+      .guide { font-size: 0.82rem; }
+      .row { gap: 6px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div id="root"></div>
+  </div>
+  <script type="module">
+    import React, { useEffect, useMemo, useRef, useState, useCallback } from "https://esm.sh/react@18.3.1";
+    import { createRoot } from "https://esm.sh/react-dom@18.3.1/client";
+    import htm from "https://esm.sh/htm@3.1.1";
+
+    // Provide React.Fragment explicitly so htm can handle the <> fragment syntax.
+    const html = htm.bind(React.createElement, { Fragment: React.Fragment });
+    const LIMIT = 1000;
+    const INITIAL_DELAY = 1000;
+    const MAX_DELAY = 15000;
+
+    const trimLogs = (list) => (list.length > LIMIT ? list.slice(-LIMIT) : list);
+
+    const Status = ({ state }) => {
+      const label = state === "live" ? "LIVE" : state === "waiting" ? "再接続待機中…" : "接続中...";
+      const dotClass = state === "live" ? "dot ok" : "dot";
+      return html`<div className="status"><span className=${dotClass}></span><span>${label}</span></div>`;
+    };
+
+    const LogItem = ({ log }) => {
+      const level = (log.level || "info").toLowerCase();
+      return html`
+        <li className="log">
+          <div className="row">
+            <span className="ts">${log.ts || ""}</span>
+            <span className=${`level ${level}`}>${level}</span>
+          </div>
+          <div className="message">${log.message || ""}</div>
+          ${log.context ? html`<div className="context">${JSON.stringify(log.context, null, 2)}</div>` : null}
+        </li>
+      `;
+    };
+
+    const App = () => {
+      const [logs, setLogs] = useState([]);
+      const [state, setState] = useState("connecting");
+      const listRef = useRef(null);
+      const socketRef = useRef(null);
+      const timerRef = useRef(null);
+      const delayRef = useRef(INITIAL_DELAY);
+
+      const guide = useMemo(() => {
+        const origin = location.origin;
+        return [
+          'curl -X POST -H "Content-Type: application/json" \\',
+          `-d '{"message":"hello from curl","level":"info","source":"local"}' \\`,
+          `${origin}/logs`
+        ].join("\n");
+      }, []);
+
+      const connect = useCallback(() => {
+        setState("connecting");
+        const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+        const ws = new WebSocket(`${protocol}//${location.host}/ws`);
+        socketRef.current = ws;
+
+        ws.addEventListener("open", () => {
+          setState("live");
+          delayRef.current = INITIAL_DELAY;
+        });
+
+        const scheduleReconnect = () => {
+          setState("waiting");
+          if (timerRef.current) clearTimeout(timerRef.current);
+          timerRef.current = setTimeout(connect, delayRef.current);
+          delayRef.current = Math.min(delayRef.current * 1.8, MAX_DELAY);
+        };
+
+        ws.addEventListener("close", scheduleReconnect);
+        ws.addEventListener("error", scheduleReconnect);
+
+        ws.addEventListener("message", (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === "init" && Array.isArray(data.logs)) {
+              setLogs(trimLogs(data.logs));
+            } else if (data.type === "log" && data.log) {
+              setLogs((prev) => trimLogs([...prev, data.log]));
+            }
+          } catch (err) {
+            console.error("failed to parse", err);
+          }
+        });
+      }, []);
+
+      useEffect(() => {
+        connect();
+        return () => {
+          socketRef.current?.close();
+          if (timerRef.current) clearTimeout(timerRef.current);
+        };
+      }, [connect]);
+
+      useEffect(() => {
+        const list = listRef.current;
+        if (!list) return;
+        list.lastElementChild?.scrollIntoView({ behavior: "smooth", block: "end" });
+      }, [logs]);
+
+      return html`
+        <>
+          <header>
+            <div className="headline">
+              <h1>Log Stream</h1>
+              <${Status} state=${state} />
+            </div>
+            <div className="guide">${guide}</div>
+          </header>
+          <section className="logs">
+            <ul className="log-list" ref=${listRef}>
+              ${logs.map((log) => html`<${LogItem} key=${log.id || log.ts} log=${log} />`)}
+            </ul>
+          </section>
+        </>
+      `;
+    };
+
+    const rootElement = document.getElementById("root");
+    const root = createRoot(rootElement);
+    root.render(html`<${App} />`);
+  </script>
+</body>
+</html>

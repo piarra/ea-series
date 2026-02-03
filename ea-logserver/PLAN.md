@@ -1,0 +1,6 @@
+cloudflare workersで動作
+
+サーバー側はPOSTでログメッセージを受け取り、ログをwebsocketにたれながす
+
+webアプリはwebsocketでログを受け取り最大1000件を画面表示。
+webアプリはスマホ対応

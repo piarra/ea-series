@@ -1,0 +1,20 @@
+name = "ea-logserver"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[assets]
+binding = "ASSETS"
+directory = "./dist"
+
+[durable_objects]
+bindings = [
+  { name = "LOG_HUB", class_name = "LogHub" }
+]
+
+[vars]
+# Maximum log history kept in the Durable Object (mirrors client limit)
+LOG_HISTORY_LIMIT = 1000
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = [ "LogHub" ]
