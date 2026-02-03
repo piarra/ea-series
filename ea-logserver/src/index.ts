@@ -234,7 +234,7 @@ export class LogHub {
         source TEXT
       );
     `);
-    this.sql.exec(`CREATE INDEX IF NOT EXISTS logs_ts_idx ON logs (ts DESC, rowid DESC);`);
+    this.sql.exec(`CREATE INDEX IF NOT EXISTS logs_ts_idx ON logs (ts DESC, id DESC);`);
   }
 
   private loadRecentLogs(): LogEntry[] {
@@ -242,7 +242,7 @@ export class LogHub {
       .exec<LogRow>(
         `SELECT id, ts, level, message, context, source
          FROM logs
-         ORDER BY ts DESC, rowid DESC
+         ORDER BY ts DESC, id DESC
          LIMIT ?`,
         this.limit
       )
@@ -284,9 +284,9 @@ export class LogHub {
 
     this.sql.exec(
       `DELETE FROM logs
-       WHERE rowid NOT IN (
-         SELECT rowid FROM logs
-         ORDER BY ts DESC, rowid DESC
+       WHERE id NOT IN (
+         SELECT id FROM logs
+         ORDER BY ts DESC, id DESC
          LIMIT ?
        );`,
       this.limit

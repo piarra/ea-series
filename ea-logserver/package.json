@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k \"vite build --watch\" \"wrangler dev --local --port 8787 --no-inspect\"",
-    "dev:worker": "wrangler dev --local --port 8787 --no-inspect",
+    "dev": "concurrently -k \"vite build --watch\" \"wrangler dev --local --port 8787\"",
+    "dev:worker": "wrangler dev --local --port 8787",
     "dev:client": "vite dev",
     "build": "vite build",
     "deploy": "npm run build && wrangler deploy",
