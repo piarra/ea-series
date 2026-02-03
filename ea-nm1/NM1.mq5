@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.30"
+#property version   "1.35"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -8,6 +8,11 @@
 // v1.28 moneyManagementモードを追加
 // v1.29 REGIME管理モード
 // v1.30 トレンド対側はエントリーも禁止
+// v1.31 EA管理サーバー接続用パラメータ追加
+// v1.32 ログサーバーホスト追加
+// v1.33 レジーム変更時にログサーバーへPOST
+// v1.34 ログ送信ロジックを共通化
+// v1.35 ログサーバーはhttps固定（ホスト名のみ指定）
 
 #include <Trade/Trade.mqh>
 
@@ -46,6 +51,12 @@ input int OrderPendingTimeoutSeconds = 2;
 input int AdxPeriod = 14;
 input double AdxMaxForNanpin = 20.0;
 input double DiGapMin = 2.0;
+
+input group "MANAGEMENT SERVER"
+input string ManagementServerHost = "";
+input string ManagementServerUser = "demo1";
+input string ManagementServerApiKey = "";
+input string LogServerHost = "ea-logserver.an-hc.workers.dev";
 
 input group "REGIME FILTER"
 input int RegimeOnBars = 3;
@@ -818,6 +829,7 @@ int OnInit()
       symbols[i].initial_started = true;
   }
   InitCumulativeLotTracking();
+  SendLog(BuildInitLogMessage(active));
   return INIT_SUCCEEDED;
 }
 
@@ -1041,6 +1053,96 @@ string RegimeName(const int regime)
   return "NORMAL";
 }
 
+string EscapeJson(const string text)
+{
+  string out = "";
+  int len = StringLen(text);
+  for (int i = 0; i < len; ++i)
+  {
+    ushort ch = StringGetCharacter(text, i);
+    if (ch == '\\')
+      out += "\\\\";
+    else if (ch == '\"')
+      out += "\\\"";
+    else if (ch == '\n')
+      out += "\\n";
+    else if (ch == '\r')
+      out += "\\r";
+    else if (ch == '\t')
+      out += "\\t";
+    else
+      out += StringSubstr(text, i, 1);
+  }
+  return out;
+}
+
+string BuildLogServerUrl()
+{
+  if (StringLen(LogServerHost) == 0)
+    return "";
+  string host = LogServerHost;
+  string lower = StringToLower(host);
+  if (StringFind(lower, "http://") == 0)
+    host = StringSubstr(host, 7);
+  else if (StringFind(lower, "https://") == 0)
+    host = StringSubstr(host, 8);
+
+  // strip leading/trailing slashes
+  while (StringLen(host) > 0 && StringSubstr(host, 0, 1) == "/")
+    host = StringSubstr(host, 1);
+  while (StringLen(host) > 0 && StringSubstr(host, StringLen(host) - 1, 1) == "/")
+    host = StringSubstr(host, 0, StringLen(host) - 1);
+
+  if (StringLen(host) == 0)
+    return "";
+
+  return StringFormat("https://%s/logs", host);
+}
+
+void SendLog(const string message, const string level = "info", const string source = "")
+{
+  string url = BuildLogServerUrl();
+  if (StringLen(url) == 0)
+    return;
+
+  string src = source;
+  if (StringLen(src) == 0)
+    src = (StringLen(ManagementServerUser) > 0 ? ManagementServerUser : "NM1");
+  string payload = StringFormat("{\"message\":\"%s\",\"level\":\"%s\",\"source\":\"%s\"}",
+                                EscapeJson(message), EscapeJson(level), EscapeJson(src));
+
+  char data[];
+  int data_size = StringToCharArray(payload, data, 0, WHOLE_ARRAY, CP_UTF8);
+  if (data_size > 0)
+    data_size--; // exclude null terminator for HTTP body
+  string headers = "Content-Type: application/json\r\n";
+  char result[];
+  string result_headers;
+
+  ResetLastError();
+  int status = WebRequest("POST", url, "", "", 200, data, data_size, result, result_headers);
+  if (status <= 0)
+  {
+    int err = GetLastError();
+    PrintFormat("Log POST failed (%d): %s", err, url);
+  }
+  else if (status >= 400)
+  {
+    PrintFormat("Log POST HTTP %d: %s", status, url);
+  }
+}
+
+string BuildRegimeLogMessage(const SymbolState &state, const int prev_regime)
+{
+  return StringFormat("Regime changed: %s -> %s (%s)",
+                      RegimeName(prev_regime), RegimeName(state.regime), state.broker_symbol);
+}
+
+string BuildInitLogMessage(const int active_symbols)
+{
+  return StringFormat("OnInit succeeded: active_symbols=%d", active_symbols);
+}
+
 void TryInitRegimeFromHistory(SymbolState &state)
 {
   if (state.adx_handle == INVALID_HANDLE)
@@ -1147,10 +1249,48 @@ void UpdateRegime(SymbolState &state, double adx_now, double di_plus_now, double
       state.regime_off_count++;
     else
       state.regime_off_count = 0;
+    // If on_cond persists but DI dominance flips for several bars, allow direct trend reversal.
+    if (on_cond)
+    {
+      if (state.regime == REGIME_TREND_UP && di_minus_now > di_plus_now)
+      {
+        state.regime_down_count++;
+        state.regime_up_count = 0;
+      }
+      else if (state.regime == REGIME_TREND_DOWN && di_plus_now > di_minus_now)
+      {
+        state.regime_up_count++;
+        state.regime_down_count = 0;
+      }
+      else
+      {
+        state.regime_up_count = 0;
+        state.regime_down_count = 0;
+      }
+    }
+    else
+    {
+      state.regime_up_count = 0;
+      state.regime_down_count = 0;
+    }
     if (state.regime_off_count >= off_bars)
     {
       state.regime = REGIME_COOLING;
       state.regime_cooling_left = cooling_bars;
+      state.regime_off_count = 0;
+    }
+    else if (state.regime == REGIME_TREND_UP && state.regime_down_count >= on_bars)
+    {
+      state.regime = REGIME_TREND_DOWN;
+      state.regime_up_count = 0;
+      state.regime_down_count = 0;
+      state.regime_off_count = 0;
+    }
+    else if (state.regime == REGIME_TREND_DOWN && state.regime_up_count >= on_bars)
+    {
+      state.regime = REGIME_TREND_UP;
+      state.regime_up_count = 0;
+      state.regime_down_count = 0;
       state.regime_off_count = 0;
     }
   }
@@ -1197,6 +1337,7 @@ void UpdateRegime(SymbolState &state, double adx_now, double di_plus_now, double
       else if (state.regime == REGIME_TREND_DOWN)
         CloseBasket(state, POSITION_TYPE_BUY);
     }
+    SendLog(BuildRegimeLogMessage(state, prev));
     PrintFormat("Regime changed: %s -> %s (%s)", RegimeName(prev), RegimeName(state.regime), state.broker_symbol);
   }
 }
