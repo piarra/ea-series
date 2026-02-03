@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.35"
+#property version   "1.31"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -9,10 +9,6 @@
 // v1.29 REGIME管理モード
 // v1.30 トレンド対側はエントリーも禁止
 // v1.31 EA管理サーバー接続用パラメータ追加
-// v1.32 ログサーバーホスト追加
-// v1.33 レジーム変更時にログサーバーへPOST
-// v1.34 ログ送信ロジックを共通化
-// v1.35 ログサーバーはhttps固定（ホスト名のみ指定）
 
 #include <Trade/Trade.mqh>
 
