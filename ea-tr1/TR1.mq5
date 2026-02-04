@@ -11,20 +11,21 @@ input int    MagicNumber       = 310001;
 input double BaseLot           = 0.10;
 input int    FastEmaPeriod     = 20;
 input int    SlowEmaPeriod     = 50;
-input int    ConfirmBarsStartup = 3;     // 起動時に確認する過去バー数
+input int    ConfirmBarsStartup = 5;     // 起動時に確認する過去バー数
 input bool   EnterOnInit       = true;   // 起動直後に即エントリーするか
 input double MaxSpreadPoints   = 40;     // スプレッド上限 (ポイント)
 input int    SyntheticBarSec   = 10;     // オンメモリ足の秒数（例:10秒）
 input int    SlippagePoints    = 20;
 input string TradeComment      = "TR1";
-input int    MinTradeIntervalMs = 100;   // 連続OrderSend間の最小インターバル（ミリ秒）
+input int    MinTradeIntervalMs = 300;   // 連続OrderSend間の最小インターバル（ミリ秒）
 input bool   EnableInfoLog     = false;  // 詳細ログ出力を有効化
+input double BreakevenBufferPoints = 30; // 建値SLに上乗せするバッファ（ポイント）
 
 // ボラティリティ連動パラメータ（10秒足ATRベース）
 input int            AtrPeriod      = 20;
-input double         ScalpAtrTpMult = 0.40; // SCALP 利確 = ATR×0.4
-input double         SwingAtrTpMult = 1.20; // SWING 初期TP = ATR×1.2
-input double         SwingTrailMult = 0.80; // SWING トレーリング距離 = ATR×0.8
+input double         ScalpAtrTpMult = 0.32; // SCALP 利確 = ATR×0.32
+input double         SwingAtrTpMult = 1.05; // SWING 初期TP = ATR×1.05
+input double         SwingTrailMult = 1.00; // SWING トレーリング距離 = ATR×1.0
 input double         StopAtrMult    = 1.00; // 共通ストップ = ATR×1.0
 
 enum TrendDirection
@@ -530,6 +531,13 @@ bool SpreadTooWide()
   return (spread_points > MaxSpreadPoints);
 }
 
+double CurrentSpreadPoints()
+{
+  double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+  double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+  return (ask - bid) / _Point;
+}
+
 double CurrentProfitPoints(int posType, double entryPrice)
 {
   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -606,11 +614,16 @@ void ManageOpenPositions()
 
       if (allowTrailUpdate)
       {
+        double bufferPts = MathMax(BreakevenBufferPoints, CurrentSpreadPoints());
+
         if (posType == POSITION_TYPE_BUY)
         {
           // 1) 建値まで引き上げ
           if (profitable)
-            desiredSL = MathMax(desiredSL, entry);
+          {
+            double be = entry + bufferPts * _Point;
+            desiredSL = MathMax(desiredSL, be);
+          }
 
           // 2) ATR×0.8 トレーリング
           if (swingTrailPts > 0)
@@ -625,10 +638,11 @@ void ManageOpenPositions()
           // 1) 建値まで引き下げ
           if (profitable)
           {
+            double be = entry - bufferPts * _Point;
             if (desiredSL == 0.0)
-              desiredSL = entry;
+              desiredSL = be;
             else
-              desiredSL = MathMin(desiredSL, entry);
+              desiredSL = MathMin(desiredSL, be);
           }
 
           // 2) ATR×0.8 トレーリング
