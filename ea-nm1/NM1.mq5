@@ -56,12 +56,12 @@ input string LogServerHost = "ea-logserver.an-hc.workers.dev";
 
 input group "REGIME FILTER"
 input int RegimeOnBars = 3;
-input int RegimeOffBars = 5;
-input int RegimeCoolingBars = 15;
+input int RegimeOffBars = 3;
+input int RegimeCoolingBars = 3;
 input double RegimeAdxOn = 32.5;
 input double RegimeDiGapOn = 6.0;
-input double RegimeAdxOff = 14.0;
-input double RegimeDiGapOff = 3.0;
+input double RegimeAdxOff = 20.0;
+input double RegimeDiGapOff = 2.0;
 input bool CloseOppositeOnTrend = true;
 input double TrendLotMultiplier = 4.0;
 
@@ -229,6 +229,9 @@ struct SymbolState
   int prev_sell_count;
   int atr_handle;
   int adx_handle;
+  int adx_m15_handle;
+  int adx_h1_handle;
+  int adx_h4_handle;
   bool safety_active;
   double realized_buy_profit;
   double realized_sell_profit;
@@ -440,6 +443,9 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.prev_sell_count = 0;
   state.atr_handle = INVALID_HANDLE;
   state.adx_handle = INVALID_HANDLE;
+  state.adx_m15_handle = INVALID_HANDLE;
+  state.adx_h1_handle = INVALID_HANDLE;
+  state.adx_h4_handle = INVALID_HANDLE;
   state.safety_active = false;
   state.realized_buy_profit = 0.0;
   state.realized_sell_profit = 0.0;
@@ -807,6 +813,15 @@ int OnInit()
       PrintFormat("ADX handle failed: %s", symbols[i].broker_symbol);
     else
       TryInitRegimeFromHistory(symbols[i]);
+    symbols[i].adx_m15_handle = iADX(symbols[i].broker_symbol, PERIOD_M15, symbols[i].params.adx_period);
+    if (symbols[i].adx_m15_handle == INVALID_HANDLE)
+      PrintFormat("ADX M15 handle failed: %s", symbols[i].broker_symbol);
+    symbols[i].adx_h1_handle = iADX(symbols[i].broker_symbol, PERIOD_H1, symbols[i].params.adx_period);
+    if (symbols[i].adx_h1_handle == INVALID_HANDLE)
+      PrintFormat("ADX H1 handle failed: %s", symbols[i].broker_symbol);
+    symbols[i].adx_h4_handle = iADX(symbols[i].broker_symbol, PERIOD_H4, symbols[i].params.adx_period);
+    if (symbols[i].adx_h4_handle == INVALID_HANDLE)
+      PrintFormat("ADX H4 handle failed: %s", symbols[i].broker_symbol);
     active++;
   }
   if (active == 0)
@@ -840,6 +855,15 @@ void OnDeinit(const int reason)
     if (symbols[i].adx_handle != INVALID_HANDLE)
       IndicatorRelease(symbols[i].adx_handle);
     symbols[i].adx_handle = INVALID_HANDLE;
+    if (symbols[i].adx_m15_handle != INVALID_HANDLE)
+      IndicatorRelease(symbols[i].adx_m15_handle);
+    symbols[i].adx_m15_handle = INVALID_HANDLE;
+    if (symbols[i].adx_h1_handle != INVALID_HANDLE)
+      IndicatorRelease(symbols[i].adx_h1_handle);
+    symbols[i].adx_h1_handle = INVALID_HANDLE;
+    if (symbols[i].adx_h4_handle != INVALID_HANDLE)
+      IndicatorRelease(symbols[i].adx_h4_handle);
+    symbols[i].adx_h4_handle = INVALID_HANDLE;
   }
 }
 
@@ -899,6 +923,58 @@ bool GetAdxSnapshot(SymbolState &state,
   di_minus_now = minus_buf[0];
   di_minus_prev = minus_buf[1];
   return true;
+}
+
+int GetDiDirection(const int handle)
+{
+  if (handle == INVALID_HANDLE)
+    return 0;
+  double plus_buf[1];
+  double minus_buf[1];
+  const int kStartPos = 1;
+  const int kCount = 1;
+  if (CopyBuffer(handle, 1, kStartPos, kCount, plus_buf) < kCount)
+    return 0;
+  if (CopyBuffer(handle, 2, kStartPos, kCount, minus_buf) < kCount)
+    return 0;
+  if (plus_buf[0] > minus_buf[0])
+    return 1;
+  if (plus_buf[0] < minus_buf[0])
+    return -1;
+  return 0;
+}
+
+double TrendLotMultiplierDynamic(const SymbolState &state, ENUM_ORDER_TYPE order_type)
+{
+  int desired = (order_type == ORDER_TYPE_BUY) ? 1 : -1;
+  int dir_m15 = GetDiDirection(state.adx_m15_handle);
+  int dir_h1 = GetDiDirection(state.adx_h1_handle);
+  int dir_h4 = GetDiDirection(state.adx_h4_handle);
+
+  bool match_m15 = (dir_m15 == desired);
+  bool match_h1 = (dir_h1 == desired);
+  bool match_h4 = (dir_h4 == desired);
+  bool opp_h1 = (dir_h1 == -desired);
+  bool opp_h4 = (dir_h4 == -desired);
+
+  // Fallback when no data
+  if (dir_m15 == 0 && dir_h1 == 0 && dir_h4 == 0)
+    return 1.0;
+
+  if (match_m15 && match_h1 && match_h4)
+    return 4.0;
+  if (match_m15 && match_h1)
+    return 2.0;
+  if (match_m15)
+  {
+    if (opp_h1 || opp_h4)
+      return 0.5;
+    return 1.0;
+  }
+  // M15 not aligned; if higher timeframes oppose, reduce risk.
+  if (opp_h1 || opp_h4)
+    return 0.5;
+  return 1.0;
 }
 
 void CollectBasketInfo(const SymbolState &state, BasketInfo &buy, BasketInfo &sell)
@@ -1398,14 +1474,15 @@ bool TryOpen(const SymbolState &state,
              const string comment = "",
              int level = 0)
 {
-  double multiplier = state.params.trend_lot_multiplier;
-  if (multiplier > 1.0 && level == 1)
+  double multiplier = 1.0;
+  if (level == 1)
   {
-    if (order_type == ORDER_TYPE_BUY && state.regime == REGIME_TREND_UP)
-      lot *= multiplier;
-    else if (order_type == ORDER_TYPE_SELL && state.regime == REGIME_TREND_DOWN)
-      lot *= multiplier;
+    bool trend_side = (order_type == ORDER_TYPE_BUY && state.regime == REGIME_TREND_UP) ||
+                      (order_type == ORDER_TYPE_SELL && state.regime == REGIME_TREND_DOWN);
+    if (trend_side)
+      multiplier = TrendLotMultiplierDynamic(state, order_type);
   }
+  lot *= multiplier;
   lot = NormalizeLotCached(state, lot);
   if (lot <= 0.0)
     return false;
