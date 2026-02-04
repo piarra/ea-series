@@ -17,7 +17,7 @@ input double MaxSpreadPoints   = 40;     // スプレッド上限 (ポイント)
 input int    SyntheticBarSec   = 10;     // オンメモリ足の秒数（例:10秒）
 input int    SlippagePoints    = 20;
 input string TradeComment      = "TR1";
-input int    MinTradeIntervalMs = 200;   // 連続OrderSend間の最小インターバル（ミリ秒）
+input int    MinTradeIntervalMs = 100;   // 連続OrderSend間の最小インターバル（ミリ秒）
 input bool   EnableInfoLog     = false;  // 詳細ログ出力を有効化
 
 // ボラティリティ連動パラメータ（10秒足ATRベース）
