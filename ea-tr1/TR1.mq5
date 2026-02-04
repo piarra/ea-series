@@ -3,20 +3,27 @@
 #property version   "1.00"
 #property strict
 
+// this is for hedge account only
+
 #include <Trade/Trade.mqh>
 
 input int    MagicNumber       = 310001;
 input double BaseLot           = 0.10;
-input double BaseProfitPips    = 10.0;   // 利確幅 (pips)
 input int    FastEmaPeriod     = 20;
 input int    SlowEmaPeriod     = 50;
 input int    ConfirmBarsStartup = 3;     // 起動時に確認する過去バー数
 input bool   EnterOnInit       = true;   // 起動直後に即エントリーするか
 input double MaxSpreadPoints   = 40;     // スプレッド上限 (ポイント)
-input double LossCutPips       = 20.0;   // 強制損切り・反転の閾値 (pips)
 input int    SyntheticBarSec   = 10;     // オンメモリ足の秒数（例:10秒）
 input int    SlippagePoints    = 20;
 input string TradeComment      = "TR1";
+
+// ボラティリティ連動パラメータ（10秒足ATRベース）
+input int            AtrPeriod      = 20;
+input double         ScalpAtrTpMult = 0.40; // SCALP 利確 = ATR×0.4
+input double         SwingAtrTpMult = 1.20; // SWING 初期TP = ATR×1.2
+input double         SwingTrailMult = 0.80; // SWING トレーリング距離 = ATR×0.8
+input double         StopAtrMult    = 1.00; // 共通ストップ = ATR×1.0
 
 enum TrendDirection
 {
@@ -28,6 +35,8 @@ enum TrendDirection
 CTrade trade;
 
 datetime g_last_close_time = 0;
+double   g_tr_atr = 0.0;        // 10秒合成足ベースのATR（価格単位）
+double   g_prev_close = 0.0;    // 直近合成足の終値
 
 // 30秒バー生成用
 datetime g_curr_slot_start = 0;
@@ -58,14 +67,32 @@ int VolumeDigits()
   return digits;
 }
 
-double ProfitThresholdPoints()
+// ATR をポイント換算で返す（前回値をキャッシュしてゼロ回避）
+double AtrPoints()
 {
-  return BaseProfitPips * PipSizeInPoints();
+  if (g_tr_atr <= 0.0)
+    return 0.0;
+  return g_tr_atr / _Point;
 }
 
-double LossCutThresholdPoints()
+double ScalpTakeProfitPoints()
 {
-  return LossCutPips * PipSizeInPoints();
+  return AtrPoints() * ScalpAtrTpMult;
+}
+
+double SwingTakeProfitPoints()
+{
+  return AtrPoints() * SwingAtrTpMult;
+}
+
+double SwingTrailPoints()
+{
+  return AtrPoints() * SwingTrailMult;
+}
+
+double StopLossPoints()
+{
+  return AtrPoints() * StopAtrMult;
 }
 
 // ポジションをインデックスで選択（PositionSelectByIndex が使えない環境向けフォールバック）
@@ -110,10 +137,35 @@ void UpdateEmaOnClose(double closePrice)
         " dir=", dir);
 }
 
+// 10秒合成足を用いたATR（Period=AtrPeriod）を更新
+void UpdateSyntheticATR()
+{
+  double tr;
+
+  if (g_bar_count <= 1)
+  {
+    g_tr_atr = (g_bar_high - g_bar_low);
+  }
+  else
+  {
+    double hl = g_bar_high - g_bar_low;
+    double hc = MathAbs(g_bar_high - g_prev_close);
+    double lc = MathAbs(g_bar_low  - g_prev_close);
+
+    tr = MathMax(hl, MathMax(hc, lc));
+
+    double k = 2.0 / (AtrPeriod + 1.0);
+    g_tr_atr = k * tr + (1.0 - k) * g_tr_atr;
+  }
+
+  g_prev_close = g_bar_close;
+}
+
 void FinalizeSyntheticBar()
 {
   g_bar_count++;
   UpdateEmaOnClose(g_bar_close);
+  UpdateSyntheticATR();
 }
 
 void StartNewSyntheticBar(datetime slot, double price)
@@ -368,30 +420,14 @@ void ManageOpenPositions()
     return;
 
   double stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+  double stopLossPts = StopLossPoints();
+  double scalpTpPts  = ScalpTakeProfitPoints();
+  double swingTpPts  = SwingTakeProfitPoints();
+  double swingTrailPts = SwingTrailPoints();
+  double trailUpdateGap = 20.0 * PipSizeInPoints() * _Point; // 20 pips
+  static double lastTrailRefBuy = 0.0;
+  static double lastTrailRefSell = 0.0;
 
-  // 1st pass: SWINGで最も利益が高いポジションを特定（TPを外す対象）
-  double bestSwingProfit = -DBL_MAX;
-  long   bestSwingTicket = -1;
-  for (int i = total - 1; i >= 0; --i)
-  {
-    if (!SelectPositionByIndex(i))
-      continue;
-    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
-      continue;
-    if (PositionGetString(POSITION_SYMBOL) != _Symbol)
-      continue;
-    if (PositionGetString(POSITION_COMMENT) != "SWING")
-      continue;
-
-    double profit = PositionGetDouble(POSITION_PROFIT);
-    if (profit > bestSwingProfit)
-    {
-      bestSwingProfit = profit;
-      bestSwingTicket = PositionGetInteger(POSITION_TICKET);
-    }
-  }
-
-  // 2nd pass: 管理処理
   for (int i = total - 1; i >= 0; --i)
   {
     if (!SelectPositionByIndex(i))
@@ -408,7 +444,7 @@ void ManageOpenPositions()
     double profitPt = CurrentProfitPoints(posType, entry);
 
     // ロスカット（共通）
-    if (profitPt <= -LossCutThresholdPoints())
+    if (stopLossPts > 0 && profitPt <= -stopLossPts)
     {
       ClosePositionByTicket(ticket);
       continue;
@@ -416,7 +452,7 @@ void ManageOpenPositions()
 
     if (tag == "SCALP")
     {
-      if (profitPt >= ProfitThresholdPoints())
+      if (scalpTpPts > 0 && profitPt >= scalpTpPts)
       {
         ClosePositionByTicket(ticket);
       }
@@ -428,33 +464,99 @@ void ManageOpenPositions()
       double curSL = PositionGetDouble(POSITION_SL);
       double curTP = PositionGetDouble(POSITION_TP);
 
-      // TP: 最も利益が高いSWINGだけTPなし、それ以外は base_profit*2
-      double desiredTP = 0.0;
-      if (ticket != bestSwingTicket)
-      {
-        if (posType == POSITION_TYPE_BUY)
-          desiredTP = entry + 2.0 * ProfitThresholdPoints() * _Point;
-        else
-          desiredTP = entry - 2.0 * ProfitThresholdPoints() * _Point;
-      }
-
-      if ((curTP == 0.0 && desiredTP != 0.0) || (curTP != 0.0 && MathAbs(curTP - desiredTP) > _Point / 2.0))
-      {
-        ModifyPositionByTicket(ticket, curSL, desiredTP);
-        curTP = desiredTP; // 更新後の値を反映しておく
-      }
-
-      // 建値SL（最小ストップレベルを満たしたときのみ設定）
-      double desiredSL = entry;
+      // 建値＋トレーリングSL（最小ストップレベルを満たしたときのみ設定）
+      double desiredSL = curSL;
       double refPrice  = (posType == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
                                                         : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double gap = (posType == POSITION_TYPE_BUY) ? (refPrice - desiredSL) : (desiredSL - refPrice);
+      bool   profitable = (posType == POSITION_TYPE_BUY)
+                            ? (refPrice - entry >= stopLevel)
+                            : (entry - refPrice >= stopLevel);
+      bool   trailUpdated = false;
 
-      if (gap >= stopLevel)
+      double lastRef = (posType == POSITION_TYPE_BUY) ? lastTrailRefBuy : lastTrailRefSell;
+      bool allowTrailUpdate = (lastRef == 0.0) || (MathAbs(refPrice - lastRef) >= trailUpdateGap);
+
+      if (allowTrailUpdate)
       {
-        if (curSL == 0.0 || MathAbs(curSL - desiredSL) > _Point / 2.0)
-          ModifyPositionByTicket(ticket, desiredSL, 0.0);
+        if (posType == POSITION_TYPE_BUY)
+        {
+          // 1) 建値まで引き上げ
+          if (profitable)
+            desiredSL = MathMax(desiredSL, entry);
+
+          // 2) ATR×0.8 トレーリング
+          if (swingTrailPts > 0)
+          {
+            double trail = refPrice - swingTrailPts * _Point;
+            if (refPrice - trail >= stopLevel)
+              desiredSL = MathMax(desiredSL, trail);
+          }
+
+          if (desiredSL > curSL + _Point / 2.0)
+          {
+            ModifyPositionByTicket(ticket, desiredSL, curTP);
+            trailUpdated = true;
+          }
+        }
+        else // SELL
+        {
+          // 1) 建値まで引き下げ
+          if (profitable)
+          {
+            if (desiredSL == 0.0)
+              desiredSL = entry;
+            else
+              desiredSL = MathMin(desiredSL, entry);
+          }
+
+          // 2) ATR×0.8 トレーリング
+          if (swingTrailPts > 0)
+          {
+            double trail = refPrice + swingTrailPts * _Point;
+            if (trail - refPrice >= stopLevel)
+              desiredSL = MathMin(desiredSL, trail);
+          }
+
+          if (desiredSL < curSL - _Point / 2.0)
+          {
+            ModifyPositionByTicket(ticket, desiredSL, curTP);
+            trailUpdated = true;
+          }
+        }
       }
+
+      // TP: 初期は ATR×1.2、建値到達後かつトレーリング有効なら TP を外す
+      double desiredTP = curTP;
+      if (allowTrailUpdate)
+      {
+        if (profitable && swingTrailPts > 0)
+        {
+          desiredTP = 0.0; // トレーリングに任せる
+        }
+        else if (swingTpPts > 0)
+        {
+          if (posType == POSITION_TYPE_BUY)
+            desiredTP = entry + swingTpPts * _Point;
+          else
+            desiredTP = entry - swingTpPts * _Point;
+        }
+
+        if ((curTP == 0.0 && desiredTP != 0.0) || (curTP != 0.0 && MathAbs(curTP - desiredTP) > _Point / 2.0))
+        {
+          ModifyPositionByTicket(ticket, desiredSL, desiredTP);
+          curTP = desiredTP; // 更新後の値を反映しておく
+          trailUpdated = true;
+        }
+      }
+
+      if (trailUpdated)
+      {
+        if (posType == POSITION_TYPE_BUY)
+          lastTrailRefBuy = refPrice;
+        else
+          lastTrailRefSell = refPrice;
+      }
+
       continue;
     }
   }
@@ -470,6 +572,9 @@ void StartPairIfScalpMissing()
     return; // まだSCALPが残っている
 
   if (SpreadTooWide())
+    return;
+
+  if (AtrPoints() <= 0.0)
     return;
 
   if (g_bar_count == 0)
@@ -499,6 +604,12 @@ void TryStartupEntry()
     double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
     double spread_points = (ask - bid) / _Point;
     Print(__FUNCTION__, ": skip - spread too wide (points)=", DoubleToString(spread_points, 1), " limit=", MaxSpreadPoints);
+    return;
+  }
+
+  if (AtrPoints() <= 0.0)
+  {
+    Print(__FUNCTION__, ": skip - ATR not ready");
     return;
   }
 
@@ -547,6 +658,12 @@ void TryEnterIfFlat()
     return;
   }
 
+  if (AtrPoints() <= 0.0)
+  {
+    Print(__FUNCTION__, ": skip - ATR not ready");
+    return;
+  }
+
   TrendDirection dir = DetectTrend();
   Print(__FUNCTION__, ": enter dir=", dir);
   if (OpenPosition(dir))
@@ -561,6 +678,8 @@ int OnInit()
   ArrayResize(g_trend_history, 0);
   g_startup_done = false;
   g_last_close_time = 0;
+  g_tr_atr = 0.0;
+  g_prev_close = 0.0;
 
   trade.SetExpertMagicNumber(MagicNumber);
   return(INIT_SUCCEEDED);
