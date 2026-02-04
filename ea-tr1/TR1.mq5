@@ -68,6 +68,19 @@ double LossCutThresholdPoints()
   return LossCutPips * PipSizeInPoints();
 }
 
+// ポジションをインデックスで選択（PositionSelectByIndex が使えない環境向けフォールバック）
+bool SelectPositionByIndex(int index)
+{
+#ifdef __MQL5__
+  ulong ticket = PositionGetTicket(index);
+  if (ticket == 0)
+    return false;
+  return PositionSelectByTicket(ticket);
+#else
+  return false;
+#endif
+}
+
 // オンメモリの短期足（SyntheticBarSec秒）を構築し、EMAを手計算する
 void UpdateEmaOnClose(double closePrice)
 {
@@ -187,23 +200,6 @@ TrendDirection DetectTrend()
   return dir;
 }
 
-bool HasOurPosition(int &type, double &price)
-{
-  type = -1;
-  price = 0.0;
-
-  if (!PositionSelect(_Symbol))
-    return false;
-
-  long magic = PositionGetInteger(POSITION_MAGIC);
-  if (magic != MagicNumber)
-    return false;
-
-  type = (int)PositionGetInteger(POSITION_TYPE); // POSITION_TYPE_BUY / POSITION_TYPE_SELL
-  price = PositionGetDouble(POSITION_PRICE_OPEN);
-  return true;
-}
-
 bool OpenPosition(TrendDirection dir)
 {
   ENUM_ORDER_TYPE orderType = (dir == TREND_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
@@ -211,32 +207,139 @@ bool OpenPosition(TrendDirection dir)
   trade.SetExpertMagicNumber(MagicNumber);
   trade.SetDeviationInPoints(SlippagePoints);
 
-  bool ok = trade.PositionOpen(_Symbol, orderType, lot, 0, 0, 0, TradeComment);
-  if (ok)
+  // 2本同時に建てる: SWING / SCALP
+  bool swingOk = trade.PositionOpen(_Symbol, orderType, lot, 0, 0, 0, "SWING");
+  bool scalpOk = trade.PositionOpen(_Symbol, orderType, lot, 0, 0, 0, "SCALP");
+
+  if (!swingOk || !scalpOk)
   {
+    PrintFormat("Open pair failed: swing=%d scalp=%d err=%d", swingOk, scalpOk, GetLastError());
+
+    // どちらか片方だけ成功した場合はクローズして整合性を保つ
+    if (swingOk && !scalpOk)
+    {
+      ulong swingTicket;
+      if (FindTicketByComment("SWING", swingTicket))
+        ClosePositionByTicket((long)swingTicket);
+    }
+    if (!swingOk && scalpOk)
+    {
+      ulong scalpTicket;
+      if (FindTicketByComment("SCALP", scalpTicket))
+        ClosePositionByTicket((long)scalpTicket);
+    }
+    return false;
   }
-  else
-  {
-    PrintFormat("Open failed: %d", GetLastError());
-  }
-  return ok;
+
+  return true;
 }
 
-bool ClosePosition()
+bool ClosePositionByTicket(long ticket)
 {
   trade.SetExpertMagicNumber(MagicNumber);
   trade.SetDeviationInPoints(SlippagePoints);
 
-  bool ok = trade.PositionClose(_Symbol);
+  bool ok = trade.PositionClose((ulong)ticket);
   if (!ok)
   {
-    PrintFormat("Close failed: %d", GetLastError());
+    PrintFormat("Close failed ticket %I64d: %d", ticket, GetLastError());
   }
   else
   {
     g_last_close_time = TimeCurrent();
   }
   return ok;
+}
+
+// 指定チケットのSL/TPを変更する（ヘッジ口座でも確実に対象を特定する）
+bool ModifyPositionByTicket(long ticket, double sl, double tp)
+{
+  if (!PositionSelectByTicket((ulong)ticket))
+  {
+    PrintFormat("%s: select ticket %I64d failed", __FUNCTION__, ticket);
+    return false;
+  }
+
+  MqlTradeRequest  req;
+  MqlTradeResult   res;
+  ZeroMemory(req);
+  ZeroMemory(res);
+
+  req.action   = TRADE_ACTION_SLTP;
+  req.position = (ulong)ticket;
+  req.symbol   = PositionGetString(POSITION_SYMBOL);
+  req.sl       = sl;
+  req.tp       = tp;
+  req.deviation = SlippagePoints;
+  req.magic     = MagicNumber;
+
+  bool ok = OrderSend(req, res);
+  if (!ok || (res.retcode != TRADE_RETCODE_DONE && res.retcode != TRADE_RETCODE_DONE_PARTIAL))
+  {
+    PrintFormat("%s: ticket %I64d sltp failed ret=%d err=%d", __FUNCTION__, ticket, res.retcode, GetLastError());
+    return false;
+  }
+
+  return true;
+}
+
+// 指定コメントのポジションを探す（シンボル・マジック一致）。見つかればticketに設定しtrue。
+bool FindTicketByComment(const string tag, ulong &ticket)
+{
+  ticket = 0;
+  int total = PositionsTotal();
+  for (int i = 0; i < total; i++)
+  {
+    if (!SelectPositionByIndex(i))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+      continue;
+    if (PositionGetString(POSITION_COMMENT) != tag)
+      continue;
+
+    ticket = PositionGetInteger(POSITION_TICKET);
+    return true;
+  }
+  return false;
+}
+
+// 当該シンボル＆マジックのポジションを1つでも持っているか
+bool HasOurPosition()
+{
+  int total = PositionsTotal();
+  for (int i = 0; i < total; i++)
+  {
+    if (!SelectPositionByIndex(i))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+      continue;
+    return true;
+  }
+  return false;
+}
+
+// 指定コメントタグの本数をカウント（シンボル・マジック一致）
+int CountPositionsByTag(const string tag)
+{
+  int total = PositionsTotal();
+  int count = 0;
+  for (int i = 0; i < total; i++)
+  {
+    if (!SelectPositionByIndex(i))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+      continue;
+    if (PositionGetString(POSITION_COMMENT) != tag)
+      continue;
+    count++;
+  }
+  return count;
 }
 
 bool SpreadTooWide()
@@ -257,54 +360,123 @@ double CurrentProfitPoints(int posType, double entryPrice)
     return (entryPrice - ask) / _Point;
 }
 
-bool TryManagePosition()
+// 2本構成（SWING/SCALP）のポジション管理
+void ManageOpenPositions()
 {
+  int total = PositionsTotal();
+  if (total == 0)
+    return;
+
+  double stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+
+  // 1st pass: SWINGで最も利益が高いポジションを特定（TPを外す対象）
+  double bestSwingProfit = -DBL_MAX;
+  long   bestSwingTicket = -1;
+  for (int i = total - 1; i >= 0; --i)
+  {
+    if (!SelectPositionByIndex(i))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+      continue;
+    if (PositionGetString(POSITION_COMMENT) != "SWING")
+      continue;
+
+    double profit = PositionGetDouble(POSITION_PROFIT);
+    if (profit > bestSwingProfit)
+    {
+      bestSwingProfit = profit;
+      bestSwingTicket = PositionGetInteger(POSITION_TICKET);
+    }
+  }
+
+  // 2nd pass: 管理処理
+  for (int i = total - 1; i >= 0; --i)
+  {
+    if (!SelectPositionByIndex(i))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+      continue;
+
+    long   ticket   = PositionGetInteger(POSITION_TICKET);
+    string tag      = PositionGetString(POSITION_COMMENT);
+    int    posType  = (int)PositionGetInteger(POSITION_TYPE);
+    double entry    = PositionGetDouble(POSITION_PRICE_OPEN);
+    double profitPt = CurrentProfitPoints(posType, entry);
+
+    // ロスカット（共通）
+    if (profitPt <= -LossCutThresholdPoints())
+    {
+      ClosePositionByTicket(ticket);
+      continue;
+    }
+
+    if (tag == "SCALP")
+    {
+      if (profitPt >= ProfitThresholdPoints())
+      {
+        ClosePositionByTicket(ticket);
+      }
+      continue;
+    }
+
+    if (tag == "SWING")
+    {
+      double curSL = PositionGetDouble(POSITION_SL);
+      double curTP = PositionGetDouble(POSITION_TP);
+
+      // TP: 最も利益が高いSWINGだけTPなし、それ以外は base_profit*2
+      double desiredTP = 0.0;
+      if (ticket != bestSwingTicket)
+      {
+        if (posType == POSITION_TYPE_BUY)
+          desiredTP = entry + 2.0 * ProfitThresholdPoints() * _Point;
+        else
+          desiredTP = entry - 2.0 * ProfitThresholdPoints() * _Point;
+      }
+
+      if ((curTP == 0.0 && desiredTP != 0.0) || (curTP != 0.0 && MathAbs(curTP - desiredTP) > _Point / 2.0))
+      {
+        ModifyPositionByTicket(ticket, curSL, desiredTP);
+        curTP = desiredTP; // 更新後の値を反映しておく
+      }
+
+      // 建値SL（最小ストップレベルを満たしたときのみ設定）
+      double desiredSL = entry;
+      double refPrice  = (posType == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                                                        : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double gap = (posType == POSITION_TYPE_BUY) ? (refPrice - desiredSL) : (desiredSL - refPrice);
+
+      if (gap >= stopLevel)
+      {
+        if (curSL == 0.0 || MathAbs(curSL - desiredSL) > _Point / 2.0)
+          ModifyPositionByTicket(ticket, desiredSL, 0.0);
+      }
+      continue;
+    }
+  }
+}
+
+// SCALPがゼロになったら新しいSWING/SCALPペアを同方向で建てる
+void StartPairIfScalpMissing()
+{
+  if (CountPositionsByTag("SWING") == 0)
+    return; // SWINGすら無ければ初期ロジックに任せる
+
+  if (CountPositionsByTag("SCALP") > 0)
+    return; // まだSCALPが残っている
+
+  if (SpreadTooWide())
+    return;
+
   if (g_bar_count == 0)
-  {
-    Print(__FUNCTION__, ": skip - no synthetic bars yet");
-    return false;
-  }
+    return; // トレンド判定不可
 
-  int posType;
-  double entryPrice;
-  if (!HasOurPosition(posType, entryPrice))
-  {
-    Print(__FUNCTION__, ": skip - no position");
-    return false;
-  }
-
-  // 利確判定
-  double profit_points = CurrentProfitPoints(posType, entryPrice);
-  if (profit_points >= ProfitThresholdPoints())
-  {
-    ClosePosition();
-    Print(__FUNCTION__, ": take profit points=", profit_points);
-    return true;
-  }
-
-  // 強制損切り＆即反転
-  if (profit_points <= -LossCutThresholdPoints())
-  {
-    ClosePosition();
-    TrendDirection newDir = DetectTrend();
-    Print(__FUNCTION__, ": losscut and reverse profit=", profit_points, " newDir=", newDir);
-    OpenPosition(newDir);
-    return true;
-  }
-
-  // トレンド反転で即損切り
-  TrendDirection nowTrend = DetectTrend();
-  int entryDir = (posType == POSITION_TYPE_BUY) ? TREND_BUY : TREND_SELL;
-  if (nowTrend != entryDir)
-  {
-    ClosePosition();
-    Print(__FUNCTION__, ": trend reversed, entryDir=", entryDir, " nowTrend=", nowTrend, " -> reverse");
-    OpenPosition(nowTrend);
-    return true;
-  }
-
-  Print(__FUNCTION__, ": hold - profit_points=", profit_points, " dir=", entryDir, " trend=", nowTrend);
-  return false;
+  TrendDirection dir = DetectTrend();
+  OpenPosition(dir);
 }
 
 void TryStartupEntry()
@@ -315,11 +487,9 @@ void TryStartupEntry()
     return;
   }
 
-  int dummyType;
-  double dummyPrice;
-  if (HasOurPosition(dummyType, dummyPrice))
+  if (HasOurPosition())
   {
-    Print(__FUNCTION__, ": skip - already have position type=", dummyType, " price=", dummyPrice);
+    Print(__FUNCTION__, ": skip - already have positions");
     return;
   }
 
@@ -342,7 +512,9 @@ void TryStartupEntry()
   TrendDirection dir = DetectTrendConfirmed(ConfirmBarsStartup);
   Print(__FUNCTION__, ": startup enter dir=", dir);
   if (OpenPosition(dir))
+  {
     g_startup_done = true;
+  }
 }
 
 void TryEnterIfFlat()
@@ -360,11 +532,9 @@ void TryEnterIfFlat()
     return;
   }
 
-  int dummyType;
-  double dummyPrice;
-  if (HasOurPosition(dummyType, dummyPrice))
+  if (HasOurPosition())
   {
-    Print(__FUNCTION__, ": skip - already have position type=", dummyType, " price=", dummyPrice);
+    Print(__FUNCTION__, ": skip - already have positions");
     return;
   }
 
@@ -379,7 +549,8 @@ void TryEnterIfFlat()
 
   TrendDirection dir = DetectTrend();
   Print(__FUNCTION__, ": enter dir=", dir);
-  OpenPosition(dir);
+  if (OpenPosition(dir))
+    g_last_close_time = 0; // 明示的にクールダウン解除
 }
 
 int OnInit()
@@ -389,6 +560,7 @@ int OnInit()
   g_fast_ema = g_slow_ema = 0;
   ArrayResize(g_trend_history, 0);
   g_startup_done = false;
+  g_last_close_time = 0;
 
   trade.SetExpertMagicNumber(MagicNumber);
   return(INIT_SUCCEEDED);
@@ -408,6 +580,7 @@ void OnTick()
     TryStartupEntry();
   }
 
-  TryManagePosition();
+  ManageOpenPositions();
+  StartPairIfScalpMissing();
   TryEnterIfFlat();
 }
