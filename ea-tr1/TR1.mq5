@@ -17,6 +17,8 @@ input double MaxSpreadPoints   = 40;     // スプレッド上限 (ポイント)
 input int    SyntheticBarSec   = 10;     // オンメモリ足の秒数（例:10秒）
 input int    SlippagePoints    = 20;
 input string TradeComment      = "TR1";
+input int    MinTradeIntervalMs = 200;   // 連続OrderSend間の最小インターバル（ミリ秒）
+input bool   EnableInfoLog     = false;  // 詳細ログ出力を有効化
 
 // ボラティリティ連動パラメータ（10秒足ATRベース）
 input int            AtrPeriod      = 20;
@@ -37,6 +39,7 @@ CTrade trade;
 datetime g_last_close_time = 0;
 double   g_tr_atr = 0.0;        // 10秒合成足ベースのATR（価格単位）
 double   g_prev_close = 0.0;    // 直近合成足の終値
+ulong    g_last_trade_us = 0;   // 直近の注文リクエスト時刻 (マイクロ秒)
 
 // 30秒バー生成用
 datetime g_curr_slot_start = 0;
@@ -65,6 +68,27 @@ int VolumeDigits()
   if (digits < 0) digits = 0;
   if (digits > 8) digits = 8;
   return digits;
+}
+
+// OrderSendスパム防止: 直近送信から MinTradeIntervalMs 経過したら許可
+bool TradeRequestAllowed()
+{
+  ulong now = GetMicrosecondCount();
+  ulong gap_us = (ulong)MinTradeIntervalMs * 1000;
+
+  if (g_last_trade_us == 0)
+    return true;
+
+  if (now >= g_last_trade_us)
+    return (now - g_last_trade_us) >= gap_us;
+
+  // wrap-around時は保守的に許可
+  return true;
+}
+
+void MarkTradeRequest()
+{
+  g_last_trade_us = GetMicrosecondCount();
 }
 
 // ATR をポイント換算で返す（前回値をキャッシュしてゼロ回避）
@@ -131,10 +155,13 @@ void UpdateEmaOnClose(double closePrice)
   ArrayResize(g_trend_history, sz + 1);
   g_trend_history[sz] = dir;
 
-  Print(__FUNCTION__, ": bar#", g_bar_count, " close=", DoubleToString(closePrice, _Digits),
-        " fastEma=", DoubleToString(g_fast_ema, _Digits),
-        " slowEma=", DoubleToString(g_slow_ema, _Digits),
-        " dir=", dir);
+  if (EnableInfoLog)
+  {
+    Print(__FUNCTION__, ": bar#", g_bar_count, " close=", DoubleToString(closePrice, _Digits),
+          " fastEma=", DoubleToString(g_fast_ema, _Digits),
+          " slowEma=", DoubleToString(g_slow_ema, _Digits),
+          " dir=", dir);
+  }
 }
 
 // 10秒合成足を用いたATR（Period=AtrPeriod）を更新
@@ -224,17 +251,20 @@ TrendDirection DetectTrendConfirmed(int bars)
 
   if (buy_count > sell_count)
   {
-    Print(__FUNCTION__, ": confirmed BUY on ", bars, " bars (buy=", buy_count, ", sell=", sell_count, ")");
+    if (EnableInfoLog)
+      Print(__FUNCTION__, ": confirmed BUY on ", bars, " bars (buy=", buy_count, ", sell=", sell_count, ")");
     return TREND_BUY;
   }
   if (sell_count > buy_count)
   {
-    Print(__FUNCTION__, ": confirmed SELL on ", bars, " bars (buy=", buy_count, ", sell=", sell_count, ")");
+    if (EnableInfoLog)
+      Print(__FUNCTION__, ": confirmed SELL on ", bars, " bars (buy=", buy_count, ", sell=", sell_count, ")");
     return TREND_SELL;
   }
 
   TrendDirection tie = DetectTrend();
-  Print(__FUNCTION__, ": tie -> fallback to last bar trend=", tie, " (buy=", buy_count, ", sell=", sell_count, ")");
+  if (EnableInfoLog)
+    Print(__FUNCTION__, ": tie -> fallback to last bar trend=", tie, " (buy=", buy_count, ", sell=", sell_count, ")");
   return tie;
 }
 
@@ -243,17 +273,22 @@ TrendDirection DetectTrend()
   int sz = ArraySize(g_trend_history);
   if (sz == 0)
   {
-    Print(__FUNCTION__, ": no history, default BUY");
+    if (EnableInfoLog)
+      Print(__FUNCTION__, ": no history, default BUY");
     return TREND_BUY;
   }
 
   TrendDirection dir = (TrendDirection)g_trend_history[sz - 1];
-  Print(__FUNCTION__, ": last dir=", dir, " bar#", g_bar_count);
+  if (EnableInfoLog)
+    Print(__FUNCTION__, ": last dir=", dir, " bar#", g_bar_count);
   return dir;
 }
 
 bool OpenPosition(TrendDirection dir)
 {
+  if (!TradeRequestAllowed())
+    return false;
+
   ENUM_ORDER_TYPE orderType = (dir == TREND_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
   double lot = NormalizeDouble(BaseLot, VolumeDigits());
   trade.SetExpertMagicNumber(MagicNumber);
@@ -261,7 +296,9 @@ bool OpenPosition(TrendDirection dir)
 
   // 2本同時に建てる: SWING / SCALP
   bool swingOk = trade.PositionOpen(_Symbol, orderType, lot, 0, 0, 0, "SWING");
+  if (swingOk) MarkTradeRequest();
   bool scalpOk = trade.PositionOpen(_Symbol, orderType, lot, 0, 0, 0, "SCALP");
+  if (scalpOk) MarkTradeRequest();
 
   if (!swingOk || !scalpOk)
   {
@@ -288,6 +325,9 @@ bool OpenPosition(TrendDirection dir)
 
 bool ClosePositionByTicket(long ticket)
 {
+  if (!TradeRequestAllowed())
+    return false;
+
   trade.SetExpertMagicNumber(MagicNumber);
   trade.SetDeviationInPoints(SlippagePoints);
 
@@ -298,6 +338,7 @@ bool ClosePositionByTicket(long ticket)
   }
   else
   {
+    MarkTradeRequest();
     g_last_close_time = TimeCurrent();
   }
   return ok;
@@ -306,10 +347,96 @@ bool ClosePositionByTicket(long ticket)
 // 指定チケットのSL/TPを変更する（ヘッジ口座でも確実に対象を特定する）
 bool ModifyPositionByTicket(long ticket, double sl, double tp)
 {
+  if (!TradeRequestAllowed())
+    return false;
+
   if (!PositionSelectByTicket((ulong)ticket))
   {
     PrintFormat("%s: select ticket %I64d failed", __FUNCTION__, ticket);
     return false;
+  }
+
+  // 現在値・ストップレベル・フリーズレベルに基づいて事前チェック
+  int    posType     = (int)PositionGetInteger(POSITION_TYPE);
+  double curSL       = PositionGetDouble(POSITION_SL);
+  double curTP       = PositionGetDouble(POSITION_TP);
+  double ask         = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+  double bid         = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+  double stopLevel   = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL)  * _Point;
+  double freezeLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL) * _Point;
+  double safetyGap   = 2.0 * _Point; // cushion for price ticks while request is in flight
+  double minGap      = MathMax(stopLevel, freezeLevel) + safetyGap;
+  double eps         = _Point / 4.0;
+
+  // sl/tp semantics:
+  //  <0 : not provided (keep current)
+  //   0 : clear
+  //  >0 : set to price
+  bool slProvided = (sl >= 0.0);
+  bool tpProvided = (tp >= 0.0);
+
+  double reqSL = curSL;
+  double reqTP = curTP;
+
+  if (slProvided)
+    reqSL = (sl > 0.0) ? NormalizeDouble(sl, _Digits) : 0.0;
+  if (tpProvided)
+    reqTP = (tp > 0.0) ? NormalizeDouble(tp, _Digits) : 0.0;
+
+  bool slNoChange = true;
+  if (slProvided)
+  {
+    if (reqSL == 0.0)
+      slNoChange = (curSL <= eps);
+    else
+      slNoChange = (MathAbs(reqSL - curSL) < eps);
+  }
+
+  bool tpNoChange = true;
+  if (tpProvided)
+  {
+    if (reqTP == 0.0)
+      tpNoChange = (curTP <= eps);
+    else
+      tpNoChange = (MathAbs(reqTP - curTP) < eps);
+  }
+
+  if (slNoChange && tpNoChange)
+    return true;
+
+  // 最小距離を満たさない場合はスキップ（ブローカー制約回避）
+  if (minGap > 0.0)
+  {
+    if (posType == POSITION_TYPE_BUY)
+    {
+      if (slProvided && reqSL > 0.0 && (bid - reqSL) <= minGap)
+      {
+        if (EnableInfoLog)
+          PrintFormat("%s: skip buy SL close gap=%.1f min=%.1f", __FUNCTION__, (bid - reqSL) / _Point, minGap / _Point);
+        return false;
+      }
+      if (tpProvided && reqTP > 0.0 && (reqTP - ask) <= minGap)
+      {
+        if (EnableInfoLog)
+          PrintFormat("%s: skip buy TP close gap=%.1f min=%.1f", __FUNCTION__, (reqTP - ask) / _Point, minGap / _Point);
+        return false;
+      }
+    }
+    else // SELL
+    {
+      if (slProvided && reqSL > 0.0 && (reqSL - ask) <= minGap)
+      {
+        if (EnableInfoLog)
+          PrintFormat("%s: skip sell SL close gap=%.1f min=%.1f", __FUNCTION__, (reqSL - ask) / _Point, minGap / _Point);
+        return false;
+      }
+      if (tpProvided && reqTP > 0.0 && (bid - reqTP) <= minGap)
+      {
+        if (EnableInfoLog)
+          PrintFormat("%s: skip sell TP close gap=%.1f min=%.1f", __FUNCTION__, (bid - reqTP) / _Point, minGap / _Point);
+        return false;
+      }
+    }
   }
 
   MqlTradeRequest  req;
@@ -317,21 +444,22 @@ bool ModifyPositionByTicket(long ticket, double sl, double tp)
   ZeroMemory(req);
   ZeroMemory(res);
 
-  req.action   = TRADE_ACTION_SLTP;
-  req.position = (ulong)ticket;
-  req.symbol   = PositionGetString(POSITION_SYMBOL);
-  req.sl       = sl;
-  req.tp       = tp;
+  req.action    = TRADE_ACTION_SLTP;
+  req.position  = (ulong)ticket;
+  req.symbol    = PositionGetString(POSITION_SYMBOL);
+  req.sl        = reqSL;
+  req.tp        = reqTP;
   req.deviation = SlippagePoints;
   req.magic     = MagicNumber;
 
   bool ok = OrderSend(req, res);
   if (!ok || (res.retcode != TRADE_RETCODE_DONE && res.retcode != TRADE_RETCODE_DONE_PARTIAL))
   {
-    PrintFormat("%s: ticket %I64d sltp failed ret=%d err=%d", __FUNCTION__, ticket, res.retcode, GetLastError());
+    PrintFormat("%s: ticket %I64d sltp failed ret=%d err=%d comment=%s", __FUNCTION__, ticket, res.retcode, GetLastError(), res.comment);
     return false;
   }
 
+  MarkTradeRequest();
   return true;
 }
 
@@ -491,12 +619,6 @@ void ManageOpenPositions()
             if (refPrice - trail >= stopLevel)
               desiredSL = MathMax(desiredSL, trail);
           }
-
-          if (desiredSL > curSL + _Point / 2.0)
-          {
-            ModifyPositionByTicket(ticket, desiredSL, curTP);
-            trailUpdated = true;
-          }
         }
         else // SELL
         {
@@ -515,12 +637,6 @@ void ManageOpenPositions()
             double trail = refPrice + swingTrailPts * _Point;
             if (trail - refPrice >= stopLevel)
               desiredSL = MathMin(desiredSL, trail);
-          }
-
-          if (desiredSL < curSL - _Point / 2.0)
-          {
-            ModifyPositionByTicket(ticket, desiredSL, curTP);
-            trailUpdated = true;
           }
         }
       }
@@ -541,11 +657,15 @@ void ManageOpenPositions()
             desiredTP = entry - swingTpPts * _Point;
         }
 
-        if ((curTP == 0.0 && desiredTP != 0.0) || (curTP != 0.0 && MathAbs(curTP - desiredTP) > _Point / 2.0))
+        bool needModify = (MathAbs(desiredSL - curSL) > _Point / 2.0) || (MathAbs(desiredTP - curTP) > _Point / 2.0);
+        if (needModify)
         {
-          ModifyPositionByTicket(ticket, desiredSL, desiredTP);
-          curTP = desiredTP; // 更新後の値を反映しておく
-          trailUpdated = true;
+          if (ModifyPositionByTicket(ticket, desiredSL, desiredTP))
+          {
+            curSL = desiredSL;
+            curTP = desiredTP;
+            trailUpdated = true;
+          }
         }
       }
 
@@ -588,13 +708,15 @@ void TryStartupEntry()
 {
   if (!EnterOnInit)
   {
-    Print(__FUNCTION__, ": skip - EnterOnInit=false");
+    if (EnableInfoLog)
+      Print(__FUNCTION__, ": skip - EnterOnInit=false");
     return;
   }
 
   if (HasOurPosition())
   {
-    Print(__FUNCTION__, ": skip - already have positions");
+    if (EnableInfoLog)
+      Print(__FUNCTION__, ": skip - already have positions");
     return;
   }
 
@@ -603,25 +725,29 @@ void TryStartupEntry()
     double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
     double spread_points = (ask - bid) / _Point;
-    Print(__FUNCTION__, ": skip - spread too wide (points)=", DoubleToString(spread_points, 1), " limit=", MaxSpreadPoints);
+    if (EnableInfoLog)
+      Print(__FUNCTION__, ": skip - spread too wide (points)=", DoubleToString(spread_points, 1), " limit=", MaxSpreadPoints);
     return;
   }
 
   if (AtrPoints() <= 0.0)
   {
-    Print(__FUNCTION__, ": skip - ATR not ready");
+    if (EnableInfoLog)
+      Print(__FUNCTION__, ": skip - ATR not ready");
     return;
   }
 
   int needed = MathMax(MathMax(FastEmaPeriod, SlowEmaPeriod), ConfirmBarsStartup);
   if (g_bar_count < needed)
   {
-    Print(__FUNCTION__, ": skip - bars not ready count=", g_bar_count, " needed=", needed);
+    if (EnableInfoLog)
+      Print(__FUNCTION__, ": skip - bars not ready count=", g_bar_count, " needed=", needed);
     return; // 30秒バーが不足
   }
 
   TrendDirection dir = DetectTrendConfirmed(ConfirmBarsStartup);
-  Print(__FUNCTION__, ": startup enter dir=", dir);
+  if (EnableInfoLog)
+    Print(__FUNCTION__, ": startup enter dir=", dir);
   if (OpenPosition(dir))
   {
     g_startup_done = true;
@@ -633,19 +759,22 @@ void TryEnterIfFlat()
   // クローズ直後の 1 秒待ち
   if (g_last_close_time != 0 && (TimeCurrent() - g_last_close_time) < 1)
   {
-    Print(__FUNCTION__, ": skip - cool down after close");
+    if (EnableInfoLog)
+      Print(__FUNCTION__, ": skip - cool down after close");
     return;
   }
 
   if (g_bar_count == 0)
   {
-    Print(__FUNCTION__, ": skip - no synthetic bars yet");
+    if (EnableInfoLog)
+      Print(__FUNCTION__, ": skip - no synthetic bars yet");
     return;
   }
 
   if (HasOurPosition())
   {
-    Print(__FUNCTION__, ": skip - already have positions");
+    if (EnableInfoLog)
+      Print(__FUNCTION__, ": skip - already have positions");
     return;
   }
 
@@ -654,18 +783,21 @@ void TryEnterIfFlat()
     double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
     double spread_points = (ask - bid) / _Point;
-    Print(__FUNCTION__, ": skip - spread too wide (points)=", DoubleToString(spread_points, 1), " limit=", MaxSpreadPoints);
+    if (EnableInfoLog)
+      Print(__FUNCTION__, ": skip - spread too wide (points)=", DoubleToString(spread_points, 1), " limit=", MaxSpreadPoints);
     return;
   }
 
   if (AtrPoints() <= 0.0)
   {
-    Print(__FUNCTION__, ": skip - ATR not ready");
+    if (EnableInfoLog)
+      Print(__FUNCTION__, ": skip - ATR not ready");
     return;
   }
 
   TrendDirection dir = DetectTrend();
-  Print(__FUNCTION__, ": enter dir=", dir);
+  if (EnableInfoLog)
+    Print(__FUNCTION__, ": enter dir=", dir);
   if (OpenPosition(dir))
     g_last_close_time = 0; // 明示的にクールダウン解除
 }
