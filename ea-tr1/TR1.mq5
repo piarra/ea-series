@@ -27,6 +27,7 @@ input double         ScalpAtrTpMult = 0.32; // SCALP 利確 = ATR×0.32
 input double         SwingAtrTpMult = 1.05; // SWING 初期TP = ATR×1.05
 input double         SwingTrailMult = 1.00; // SWING トレーリング距離 = ATR×1.0
 input double         StopAtrMult    = 1.00; // 共通ストップ = ATR×1.0
+input int            ScalpRefillIntervalSec = 1; // SCALP消失後に新ペアを建てるまでの待機秒数
 
 enum TrendDirection
 {
@@ -41,6 +42,19 @@ datetime g_last_close_time = 0;
 double   g_tr_atr = 0.0;        // 10秒合成足ベースのATR（価格単位）
 double   g_prev_close = 0.0;    // 直近合成足の終値
 ulong    g_last_trade_us = 0;   // 直近の注文リクエスト時刻 (マイクロ秒)
+bool     g_action_used_this_tick = false; // 1tick=1action を強制
+datetime g_last_refill_time = 0; // SCALP消失後の再エントリー間隔管理
+
+// ペア初動を2tickに分割して送るための簡易ステート
+enum OpenPhase
+{
+  OPEN_IDLE = 0,   // 何も準備していない
+  OPEN_SWING,      // SWING 建玉を試行中
+  OPEN_SCALP       // SWING 成功後、SCALP を追加予定
+};
+
+OpenPhase g_open_phase = OPEN_IDLE;
+TrendDirection g_open_dir = TREND_NONE; // 開始時に決めた方向を保持
 
 // 30秒バー生成用
 datetime g_curr_slot_start = 0;
@@ -74,6 +88,10 @@ int VolumeDigits()
 // OrderSendスパム防止: 直近送信から MinTradeIntervalMs 経過したら許可
 bool TradeRequestAllowed()
 {
+  // 1tick=1action の上限
+  if (g_action_used_this_tick)
+    return false;
+
   ulong now = GetMicrosecondCount();
   ulong gap_us = (ulong)MinTradeIntervalMs * 1000;
 
@@ -89,6 +107,7 @@ bool TradeRequestAllowed()
 
 void MarkTradeRequest()
 {
+  g_action_used_this_tick = true;
   g_last_trade_us = GetMicrosecondCount();
 }
 
@@ -228,47 +247,6 @@ void UpdateSyntheticBar()
   StartNewSyntheticBar(slot, price);
 }
 
-TrendDirection DetectTrendConfirmed(int bars)
-{
-  if (bars <= 1)
-    return DetectTrend();
-
-  int sz = ArraySize(g_trend_history);
-  if (sz == 0)
-    return DetectTrend();
-
-  if (bars > sz)
-    bars = sz;
-
-  int buy_count = 0;
-  int sell_count = 0;
-  for (int i = sz - bars; i < sz; i++)
-  {
-    if (g_trend_history[i] == TREND_BUY)
-      buy_count++;
-    else
-      sell_count++;
-  }
-
-  if (buy_count > sell_count)
-  {
-    if (EnableInfoLog)
-      Print(__FUNCTION__, ": confirmed BUY on ", bars, " bars (buy=", buy_count, ", sell=", sell_count, ")");
-    return TREND_BUY;
-  }
-  if (sell_count > buy_count)
-  {
-    if (EnableInfoLog)
-      Print(__FUNCTION__, ": confirmed SELL on ", bars, " bars (buy=", buy_count, ", sell=", sell_count, ")");
-    return TREND_SELL;
-  }
-
-  TrendDirection tie = DetectTrend();
-  if (EnableInfoLog)
-    Print(__FUNCTION__, ": tie -> fallback to last bar trend=", tie, " (buy=", buy_count, ", sell=", sell_count, ")");
-  return tie;
-}
-
 TrendDirection DetectTrend()
 {
   int sz = ArraySize(g_trend_history);
@@ -283,46 +261,6 @@ TrendDirection DetectTrend()
   if (EnableInfoLog)
     Print(__FUNCTION__, ": last dir=", dir, " bar#", g_bar_count);
   return dir;
-}
-
-bool OpenPosition(TrendDirection dir)
-{
-  if (!TradeRequestAllowed())
-    return false;
-
-  // 先にマークして以降のリクエストを間引く
-  MarkTradeRequest();
-
-  ENUM_ORDER_TYPE orderType = (dir == TREND_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-  double lot = NormalizeDouble(BaseLot, VolumeDigits());
-  trade.SetExpertMagicNumber(MagicNumber);
-  trade.SetDeviationInPoints(SlippagePoints);
-
-  // 2本同時に建てる: SWING / SCALP
-  bool swingOk = trade.PositionOpen(_Symbol, orderType, lot, 0, 0, 0, "SWING");
-  bool scalpOk = trade.PositionOpen(_Symbol, orderType, lot, 0, 0, 0, "SCALP");
-
-  if (!swingOk || !scalpOk)
-  {
-    PrintFormat("Open pair failed: swing=%d scalp=%d err=%d", swingOk, scalpOk, GetLastError());
-
-    // どちらか片方だけ成功した場合はクローズして整合性を保つ
-    if (swingOk && !scalpOk)
-    {
-      ulong swingTicket;
-      if (FindTicketByComment("SWING", swingTicket))
-        ClosePositionByTicket((long)swingTicket);
-    }
-    if (!swingOk && scalpOk)
-    {
-      ulong scalpTicket;
-      if (FindTicketByComment("SCALP", scalpTicket))
-        ClosePositionByTicket((long)scalpTicket);
-    }
-    return false;
-  }
-
-  return true;
 }
 
 bool ClosePositionByTicket(long ticket)
@@ -524,6 +462,131 @@ int CountPositionsByTag(const string tag)
   return count;
 }
 
+bool OpenSingle(const string tag, TrendDirection dir)
+{
+  if (!TradeRequestAllowed())
+    return false;
+
+  ENUM_ORDER_TYPE type = (dir == TREND_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+  double lot = NormalizeDouble(BaseLot, VolumeDigits());
+
+  trade.SetExpertMagicNumber(MagicNumber);
+  trade.SetDeviationInPoints(SlippagePoints);
+
+  bool ok = trade.PositionOpen(_Symbol, type, lot, 0, 0, 0, tag);
+
+  MarkTradeRequest();
+  return ok;
+}
+
+void ProcessEntryEngine()
+{
+  // 1tick=1action: 既にリクエストを使っていればスキップ
+  if (g_action_used_this_tick)
+    return;
+
+  // 初期化中など、トレンド判定ができないときは待つ
+  if (g_bar_count == 0)
+    return;
+
+  // ブローカー制約・環境条件チェック
+  if (SpreadTooWide())
+    return;
+
+  if (AtrPoints() <= 0.0)
+    return;
+
+  // クローズ直後はクールダウン（1秒）
+  if (g_last_close_time != 0 && (TimeCurrent() - g_last_close_time) < 1)
+    return;
+
+  // 新規エントリー開始時のみ 2秒ロックを適用
+  if (g_open_phase == OPEN_IDLE && RecentlyTriedOpen())
+    return;
+
+  // オープンフェーズに従って1tick=1actionで順送り
+  if (g_open_phase == OPEN_IDLE)
+  {
+    // ポジション保有中なら新規エントリーは行わない
+    if (HasOurPosition())
+      return;
+
+    g_open_dir = DetectTrend();
+    g_last_open_attempt = TimeCurrent();
+    // 先にSCALPを建て、次tickでSWINGを建てる（1tick=1OrderSendを維持）
+    if (OpenSingle("SCALP", g_open_dir))
+      g_open_phase = OPEN_SWING;
+    else
+    {
+      g_open_phase = OPEN_IDLE;
+      g_open_dir = TREND_NONE;
+    }
+    return;
+  }
+
+  // SCALP建玉ができた次tickでSWINGを建てる
+  if (g_open_phase == OPEN_SWING)
+  {
+    // SCALPが存在しない場合は中止
+    if (CountPositionsByTag("SCALP") == 0)
+    {
+      g_open_phase = OPEN_IDLE;
+      g_open_dir = TREND_NONE;
+      return;
+    }
+
+    if (OpenSingle("SWING", g_open_dir))
+    {
+      g_open_phase = OPEN_IDLE;
+      g_open_dir = TREND_NONE;
+    }
+    return;
+  }
+}
+
+// SCALPがなくなったら新しいSWING+SCALPを同時に建てる
+void StartPairIfScalpMissing()
+{
+  if (g_action_used_this_tick)
+    return;
+
+  // 初動の2段階オープン中はここでは建てない（重複防止）
+  if (g_open_phase != OPEN_IDLE)
+    return;
+
+  int swing = CountPositionsByTag("SWING");
+  int scalp = CountPositionsByTag("SCALP");
+
+  if (swing == 0)
+    return; // SWINGがなければ初動ロジックに任せる
+
+  if (scalp > 0)
+    return; // まだSCALPが残っている
+
+  // インターバル待ち
+  if (ScalpRefillIntervalSec > 0 && g_last_refill_time != 0 &&
+      (TimeCurrent() - g_last_refill_time) < ScalpRefillIntervalSec)
+    return;
+
+  if (SpreadTooWide())
+    return;
+
+  if (AtrPoints() <= 0.0)
+    return;
+
+  if (g_bar_count == 0)
+    return; // トレンド判定不可
+
+  TrendDirection dir = DetectTrend();
+  g_last_refill_time = TimeCurrent();
+  // 1tick=1action を守るため、まずSCALPのみ建て、次tickでSWINGを建てる
+  if (OpenSingle("SCALP", dir))
+  {
+    g_open_phase = OPEN_SWING;
+    g_open_dir = dir;
+  }
+}
+
 bool SpreadTooWide()
 {
   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -697,45 +760,18 @@ void ManageOpenPositions()
   }
 }
 
-// SCALPがゼロになったら新しいSWING/SCALPペアを同方向で建てる
-void StartPairIfScalpMissing()
-{
-  if (RecentlyTriedOpen())
-    return;
-
-  if (CountPositionsByTag("SWING") == 0)
-    return; // SWINGすら無ければ初期ロジックに任せる
-
-  if (CountPositionsByTag("SCALP") > 0)
-    return; // まだSCALPが残っている
-
-  if (SpreadTooWide())
-    return;
-
-  if (AtrPoints() <= 0.0)
-    return;
-
-  if (g_bar_count == 0)
-    return; // トレンド判定不可
-
-  TrendDirection dir = DetectTrend();
-  g_last_open_attempt = TimeCurrent();
-  OpenPosition(dir);
-}
-
 void TryStartupEntry()
 {
   if (!EnterOnInit)
   {
-    if (EnableInfoLog)
-      Print(__FUNCTION__, ": skip - EnterOnInit=false");
+    // 起動時エントリーを行わない設定なら即完了扱い
+    g_startup_done = true;
     return;
   }
 
   if (HasOurPosition())
   {
-    if (EnableInfoLog)
-      Print(__FUNCTION__, ": skip - already have positions");
+    g_startup_done = true;
     return;
   }
 
@@ -764,13 +800,8 @@ void TryStartupEntry()
     return; // 30秒バーが不足
   }
 
-  TrendDirection dir = DetectTrendConfirmed(ConfirmBarsStartup);
-  if (EnableInfoLog)
-    Print(__FUNCTION__, ": startup enter dir=", dir);
-  if (OpenPosition(dir))
-  {
-    g_startup_done = true;
-  }
+  // エントリー自体はペアエンジンに任せる。条件が整ったタイミングで一度だけフラグを立てる。
+  g_startup_done = true;
 }
 
 datetime g_last_open_attempt = 0;
@@ -778,61 +809,6 @@ datetime g_last_open_attempt = 0;
 bool RecentlyTriedOpen()
 {
   return (g_last_open_attempt != 0 && (TimeCurrent() - g_last_open_attempt) < 2); // 2秒ロック
-}
-
-void TryEnterIfFlat()
-{
-  // クローズ直後の 1 秒待ち
-  if (g_last_close_time != 0 && (TimeCurrent() - g_last_close_time) < 1)
-  {
-    if (EnableInfoLog)
-      Print(__FUNCTION__, ": skip - cool down after close");
-    return;
-  }
-
-  if (g_bar_count == 0)
-  {
-    if (EnableInfoLog)
-      Print(__FUNCTION__, ": skip - no synthetic bars yet");
-    return;
-  }
-
-  if (HasOurPosition())
-  {
-    if (EnableInfoLog)
-      Print(__FUNCTION__, ": skip - already have positions");
-    return;
-  }
-
-  if (SpreadTooWide())
-  {
-    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    double spread_points = (ask - bid) / _Point;
-    if (EnableInfoLog)
-      Print(__FUNCTION__, ": skip - spread too wide (points)=", DoubleToString(spread_points, 1), " limit=", MaxSpreadPoints);
-    return;
-  }
-
-  if (AtrPoints() <= 0.0)
-  {
-    if (EnableInfoLog)
-      Print(__FUNCTION__, ": skip - ATR not ready");
-    return;
-  }
-
-
-  TrendDirection dir = DetectTrend();
-  if (EnableInfoLog)
-    Print(__FUNCTION__, ": enter dir=", dir);
-
-  if (RecentlyTriedOpen())
-    return;
-
-  g_last_open_attempt = TimeCurrent();
-
-  if (OpenPosition(dir))
-    g_last_close_time = 0; // 明示的にクールダウン解除
 }
 
 int OnInit()
@@ -845,6 +821,10 @@ int OnInit()
   g_last_close_time = 0;
   g_tr_atr = 0.0;
   g_prev_close = 0.0;
+  g_action_used_this_tick = false;
+  g_open_phase = OPEN_IDLE;
+  g_open_dir = TREND_NONE;
+  g_last_refill_time = 0;
 
   trade.SetExpertMagicNumber(MagicNumber);
   return(INIT_SUCCEEDED);
@@ -856,6 +836,8 @@ void OnDeinit(const int reason)
 
 void OnTick()
 {
+  g_action_used_this_tick = false; // 1tick=1action リセット
+
   UpdateSyntheticBar();
 
   int needed_start = MathMax(MathMax(FastEmaPeriod, SlowEmaPeriod), ConfirmBarsStartup);
@@ -864,7 +846,8 @@ void OnTick()
     TryStartupEntry();
   }
 
+  // オープン系は順番に試し、どれかがリクエストを使ったら残りはスキップされる
   ManageOpenPositions();
   StartPairIfScalpMissing();
-  TryEnterIfFlat();
+  ProcessEntryEngine();
 }
