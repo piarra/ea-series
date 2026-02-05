@@ -59,9 +59,9 @@ input group "REGIME FILTER"
 input int RegimeOnBars = 3;
 input int RegimeOffBars = 3;
 input int RegimeCoolingBars = 3;
-input double RegimeAdxOn = 32.5;
-input double RegimeDiGapOn = 6.0;
-input double RegimeAdxOff = 20.0;
+input double RegimeAdxOn = 60.0;
+input double RegimeDiGapOn = 2.0;
+input double RegimeAdxOff = 40.0;
 input double RegimeDiGapOff = 2.0;
 input bool CloseOppositeOnTrend = true;
 input double TrendLotMultiplier = 4.0;
