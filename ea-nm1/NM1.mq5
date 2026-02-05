@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.31"
+#property version   "1.32"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -9,6 +9,7 @@
 // v1.29 REGIME管理モード
 // v1.30 トレンド対側はエントリーも禁止
 // v1.31 EA管理サーバー接続用パラメータ追加
+// v1.32 レベル2ロットを倍にするオプション追加
 
 #include <Trade/Trade.mqh>
 
@@ -79,6 +80,7 @@ input double MinAtrXAUUSD = 1.6;
 input double ProfitBaseXAUUSD = 1.0;
 input int MaxLevelsXAUUSD = 11;
 input bool NoMartingaleXAUUSD = false;
+input bool DoubleSecondLotXAUUSD = false;
 
 input group "EURUSD"
 input bool EnableEURUSD = false;
@@ -91,6 +93,7 @@ input double MinAtrEURUSD = 0.00050;
 input double ProfitBaseEURUSD = 0.00010;
 input int MaxLevelsEURUSD = 10;
 input bool NoMartingaleEURUSD = false;
+input bool DoubleSecondLotEURUSD = false;
 
 input group "USDJPY"
 input bool EnableUSDJPY = false;
@@ -103,6 +106,7 @@ input double MinAtrUSDJPY = 0.05;
 input double ProfitBaseUSDJPY = 0.01;
 input int MaxLevelsUSDJPY = 12;
 input bool NoMartingaleUSDJPY = false;
+input bool DoubleSecondLotUSDJPY = false;
 
 input group "AUDUSD"
 input bool EnableAUDUSD = false;
@@ -115,6 +119,7 @@ input double MinAtrAUDUSD = 0.00015;
 input double ProfitBaseAUDUSD = 1.0;
 input int MaxLevelsAUDUSD = 10;
 input bool NoMartingaleAUDUSD = false;
+input bool DoubleSecondLotAUDUSD = false;
 
 input group "BTCUSD"
 input bool EnableBTCUSD = false;
@@ -127,6 +132,7 @@ input double MinAtrBTCUSD = 10.0;
 input double ProfitBaseBTCUSD = 4.0;
 input int MaxLevelsBTCUSD = 8;
 input bool NoMartingaleBTCUSD = true;
+input bool DoubleSecondLotBTCUSD = false;
 
 input group "ETHUSD"
 input bool EnableETHUSD = false;
@@ -139,6 +145,7 @@ input double MinAtrETHUSD = 1.2;
 input double ProfitBaseETHUSD = 1.0;
 input int MaxLevelsETHUSD = 12;
 input bool NoMartingaleETHUSD = false;
+input bool DoubleSecondLotETHUSD = false;
 
 struct NM1Params
 {
@@ -173,6 +180,7 @@ struct NM1Params
   int close_retry_count;
   int close_retry_delay_ms;
   bool no_martingale;
+  bool double_second_lot;
 };
 
 struct BasketInfo
@@ -511,6 +519,7 @@ void ApplyCommonParams(NM1Params &params)
   params.order_pending_timeout_seconds = OrderPendingTimeoutSeconds;
   params.close_retry_count = CloseRetryCount;
   params.close_retry_delay_ms = CloseRetryDelayMs;
+  params.double_second_lot = false;
 }
 
 void LoadParamsForIndex(int index, NM1Params &params)
@@ -526,6 +535,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.profit_base = ProfitBaseXAUUSD;
     params.max_levels = MaxLevelsXAUUSD;
     params.no_martingale = NoMartingaleXAUUSD;
+    params.double_second_lot = DoubleSecondLotXAUUSD;
   }
   else if (index == 1)
   {
@@ -537,6 +547,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.profit_base = ProfitBaseEURUSD;
     params.max_levels = MaxLevelsEURUSD;
     params.no_martingale = NoMartingaleEURUSD;
+    params.double_second_lot = DoubleSecondLotEURUSD;
   }
   else if (index == 2)
   {
@@ -548,6 +559,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.profit_base = ProfitBaseUSDJPY;
     params.max_levels = MaxLevelsUSDJPY;
     params.no_martingale = NoMartingaleUSDJPY;
+    params.double_second_lot = DoubleSecondLotUSDJPY;
   }
   else if (index == 3)
   {
@@ -559,6 +571,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.profit_base = ProfitBaseAUDUSD;
     params.max_levels = MaxLevelsAUDUSD;
     params.no_martingale = NoMartingaleAUDUSD;
+    params.double_second_lot = DoubleSecondLotAUDUSD;
   }
   else if (index == 4)
   {
@@ -570,6 +583,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.profit_base = ProfitBaseBTCUSD;
     params.max_levels = MaxLevelsBTCUSD;
     params.no_martingale = NoMartingaleBTCUSD;
+    params.double_second_lot = DoubleSecondLotBTCUSD;
   }
   else if (index == 5)
   {
@@ -581,6 +595,7 @@ void LoadParamsForIndex(int index, NM1Params &params)
     params.profit_base = ProfitBaseETHUSD;
     params.max_levels = MaxLevelsETHUSD;
     params.no_martingale = NoMartingaleETHUSD;
+    params.double_second_lot = DoubleSecondLotETHUSD;
   }
 }
 
@@ -740,7 +755,12 @@ void BuildLotSequence(SymbolState &state)
   else
   {
     if (levels > 1)
-      state.lot_seq[1] = params.base_lot;
+    {
+      if (params.double_second_lot)
+        state.lot_seq[1] = params.base_lot * 2.0;
+      else
+        state.lot_seq[1] = params.base_lot;
+    }
     for (int i = 2; i < levels; ++i)
       state.lot_seq[i] = state.lot_seq[i - 1] + state.lot_seq[i - 2];
   }
