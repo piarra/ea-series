@@ -290,6 +290,9 @@ bool OpenPosition(TrendDirection dir)
   if (!TradeRequestAllowed())
     return false;
 
+  // 先にマークして以降のリクエストを間引く
+  MarkTradeRequest();
+
   ENUM_ORDER_TYPE orderType = (dir == TREND_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
   double lot = NormalizeDouble(BaseLot, VolumeDigits());
   trade.SetExpertMagicNumber(MagicNumber);
@@ -297,9 +300,7 @@ bool OpenPosition(TrendDirection dir)
 
   // 2本同時に建てる: SWING / SCALP
   bool swingOk = trade.PositionOpen(_Symbol, orderType, lot, 0, 0, 0, "SWING");
-  if (swingOk) MarkTradeRequest();
   bool scalpOk = trade.PositionOpen(_Symbol, orderType, lot, 0, 0, 0, "SCALP");
-  if (scalpOk) MarkTradeRequest();
 
   if (!swingOk || !scalpOk)
   {
@@ -699,6 +700,9 @@ void ManageOpenPositions()
 // SCALPがゼロになったら新しいSWING/SCALPペアを同方向で建てる
 void StartPairIfScalpMissing()
 {
+  if (RecentlyTriedOpen())
+    return;
+
   if (CountPositionsByTag("SWING") == 0)
     return; // SWINGすら無ければ初期ロジックに任せる
 
@@ -715,6 +719,7 @@ void StartPairIfScalpMissing()
     return; // トレンド判定不可
 
   TrendDirection dir = DetectTrend();
+  g_last_open_attempt = TimeCurrent();
   OpenPosition(dir);
 }
 
@@ -768,6 +773,13 @@ void TryStartupEntry()
   }
 }
 
+datetime g_last_open_attempt = 0;
+
+bool RecentlyTriedOpen()
+{
+  return (g_last_open_attempt != 0 && (TimeCurrent() - g_last_open_attempt) < 2); // 2秒ロック
+}
+
 void TryEnterIfFlat()
 {
   // クローズ直後の 1 秒待ち
@@ -809,9 +821,16 @@ void TryEnterIfFlat()
     return;
   }
 
+
   TrendDirection dir = DetectTrend();
   if (EnableInfoLog)
     Print(__FUNCTION__, ": enter dir=", dir);
+
+  if (RecentlyTriedOpen())
+    return;
+
+  g_last_open_attempt = TimeCurrent();
+
   if (OpenPosition(dir))
     g_last_close_time = 0; // 明示的にクールダウン解除
 }
