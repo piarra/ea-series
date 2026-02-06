@@ -1936,18 +1936,18 @@ void ProcessSymbolTick(SymbolState &state)
   bool has_adx = GetAdxSnapshot(state, adx_now, adx_prev, di_plus_now, di_plus_prev, di_minus_now, di_minus_prev);
   if (!is_trading_time)
   {
-    double threshold = -0.5 * params.profit_base;
+    double threshold_distance = -0.5 * take_profit_distance;
     if (buy.count > 0)
     {
       bool should_close = false;
       if (value_per_unit > 0.0)
       {
-        double threshold_profit = buy.volume * threshold * value_per_unit;
+        double threshold_profit = buy.volume * threshold_distance * value_per_unit;
         should_close = (buy.profit + state.realized_buy_profit) >= threshold_profit;
       }
       else
       {
-        should_close = (bid - buy.avg_price) >= threshold;
+        should_close = (bid - buy.avg_price) >= threshold_distance;
       }
       if (should_close)
         CloseBasket(state, POSITION_TYPE_BUY);
@@ -1957,12 +1957,12 @@ void ProcessSymbolTick(SymbolState &state)
       bool should_close = false;
       if (value_per_unit > 0.0)
       {
-        double threshold_profit = sell.volume * threshold * value_per_unit;
+        double threshold_profit = sell.volume * threshold_distance * value_per_unit;
         should_close = (sell.profit + state.realized_sell_profit) >= threshold_profit;
       }
       else
       {
-        should_close = (sell.avg_price - ask) >= threshold;
+        should_close = (sell.avg_price - ask) >= threshold_distance;
       }
       if (should_close)
         CloseBasket(state, POSITION_TYPE_SELL);
