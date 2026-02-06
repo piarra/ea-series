@@ -55,7 +55,9 @@ input int CloseRetryDelayMs = 200;
 input bool SafetyMode = true;
 input double SafeK = 2.0;
 input double SafeSlopeK = 0.3;
-input int RestartDelaySeconds = 1;
+input int RestartDelaySeconds = 5;
+input double RestartDelayAtrFactorMin = 0.8;
+input double RestartDelayAtrFactorMax = 2.0;
 input int NanpinSleepSeconds = 10;
 input int OrderPendingTimeoutSeconds = 2;
 input bool EnableHedgedEntry = true;
@@ -89,7 +91,6 @@ input double RegimeAdxOn = 32.5;
 input double RegimeDiGapOn = 2.0;
 input double RegimeAdxOff = 20.0;
 input double RegimeDiGapOff = 2.0;
-input bool CloseOppositeOnTrend = true;
 input double TrendLotMultiplier = 4.0;
 
 input group "DEBUG"
@@ -194,10 +195,11 @@ struct NM2Params
   double regime_di_gap_on;
   double regime_adx_off;
   double regime_di_gap_off;
-  bool close_opposite_on_trend;
   double trend_lot_multiplier;
   int max_levels;
   int restart_delay_seconds;
+  double restart_delay_atr_factor_min;
+  double restart_delay_atr_factor_max;
   int nanpin_sleep_seconds;
   int order_pending_timeout_seconds;
   bool enable_hedged_entry;
@@ -549,9 +551,10 @@ void ApplyCommonParams(NM2Params &params)
   params.regime_di_gap_on = RegimeDiGapOn;
   params.regime_adx_off = RegimeAdxOff;
   params.regime_di_gap_off = RegimeDiGapOff;
-  params.close_opposite_on_trend = CloseOppositeOnTrend;
   params.trend_lot_multiplier = TrendLotMultiplier;
   params.restart_delay_seconds = RestartDelaySeconds;
+  params.restart_delay_atr_factor_min = RestartDelayAtrFactorMin;
+  params.restart_delay_atr_factor_max = RestartDelayAtrFactorMax;
   params.nanpin_sleep_seconds = NanpinSleepSeconds;
   params.order_pending_timeout_seconds = OrderPendingTimeoutSeconds;
   params.enable_hedged_entry = EnableHedgedEntry;
@@ -1514,13 +1517,6 @@ void UpdateRegime(SymbolState &state, double adx_now, double di_plus_now, double
 
   if (state.regime != prev)
   {
-    if (state.params.close_opposite_on_trend)
-    {
-      if (state.regime == REGIME_TREND_UP)
-        CloseBasket(state, POSITION_TYPE_SELL);
-      else if (state.regime == REGIME_TREND_DOWN)
-        CloseBasket(state, POSITION_TYPE_BUY);
-    }
     SendLog(BuildRegimeLogMessage(state, prev));
     PrintFormat("Regime changed: %s -> %s (%s)", RegimeName(prev), RegimeName(state.regime), state.broker_symbol);
   }
@@ -1641,11 +1637,41 @@ double PriceValuePerUnitCached(const SymbolState &state)
   return state.tick_value / state.tick_size;
 }
 
-bool CanRestart(const NM2Params &params, datetime last_close_time)
+int RestartDelaySecondsDynamic(const NM2Params &params, double atr_base, double atr_now)
+{
+  double base_seconds = (double)params.restart_delay_seconds;
+  if (base_seconds < 0.0)
+    base_seconds = 0.0;
+
+  double factor = 1.0;
+  if (atr_base > 0.0 && atr_now > 0.0)
+  {
+    double min_factor = params.restart_delay_atr_factor_min;
+    double max_factor = params.restart_delay_atr_factor_max;
+    if (min_factor < 0.0)
+      min_factor = 0.0;
+    if (max_factor < min_factor)
+      max_factor = min_factor;
+    factor = atr_now / atr_base;
+    if (factor < min_factor)
+      factor = min_factor;
+    if (factor > max_factor)
+      factor = max_factor;
+  }
+
+  int seconds = (int)MathRound(base_seconds * factor);
+  if (seconds < 0)
+    seconds = 0;
+  return seconds;
+}
+
+bool CanRestart(datetime last_close_time, int restart_delay_seconds)
 {
   if (last_close_time == 0)
     return true;
-  return (TimeCurrent() - last_close_time) >= params.restart_delay_seconds;
+  if (restart_delay_seconds < 0)
+    restart_delay_seconds = 0;
+  return (TimeCurrent() - last_close_time) >= restart_delay_seconds;
 }
 
 void CloseAllPositionsByMagic(const int magic)
@@ -2006,6 +2032,7 @@ void ProcessSymbolTick(SymbolState &state)
     if (atr_slope > atr_base * params.safe_slope_k)
       safety_triggered = true;
   }
+  int restart_delay_dynamic_seconds = RestartDelaySecondsDynamic(params, atr_base, atr_now);
   double adx_now = 0.0;
   double adx_prev = 0.0;
   double di_plus_now = 0.0;
@@ -2376,7 +2403,7 @@ void ProcessSymbolTick(SymbolState &state)
     if (params.enable_hedged_entry)
     {
       if (buy.count == 0 && !state.buy_order_pending && allow_entry_buy && spread_ok
-          && CanRestart(params, state.last_buy_close_time))
+          && CanRestart(state.last_buy_close_time, restart_delay_dynamic_seconds))
       {
         bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, 1), 1);
         if (opened_buy)
@@ -2388,7 +2415,7 @@ void ProcessSymbolTick(SymbolState &state)
         }
       }
       if (sell.count == 0 && !state.sell_order_pending && allow_entry_sell && spread_ok
-          && CanRestart(params, state.last_sell_close_time))
+          && CanRestart(state.last_sell_close_time, restart_delay_dynamic_seconds))
       {
         bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, 1), 1);
         if (opened_sell)
@@ -2402,8 +2429,8 @@ void ProcessSymbolTick(SymbolState &state)
     }
     else if (buy.count == 0 && sell.count == 0 && !state.buy_order_pending && !state.sell_order_pending)
     {
-      bool can_restart_buy = allow_entry_buy && CanRestart(params, state.last_buy_close_time);
-      bool can_restart_sell = allow_entry_sell && CanRestart(params, state.last_sell_close_time);
+      bool can_restart_buy = allow_entry_buy && CanRestart(state.last_buy_close_time, restart_delay_dynamic_seconds);
+      bool can_restart_sell = allow_entry_sell && CanRestart(state.last_sell_close_time, restart_delay_dynamic_seconds);
       int dir = SelectSingleEntryDirection(state, can_restart_buy, can_restart_sell, has_adx, di_plus_now, di_minus_now);
       if (dir > 0 && spread_ok)
       {
