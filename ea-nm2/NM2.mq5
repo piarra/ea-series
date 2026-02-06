@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.38"
+#property version   "1.39"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -16,6 +16,7 @@
 // v1.36 maxLevel=3時もtimed-exit/no-martingale判定が追従するよう修正
 // v1.37 利確トレーリングオプション追加
 // v1.38 利確をATR基準へ変更 (ATR x 係数)
+// v1.39 最終段タイムアウトをRegime/Safety/ATR連動で動的化
 
 #include <Trade/Trade.mqh>
 
@@ -60,6 +61,13 @@ input int NanpinSleepSeconds = 10;
 input int OrderPendingTimeoutSeconds = 2;
 input bool EnableHedgedEntry = true;
 input int Level4TimedExitMinutes = 30;
+input int Level4TimedExitMinMinutes = 8;
+input int Level4TimedExitMaxMinutes = 60;
+input double TimedExitTrendRegimeFactor = 0.60;
+input double TimedExitCoolingRegimeFactor = 0.85;
+input double TimedExitSafetyFactor = 0.55;
+input double TimedExitAtrFactorMin = 0.70;
+input double TimedExitAtrFactorMax = 1.50;
 input double TakeProfitAtrMultiplier = 1.0;
 input bool EnableTrailingTakeProfit = false;
 input double TrailingTakeProfitDistanceRatio = 0.45;
@@ -200,6 +208,13 @@ struct NM1Params
   int order_pending_timeout_seconds;
   bool enable_hedged_entry;
   int level4_timed_exit_minutes;
+  int level4_timed_exit_min_minutes;
+  int level4_timed_exit_max_minutes;
+  double timed_exit_trend_regime_factor;
+  double timed_exit_cooling_regime_factor;
+  double timed_exit_safety_factor;
+  double timed_exit_atr_factor_min;
+  double timed_exit_atr_factor_max;
   int close_retry_count;
   int close_retry_delay_ms;
   bool no_martingale;
@@ -554,6 +569,13 @@ void ApplyCommonParams(NM1Params &params)
   params.order_pending_timeout_seconds = OrderPendingTimeoutSeconds;
   params.enable_hedged_entry = EnableHedgedEntry;
   params.level4_timed_exit_minutes = Level4TimedExitMinutes;
+  params.level4_timed_exit_min_minutes = Level4TimedExitMinMinutes;
+  params.level4_timed_exit_max_minutes = Level4TimedExitMaxMinutes;
+  params.timed_exit_trend_regime_factor = TimedExitTrendRegimeFactor;
+  params.timed_exit_cooling_regime_factor = TimedExitCoolingRegimeFactor;
+  params.timed_exit_safety_factor = TimedExitSafetyFactor;
+  params.timed_exit_atr_factor_min = TimedExitAtrFactorMin;
+  params.timed_exit_atr_factor_max = TimedExitAtrFactorMax;
   params.take_profit_atr_multiplier = TakeProfitAtrMultiplier;
   params.trailing_take_profit = EnableTrailingTakeProfit;
   params.trailing_take_profit_distance_ratio = TrailingTakeProfitDistanceRatio;
@@ -1748,6 +1770,72 @@ double TakeProfitTrailDistance(const SymbolState &state, double take_profit_dist
   return distance;
 }
 
+double ClampDouble(double value, double min_value, double max_value)
+{
+  if (max_value < min_value)
+    max_value = min_value;
+  if (value < min_value)
+    return min_value;
+  if (value > max_value)
+    return max_value;
+  return value;
+}
+
+int TimedExitMinutesDynamic(const SymbolState &state,
+                            double atr_base,
+                            double atr_now,
+                            bool safety_triggered,
+                            double &regime_factor,
+                            double &safety_factor,
+                            double &atr_factor)
+{
+  double base_minutes = state.params.level4_timed_exit_minutes;
+  if (base_minutes < 1.0)
+    base_minutes = 1.0;
+
+  regime_factor = 1.0;
+  if (state.regime == REGIME_TREND_UP || state.regime == REGIME_TREND_DOWN)
+    regime_factor = state.params.timed_exit_trend_regime_factor;
+  else if (state.regime == REGIME_COOLING)
+    regime_factor = state.params.timed_exit_cooling_regime_factor;
+  if (regime_factor <= 0.0)
+    regime_factor = 1.0;
+
+  safety_factor = 1.0;
+  if (safety_triggered)
+    safety_factor = state.params.timed_exit_safety_factor;
+  if (safety_factor <= 0.0)
+    safety_factor = 1.0;
+
+  atr_factor = 1.0;
+  if (atr_base > 0.0 && atr_now > 0.0)
+  {
+    double min_factor = state.params.timed_exit_atr_factor_min;
+    double max_factor = state.params.timed_exit_atr_factor_max;
+    if (min_factor <= 0.0)
+      min_factor = 0.1;
+    if (max_factor < min_factor)
+      max_factor = min_factor;
+    atr_factor = ClampDouble(atr_base / atr_now, min_factor, max_factor);
+  }
+
+  double dynamic_minutes = base_minutes * regime_factor * safety_factor * atr_factor;
+  int min_minutes = state.params.level4_timed_exit_min_minutes;
+  int max_minutes = state.params.level4_timed_exit_max_minutes;
+  if (min_minutes < 1)
+    min_minutes = 1;
+  if (max_minutes < min_minutes)
+    max_minutes = min_minutes;
+  dynamic_minutes = ClampDouble(dynamic_minutes, (double)min_minutes, (double)max_minutes);
+
+  int minutes = (int)MathRound(dynamic_minutes);
+  if (minutes < min_minutes)
+    minutes = min_minutes;
+  if (minutes > max_minutes)
+    minutes = max_minutes;
+  return minutes;
+}
+
 bool ShouldCloseBuyTakeProfit(const SymbolState &state, const BasketInfo &buy, double bid, double take_profit_distance)
 {
   if (state.has_partial_buy)
@@ -2031,24 +2119,30 @@ void ProcessSymbolTick(SymbolState &state)
     state.sell_level4_entry_time = 0;
   }
 
-  int timed_exit_minutes = params.level4_timed_exit_minutes;
-  if (timed_exit_minutes < 1)
-    timed_exit_minutes = 1;
+  double timed_exit_regime_factor = 1.0;
+  double timed_exit_safety_factor = 1.0;
+  double timed_exit_atr_factor = 1.0;
+  int timed_exit_minutes = TimedExitMinutesDynamic(state, atr_base, atr_now, safety_triggered,
+                                                   timed_exit_regime_factor,
+                                                   timed_exit_safety_factor,
+                                                   timed_exit_atr_factor);
   int timed_exit_seconds = timed_exit_minutes * 60;
   bool timed_exit_closed = false;
   if (buy.count > 0 && state.buy_level4_entry_time > 0
       && (now - state.buy_level4_entry_time) >= timed_exit_seconds)
   {
-    PrintFormat("Timed exit triggered: %s BUY reached level %d for %d minutes",
-                symbol, timed_exit_level, timed_exit_minutes);
+    PrintFormat("Timed exit triggered: %s BUY reached level %d for %d minutes (base=%d regime=%s factors=%.2f/%.2f/%.2f atr_now=%.5f atr_base=%.5f)",
+                symbol, timed_exit_level, timed_exit_minutes, params.level4_timed_exit_minutes, RegimeName(state.regime),
+                timed_exit_regime_factor, timed_exit_safety_factor, timed_exit_atr_factor, atr_now, atr_base);
     CloseBasket(state, POSITION_TYPE_BUY);
     timed_exit_closed = true;
   }
   if (sell.count > 0 && state.sell_level4_entry_time > 0
       && (now - state.sell_level4_entry_time) >= timed_exit_seconds)
   {
-    PrintFormat("Timed exit triggered: %s SELL reached level %d for %d minutes",
-                symbol, timed_exit_level, timed_exit_minutes);
+    PrintFormat("Timed exit triggered: %s SELL reached level %d for %d minutes (base=%d regime=%s factors=%.2f/%.2f/%.2f atr_now=%.5f atr_base=%.5f)",
+                symbol, timed_exit_level, timed_exit_minutes, params.level4_timed_exit_minutes, RegimeName(state.regime),
+                timed_exit_regime_factor, timed_exit_safety_factor, timed_exit_atr_factor, atr_now, atr_base);
     CloseBasket(state, POSITION_TYPE_SELL);
     timed_exit_closed = true;
   }
