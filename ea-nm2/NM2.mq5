@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.39"
+#property version   "1.42"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -17,10 +17,13 @@
 // v1.37 利確トレーリングオプション追加
 // v1.38 利確をATR基準へ変更 (ATR x 係数)
 // v1.39 最終段タイムアウトをRegime/Safety/ATR連動で動的化
+// v1.40 スプレッドフィルタ追加, TrendLotMultiplier整合, 未使用部分利確状態を整理
+// v1.41 旧ネームスペース定数をNM2へ統一
+// v1.42 旧命名(型名/コメントID/ログID)をNM2へ統一
 
 #include <Trade/Trade.mqh>
 
-namespace NM1
+namespace NM2
 {
 enum { kMaxLevels = 13 };
 enum { kMaxSymbols = 6 };
@@ -28,11 +31,7 @@ const int kAtrBasePeriod = 14;
 const int kLotDigits = 2;
 const double kMinLot = 0.01;
 const double kMaxLot = 100.0;
-const string kCoreComment = "NM1_CORE";
-}
-
-namespace NM2
-{
+const string kCoreComment = "NM2_CORE";
 const int kLevelCap = 4;
 const int kTimedExitLevel = 4;
 const double kLotMultiplierFromLevel3 = 1.5;
@@ -74,6 +73,7 @@ input double TrailingTakeProfitDistanceRatio = 0.45;
 input int AdxPeriod = 14;
 input double AdxMaxForNanpin = 20.0;
 input double DiGapMin = 2.0;
+input double MaxSpreadPoints = 0.0;
 
 input group "MANAGEMENT SERVER"
 input string ManagementServerHost = "";
@@ -173,7 +173,7 @@ input int MaxLevelsETHUSD = 4;
 input bool NoMartingaleETHUSD = false;
 input bool DoubleSecondLotETHUSD = false;
 
-struct NM1Params
+struct NM2Params
 {
   int magic_number;
   int slippage_points;
@@ -193,6 +193,7 @@ struct NM1Params
   int adx_period;
   double adx_max_for_nanpin;
   double di_gap_min;
+  double max_spread_points;
   int regime_on_bars;
   int regime_off_bars;
   int regime_cooling_bars;
@@ -243,7 +244,7 @@ struct SymbolState
   string logical_symbol;
   string broker_symbol;
   bool enabled;
-  NM1Params params;
+  NM2Params params;
   bool symbol_info_ready;
   double point;
   int digits;
@@ -255,9 +256,9 @@ struct SymbolState
   int filling_mode;
   datetime start_time;
   bool initial_started;
-  double lot_seq[NM1::kMaxLevels];
-  double buy_level_price[NM1::kMaxLevels];
-  double sell_level_price[NM1::kMaxLevels];
+  double lot_seq[NM2::kMaxLevels];
+  double buy_level_price[NM2::kMaxLevels];
+  double sell_level_price[NM2::kMaxLevels];
   double buy_grid_step;
   double sell_grid_step;
   datetime last_buy_close_time;
@@ -281,10 +282,6 @@ struct SymbolState
   int adx_h1_handle;
   int adx_h4_handle;
   bool safety_active;
-  double realized_buy_profit;
-  double realized_sell_profit;
-  bool has_partial_buy;
-  bool has_partial_sell;
   bool buy_take_profit_trailing_active;
   bool sell_take_profit_trailing_active;
   double buy_take_profit_peak_price;
@@ -306,7 +303,7 @@ struct SymbolState
   datetime last_regime_bar_time;
 };
 
-SymbolState symbols[NM1::kMaxSymbols];
+SymbolState symbols[NM2::kMaxSymbols];
 int symbols_count = 0;
 
 bool IsManagedMagic(const int magic)
@@ -369,7 +366,7 @@ bool HasDebugPendingOrder(const SymbolState &state, const string regime_name)
     if ((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE) != ORDER_TYPE_BUY_LIMIT)
       continue;
     string comment = OrderGetString(ORDER_COMMENT);
-    string expected = StringFormat("NM1_DEBUG_%s", regime_name);
+    string expected = StringFormat("NM2_DEBUG_%s", regime_name);
     if (comment == expected)
       return true;
   }
@@ -392,7 +389,7 @@ bool HasAnyDebugPendingOrder(const SymbolState &state)
     if ((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE) != ORDER_TYPE_BUY_LIMIT)
       continue;
     string comment = OrderGetString(ORDER_COMMENT);
-    if (StringFind(comment, "NM1_DEBUG_") == 0)
+    if (StringFind(comment, "NM2_DEBUG_") == 0)
       return true;
   }
   return false;
@@ -414,7 +411,7 @@ void CancelDebugPendingOrders(const SymbolState &state)
     if ((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE) != ORDER_TYPE_BUY_LIMIT)
       continue;
     string comment = OrderGetString(ORDER_COMMENT);
-    if (StringFind(comment, "NM1_DEBUG_") != 0)
+    if (StringFind(comment, "NM2_DEBUG_") != 0)
       continue;
     trade.OrderDelete(ticket);
   }
@@ -432,7 +429,7 @@ void DebugLog(SymbolState &state, const string message)
   if (filling == ORDER_FILLING_FOK || filling == ORDER_FILLING_IOC || filling == ORDER_FILLING_RETURN)
     trade.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
   double price = 2000.0;
-  string comment = StringFormat("NM1_DEBUG_%s", message);
+  string comment = StringFormat("NM2_DEBUG_%s", message);
   if (StringLen(comment) > 60)
     comment = StringSubstr(comment, 0, 60);
   trade.BuyLimit(0.01, price, state.broker_symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, comment);
@@ -463,7 +460,7 @@ void DisableSymbol(SymbolState &state, const string reason)
     PrintFormat("Symbol disabled: %s (%s)", state.broker_symbol, reason);
 }
 
-void InitSymbolState(SymbolState &state, const string logical, const string broker, bool enabled, const NM1Params &params)
+void InitSymbolState(SymbolState &state, const string logical, const string broker, bool enabled, const NM2Params &params)
 {
   state.logical_symbol = logical;
   state.broker_symbol = broker;
@@ -501,10 +498,6 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.adx_h1_handle = INVALID_HANDLE;
   state.adx_h4_handle = INVALID_HANDLE;
   state.safety_active = false;
-  state.realized_buy_profit = 0.0;
-  state.realized_sell_profit = 0.0;
-  state.has_partial_buy = false;
-  state.has_partial_sell = false;
   state.buy_take_profit_trailing_active = false;
   state.sell_take_profit_trailing_active = false;
   state.buy_take_profit_peak_price = 0.0;
@@ -544,7 +537,7 @@ void RefreshSymbolInfo(SymbolState &state)
   state.symbol_info_ready = true;
 }
 
-void ApplyCommonParams(NM1Params &params)
+void ApplyCommonParams(NM2Params &params)
 {
   params.magic_number = MagicNumber;
   params.slippage_points = SlippagePoints;
@@ -555,6 +548,7 @@ void ApplyCommonParams(NM1Params &params)
   params.adx_period = AdxPeriod;
   params.adx_max_for_nanpin = AdxMaxForNanpin;
   params.di_gap_min = DiGapMin;
+  params.max_spread_points = MaxSpreadPoints;
   params.regime_on_bars = RegimeOnBars;
   params.regime_off_bars = RegimeOffBars;
   params.regime_cooling_bars = RegimeCoolingBars;
@@ -584,7 +578,7 @@ void ApplyCommonParams(NM1Params &params)
   params.double_second_lot = false;
 }
 
-void LoadParamsForIndex(int index, NM1Params &params)
+void LoadParamsForIndex(int index, NM2Params &params)
 {
   ApplyCommonParams(params);
   if (index == 0)
@@ -663,9 +657,9 @@ void LoadParamsForIndex(int index, NM1Params &params)
 
 void BuildSymbols()
 {
-  const string supported[NM1::kMaxSymbols] = {"XAUUSD", "EURUSD", "USDJPY", "AUDUSD", "BTCUSD", "ETHUSD"};
-  bool enabled_inputs[NM1::kMaxSymbols];
-  string symbol_inputs[NM1::kMaxSymbols];
+  const string supported[NM2::kMaxSymbols] = {"XAUUSD", "EURUSD", "USDJPY", "AUDUSD", "BTCUSD", "ETHUSD"};
+  bool enabled_inputs[NM2::kMaxSymbols];
+  string symbol_inputs[NM2::kMaxSymbols];
   enabled_inputs[0] = EnableXAUUSD;
   enabled_inputs[1] = EnableEURUSD;
   enabled_inputs[2] = EnableUSDJPY;
@@ -679,9 +673,9 @@ void BuildSymbols()
   symbol_inputs[4] = SymbolBTCUSD;
   symbol_inputs[5] = SymbolETHUSD;
   symbols_count = 0;
-  for (int i = 0; i < NM1::kMaxSymbols; ++i)
+  for (int i = 0; i < NM2::kMaxSymbols; ++i)
   {
-    NM1Params params;
+    NM2Params params;
     LoadParamsForIndex(i, params);
     string logical = supported[i];
     bool enabled = enabled_inputs[i];
@@ -730,17 +724,17 @@ double NormalizeLotCached(const SymbolState &state, double lot)
   if (step <= 0.0)
     step = 0.01;
   if (minlot <= 0.0)
-    minlot = NM1::kMinLot;
+    minlot = NM2::kMinLot;
   if (maxlot <= 0.0)
-    maxlot = NM1::kMaxLot;
+    maxlot = NM2::kMaxLot;
   lot = MathMax(minlot, MathMin(maxlot, lot));
   double steps = MathFloor(lot / step + 0.0000001);
-  return NormalizeDouble(steps * step, NM1::kLotDigits);
+  return NormalizeDouble(steps * step, NM2::kLotDigits);
 }
 
 void ClearLevelPrices(double &prices[])
 {
-  for (int i = 0; i < NM1::kMaxLevels; ++i)
+  for (int i = 0; i < NM2::kMaxLevels; ++i)
     prices[i] = 0.0;
 }
 
@@ -761,7 +755,7 @@ void SyncLevelPricesFromPositions(SymbolState &state)
     int level = ExtractLevelFromComment(comment);
     if (level <= 0)
       level = 1;
-    if (level > NM1::kMaxLevels)
+    if (level > NM2::kMaxLevels)
       continue;
     double price = PositionGetDouble(POSITION_PRICE_OPEN);
     int type = (int)PositionGetInteger(POSITION_TYPE);
@@ -782,7 +776,7 @@ void SyncLevelPricesFromPositions(SymbolState &state)
     state.sell_grid_step = MathAbs(state.sell_level_price[0] - state.sell_level_price[1]);
 }
 
-int EffectiveMaxLevels(const NM1Params &params)
+int EffectiveMaxLevels(const NM2Params &params)
 {
   int levels = params.max_levels;
   if (levels < 1)
@@ -799,7 +793,7 @@ int EffectiveMaxLevelsRuntime(const SymbolState &state)
 
 void BuildLotSequence(SymbolState &state)
 {
-  NM1Params params = state.params;
+  NM2Params params = state.params;
   int levels = EffectiveMaxLevels(state.params);
   state.lot_seq[0] = params.base_lot;
   if (params.no_martingale)
@@ -876,7 +870,7 @@ int OnInit()
     if (!symbols[i].symbol_info_ready)
       RefreshSymbolInfo(symbols[i]);
     BuildLotSequence(symbols[i]);
-    symbols[i].atr_handle = iATR(symbols[i].broker_symbol, _Period, NM1::kAtrBasePeriod);
+    symbols[i].atr_handle = iATR(symbols[i].broker_symbol, _Period, NM2::kAtrBasePeriod);
     if (symbols[i].atr_handle == INVALID_HANDLE)
     {
       PrintFormat("ATR handle failed: %s", symbols[i].broker_symbol);
@@ -1021,6 +1015,10 @@ int GetDiDirection(const int handle)
 
 double TrendLotMultiplierDynamic(const SymbolState &state, ENUM_ORDER_TYPE order_type)
 {
+  double trend_multiplier = state.params.trend_lot_multiplier;
+  if (trend_multiplier <= 0.0)
+    trend_multiplier = 1.0;
+  double semi_multiplier = trend_multiplier * 0.5;
   int desired = (order_type == ORDER_TYPE_BUY) ? 1 : -1;
   int dir_m15 = GetDiDirection(state.adx_m15_handle);
   int dir_h1 = GetDiDirection(state.adx_h1_handle);
@@ -1037,9 +1035,9 @@ double TrendLotMultiplierDynamic(const SymbolState &state, ENUM_ORDER_TYPE order
     return 1.0;
 
   if (match_m15 && match_h1 && match_h4)
-    return 4.0;
+    return trend_multiplier;
   if (match_m15 && match_h1)
-    return 2.0;
+    return semi_multiplier;
   if (match_m15)
   {
     if (opp_h1 || opp_h4)
@@ -1214,7 +1212,7 @@ double EnsureSellTarget(SymbolState &state, const BasketInfo &sell, double step,
   return target;
 }
 
-double LevelStepFactor(const NM1Params &params, int level)
+double LevelStepFactor(const NM2Params &params, int level)
 {
   if (level <= 1)
     return 1.0;
@@ -1306,7 +1304,7 @@ void SendLog(const string message, const string level = "info", const string sou
 
   string src = source;
   if (StringLen(src) == 0)
-    src = (StringLen(ManagementServerUser) > 0 ? ManagementServerUser : "NM1");
+    src = (StringLen(ManagementServerUser) > 0 ? ManagementServerUser : "NM2");
   string payload = StringFormat("{\"message\":\"%s\",\"level\":\"%s\",\"source\":\"%s\"}",
                                 EscapeJson(message), EscapeJson(level), EscapeJson(src));
 
@@ -1656,7 +1654,7 @@ double PriceValuePerUnitCached(const SymbolState &state)
   return state.tick_value / state.tick_size;
 }
 
-bool CanRestart(const NM1Params &params, datetime last_close_time)
+bool CanRestart(const NM2Params &params, datetime last_close_time)
 {
   if (last_close_time == 0)
     return true;
@@ -1720,11 +1718,29 @@ void CloseAllPositionsByMagic(const int magic)
   }
 }
 
-bool CanNanpin(const NM1Params &params, datetime last_nanpin_time)
+bool CanNanpin(const NM2Params &params, datetime last_nanpin_time)
 {
   if (last_nanpin_time == 0)
     return true;
   return (TimeCurrent() - last_nanpin_time) >= params.nanpin_sleep_seconds;
+}
+
+double SpreadPoints(const SymbolState &state, double bid, double ask)
+{
+  double spread = ask - bid;
+  if (spread < 0.0)
+    spread = 0.0;
+  double point = state.point;
+  if (point <= 0.0)
+    point = 0.00001;
+  return spread / point;
+}
+
+bool IsSpreadAllowed(const NM2Params &params, double spread_points)
+{
+  if (params.max_spread_points <= 0.0)
+    return true;
+  return spread_points <= params.max_spread_points;
 }
 
 void ResetBuyTakeProfitTrail(SymbolState &state)
@@ -1838,26 +1854,12 @@ int TimedExitMinutesDynamic(const SymbolState &state,
 
 bool ShouldCloseBuyTakeProfit(const SymbolState &state, const BasketInfo &buy, double bid, double take_profit_distance)
 {
-  if (state.has_partial_buy)
-  {
-    double value_per_unit = PriceValuePerUnitCached(state);
-    double target_profit = buy.volume * take_profit_distance * 0.5 * value_per_unit;
-    if (value_per_unit > 0.0)
-      return (buy.profit + state.realized_buy_profit) >= target_profit;
-  }
   double target = buy.avg_price + take_profit_distance;
   return bid >= target;
 }
 
 bool ShouldCloseSellTakeProfit(const SymbolState &state, const BasketInfo &sell, double ask, double take_profit_distance)
 {
-  if (state.has_partial_sell)
-  {
-    double value_per_unit = PriceValuePerUnitCached(state);
-    double target_profit = sell.volume * take_profit_distance * 0.5 * value_per_unit;
-    if (value_per_unit > 0.0)
-      return (sell.profit + state.realized_sell_profit) >= target_profit;
-  }
   double target = sell.avg_price - take_profit_distance;
   return ask <= target;
 }
@@ -1955,7 +1957,7 @@ void ProcessSymbolTick(SymbolState &state)
   if (!state.enabled)
     return;
   string symbol = state.broker_symbol;
-  NM1Params params = state.params;
+  NM2Params params = state.params;
   BasketInfo buy, sell;
   CollectBasketInfo(state, buy, sell);
   int levels = EffectiveMaxLevelsRuntime(state);
@@ -1968,6 +1970,8 @@ void ProcessSymbolTick(SymbolState &state)
     return;
   double bid = t.bid;
   double ask = t.ask;
+  double spread_points = SpreadPoints(state, bid, ask);
+  bool spread_ok = IsSpreadAllowed(params, spread_points);
   datetime now = TimeCurrent();
   if (state.buy_order_pending)
   {
@@ -2031,7 +2035,7 @@ void ProcessSymbolTick(SymbolState &state)
       if (value_per_unit > 0.0)
       {
         double threshold_profit = buy.volume * threshold_distance * value_per_unit;
-        should_close = (buy.profit + state.realized_buy_profit) >= threshold_profit;
+        should_close = buy.profit >= threshold_profit;
       }
       else
       {
@@ -2046,7 +2050,7 @@ void ProcessSymbolTick(SymbolState &state)
       if (value_per_unit > 0.0)
       {
         double threshold_profit = sell.volume * threshold_distance * value_per_unit;
-        should_close = (sell.profit + state.realized_sell_profit) >= threshold_profit;
+        should_close = sell.profit >= threshold_profit;
       }
       else
       {
@@ -2061,8 +2065,6 @@ void ProcessSymbolTick(SymbolState &state)
   {
     state.last_buy_close_time = TimeCurrent();
     state.last_buy_nanpin_time = 0;
-    state.realized_buy_profit = 0.0;
-    state.has_partial_buy = false;
     ResetBuyTakeProfitTrail(state);
     state.buy_stop_active = false;
     state.buy_skip_levels = 0;
@@ -2077,8 +2079,6 @@ void ProcessSymbolTick(SymbolState &state)
   {
     state.last_sell_close_time = TimeCurrent();
     state.last_sell_nanpin_time = 0;
-    state.realized_sell_profit = 0.0;
-    state.has_partial_sell = false;
     ResetSellTakeProfitTrail(state);
     state.sell_stop_active = false;
     state.sell_skip_levels = 0;
@@ -2166,7 +2166,7 @@ void ProcessSymbolTick(SymbolState &state)
       {
         if (!state.buy_order_pending && allow_entry_buy)
         {
-          opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1), 1);
+          opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, 1), 1);
           if (opened_buy)
           {
             state.buy_order_pending = true;
@@ -2177,7 +2177,7 @@ void ProcessSymbolTick(SymbolState &state)
         }
         if (!state.sell_order_pending && allow_entry_sell)
         {
-          opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1), 1);
+          opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, 1), 1);
           if (opened_sell)
           {
             state.sell_order_pending = true;
@@ -2192,7 +2192,7 @@ void ProcessSymbolTick(SymbolState &state)
         int dir = SelectSingleEntryDirection(state, allow_entry_buy, allow_entry_sell, has_adx, di_plus_now, di_minus_now);
         if (dir > 0 && !state.buy_order_pending)
         {
-          opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1), 1);
+          opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, 1), 1);
           if (opened_buy)
           {
             state.buy_order_pending = true;
@@ -2203,7 +2203,7 @@ void ProcessSymbolTick(SymbolState &state)
         }
         else if (dir < 0 && !state.sell_order_pending)
         {
-          opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1), 1);
+          opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, 1), 1);
           if (opened_sell)
           {
             state.sell_order_pending = true;
@@ -2285,7 +2285,7 @@ void ProcessSymbolTick(SymbolState &state)
   if (params.no_martingale && buy.count > 0 && sell.count > 0)
   {
     int max_level = MathMax(buy.level_count, sell.level_count);
-    double total_profit = (buy.profit + state.realized_buy_profit) + (sell.profit + state.realized_sell_profit);
+    double total_profit = buy.profit + sell.profit;
     if (max_level >= levels && total_profit > 0.0)
     {
       CloseBasket(state, POSITION_TYPE_BUY);
@@ -2388,9 +2388,10 @@ void ProcessSymbolTick(SymbolState &state)
   {
     if (params.enable_hedged_entry)
     {
-      if (buy.count == 0 && !state.buy_order_pending && allow_entry_buy && CanRestart(params, state.last_buy_close_time))
+      if (buy.count == 0 && !state.buy_order_pending && allow_entry_buy && spread_ok
+          && CanRestart(params, state.last_buy_close_time))
       {
-        bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1), 1);
+        bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, 1), 1);
         if (opened_buy)
         {
           state.buy_order_pending = true;
@@ -2399,9 +2400,10 @@ void ProcessSymbolTick(SymbolState &state)
             state.buy_level_price[0] = ask;
         }
       }
-      if (sell.count == 0 && !state.sell_order_pending && allow_entry_sell && CanRestart(params, state.last_sell_close_time))
+      if (sell.count == 0 && !state.sell_order_pending && allow_entry_sell && spread_ok
+          && CanRestart(params, state.last_sell_close_time))
       {
-        bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1), 1);
+        bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, 1), 1);
         if (opened_sell)
         {
           state.sell_order_pending = true;
@@ -2416,9 +2418,9 @@ void ProcessSymbolTick(SymbolState &state)
       bool can_restart_buy = allow_entry_buy && CanRestart(params, state.last_buy_close_time);
       bool can_restart_sell = allow_entry_sell && CanRestart(params, state.last_sell_close_time);
       int dir = SelectSingleEntryDirection(state, can_restart_buy, can_restart_sell, has_adx, di_plus_now, di_minus_now);
-      if (dir > 0)
+      if (dir > 0 && spread_ok)
       {
-        bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1), 1);
+        bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, 1), 1);
         if (opened_buy)
         {
           state.buy_order_pending = true;
@@ -2427,9 +2429,9 @@ void ProcessSymbolTick(SymbolState &state)
             state.buy_level_price[0] = ask;
         }
       }
-      else if (dir < 0)
+      else if (dir < 0 && spread_ok)
       {
-        bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1), 1);
+        bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, 1), 1);
         if (opened_sell)
         {
           state.sell_order_pending = true;
@@ -2534,13 +2536,13 @@ void ProcessSymbolTick(SymbolState &state)
     if (point <= 0.0)
       point = 0.00001;
     double tol = point * 0.5;
-    if (allow_buy_trigger && CanNanpin(params, state.last_buy_nanpin_time) && ask <= target + tol)
+    if (allow_buy_trigger && spread_ok && CanNanpin(params, state.last_buy_nanpin_time) && ask <= target + tol)
     {
       if (!state.buy_order_pending)
       {
         double lot = state.lot_seq[level_index];
         int next_level = level_index + 1;
-        if (TryOpen(state, symbol, ORDER_TYPE_BUY, lot, MakeLevelComment(NM1::kCoreComment, next_level), next_level))
+        if (TryOpen(state, symbol, ORDER_TYPE_BUY, lot, MakeLevelComment(NM2::kCoreComment, next_level), next_level))
         {
           state.buy_order_pending = true;
           state.buy_order_pending_time = now;
@@ -2564,13 +2566,13 @@ void ProcessSymbolTick(SymbolState &state)
     if (point <= 0.0)
       point = 0.00001;
     double tol = point * 0.5;
-    if (allow_sell_trigger && CanNanpin(params, state.last_sell_nanpin_time) && bid >= target - tol)
+    if (allow_sell_trigger && spread_ok && CanNanpin(params, state.last_sell_nanpin_time) && bid >= target - tol)
     {
       if (!state.sell_order_pending)
       {
         double lot = state.lot_seq[level_index];
         int next_level = level_index + 1;
-        if (TryOpen(state, symbol, ORDER_TYPE_SELL, lot, MakeLevelComment(NM1::kCoreComment, next_level), next_level))
+        if (TryOpen(state, symbol, ORDER_TYPE_SELL, lot, MakeLevelComment(NM2::kCoreComment, next_level), next_level))
         {
           state.sell_order_pending = true;
           state.sell_order_pending_time = now;
