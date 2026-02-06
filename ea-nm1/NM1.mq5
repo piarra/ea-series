@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.32"
+#property version   "1.33"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -10,6 +10,7 @@
 // v1.30 トレンド対側はエントリーも禁止
 // v1.31 EA管理サーバー接続用パラメータ追加
 // v1.32 レベル2ロットを倍にするオプション追加
+// v1.33 取引停止時間は新規のみ停止し、ナンピンと利確は継続
 
 #include <Trade/Trade.mqh>
 
@@ -1929,198 +1930,170 @@ void ProcessSymbolTick(SymbolState &state)
     }
   }
 
-  if (is_trading_time)
+  if (is_trading_time && state.initial_started)
   {
-    if (state.initial_started)
+    if (buy.count == 0 && !state.buy_order_pending && allow_entry_buy && CanRestart(params, state.last_buy_close_time))
     {
-      if (buy.count == 0 && !state.buy_order_pending && allow_entry_buy && CanRestart(params, state.last_buy_close_time))
+      bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1), 1);
+      if (opened_buy)
       {
-        bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1), 1);
-        if (opened_buy)
+        state.buy_order_pending = true;
+        state.buy_order_pending_time = now;
+        if (state.buy_level_price[0] <= 0.0)
+          state.buy_level_price[0] = ask;
+      }
+    }
+    if (sell.count == 0 && !state.sell_order_pending && allow_entry_sell && CanRestart(params, state.last_sell_close_time))
+    {
+      bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1), 1);
+      if (opened_sell)
+      {
+        state.sell_order_pending = true;
+        state.sell_order_pending_time = now;
+        if (state.sell_level_price[0] <= 0.0)
+          state.sell_level_price[0] = bid;
+      }
+    }
+  }
+
+  int levels = EffectiveMaxLevelsRuntime(state);
+  if (buy.count > 0)
+  {
+    if (buy_stop)
+    {
+      if (params.strict_nanpin_spacing)
+      {
+        double base_step = state.buy_grid_step > 0.0 ? state.buy_grid_step : grid_step;
+        double step = base_step * LevelStepFactor(params, buy.level_count + 1);
+        if (!state.buy_stop_active)
+        {
+          state.buy_stop_active = true;
+          state.buy_skip_distance = 0.0;
+          state.buy_skip_price = ask;
+        }
+        if (step > 0.0 && state.buy_skip_price > 0.0)
+        {
+          double distance = state.buy_skip_price - ask;
+          if (distance < 0.0)
+            distance = 0.0;
+          state.buy_skip_distance = distance;
+        }
+        state.buy_skip_levels = 0;
+      }
+      else
+      {
+        if (!state.buy_stop_active)
+          state.buy_stop_active = true;
+        state.buy_skip_levels = 0;
+        state.buy_skip_distance = 0.0;
+        state.buy_skip_price = 0.0;
+      }
+    }
+    else
+    {
+      state.buy_stop_active = false;
+      state.buy_skip_price = 0.0;
+      state.buy_skip_levels = 0;
+    }
+  }
+  if (sell.count > 0)
+  {
+    if (sell_stop)
+    {
+      if (params.strict_nanpin_spacing)
+      {
+        double base_step = state.sell_grid_step > 0.0 ? state.sell_grid_step : grid_step;
+        double step = base_step * LevelStepFactor(params, sell.level_count + 1);
+        if (!state.sell_stop_active)
+        {
+          state.sell_stop_active = true;
+          state.sell_skip_distance = 0.0;
+          state.sell_skip_price = bid;
+        }
+        if (step > 0.0 && state.sell_skip_price > 0.0)
+        {
+          double distance = bid - state.sell_skip_price;
+          if (distance < 0.0)
+            distance = 0.0;
+          state.sell_skip_distance = distance;
+        }
+        state.sell_skip_levels = 0;
+      }
+      else
+      {
+        if (!state.sell_stop_active)
+          state.sell_stop_active = true;
+        state.sell_skip_levels = 0;
+        state.sell_skip_distance = 0.0;
+        state.sell_skip_price = 0.0;
+      }
+    }
+    else
+    {
+      state.sell_stop_active = false;
+      state.sell_skip_price = 0.0;
+      state.sell_skip_levels = 0;
+    }
+  }
+
+  if (buy.count > 0 && buy.level_count < levels)
+  {
+    // Buy orders fill at ask, so compare ask to the grid.
+    double step = state.buy_grid_step > 0.0 ? state.buy_grid_step : grid_step;
+    int level_index = buy.level_count;
+    step *= LevelStepFactor(params, level_index + 1);
+    bool apply_min_width = !params.strict_nanpin_spacing;
+    step = AdjustNanpinStep(state.buy_level_price, level_index, step, apply_min_width);
+    double target = 0.0;
+    target = EnsureBuyTarget(state, buy, step, level_index);
+    double point = state.point;
+    if (point <= 0.0)
+      point = 0.00001;
+    double tol = point * 0.5;
+    if (allow_buy_trigger && CanNanpin(params, state.last_buy_nanpin_time) && ask <= target + tol)
+    {
+      if (!state.buy_order_pending)
+      {
+        double lot = state.lot_seq[level_index];
+        int next_level = level_index + 1;
+        if (TryOpen(state, symbol, ORDER_TYPE_BUY, lot, MakeLevelComment(NM1::kCoreComment, next_level), next_level))
         {
           state.buy_order_pending = true;
           state.buy_order_pending_time = now;
-          if (state.buy_level_price[0] <= 0.0)
-            state.buy_level_price[0] = ask;
+          state.last_buy_nanpin_time = now;
         }
       }
-      if (sell.count == 0 && !state.sell_order_pending && allow_entry_sell && CanRestart(params, state.last_sell_close_time))
+    }
+  }
+
+  if (sell.count > 0 && sell.level_count < levels)
+  {
+    // Sell orders fill at bid, so compare bid to the grid.
+    double step = state.sell_grid_step > 0.0 ? state.sell_grid_step : grid_step;
+    int level_index = sell.level_count;
+    step *= LevelStepFactor(params, level_index + 1);
+    bool apply_min_width = !params.strict_nanpin_spacing;
+    step = AdjustNanpinStep(state.sell_level_price, level_index, step, apply_min_width);
+    double target = 0.0;
+    target = EnsureSellTarget(state, sell, step, level_index);
+    double point = state.point;
+    if (point <= 0.0)
+      point = 0.00001;
+    double tol = point * 0.5;
+    if (allow_sell_trigger && CanNanpin(params, state.last_sell_nanpin_time) && bid >= target - tol)
+    {
+      if (!state.sell_order_pending)
       {
-        bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM1::kCoreComment, 1), 1);
-        if (opened_sell)
+        double lot = state.lot_seq[level_index];
+        int next_level = level_index + 1;
+        if (TryOpen(state, symbol, ORDER_TYPE_SELL, lot, MakeLevelComment(NM1::kCoreComment, next_level), next_level))
         {
           state.sell_order_pending = true;
           state.sell_order_pending_time = now;
-          if (state.sell_level_price[0] <= 0.0)
-            state.sell_level_price[0] = bid;
+          state.last_sell_nanpin_time = now;
         }
       }
     }
-
-    int levels = EffectiveMaxLevelsRuntime(state);
-    if (buy.count > 0)
-    {
-      if (buy_stop)
-      {
-        if (params.strict_nanpin_spacing)
-        {
-          double base_step = state.buy_grid_step > 0.0 ? state.buy_grid_step : grid_step;
-          int level_index = buy.level_count + state.buy_skip_levels;
-          double step = base_step * LevelStepFactor(params, level_index + 1);
-          if (!state.buy_stop_active)
-          {
-            state.buy_stop_active = true;
-            state.buy_skip_distance = 0.0;
-            state.buy_skip_price = ask;
-          }
-          if (step > 0.0 && state.buy_skip_price > 0.0)
-          {
-            double distance = state.buy_skip_price - ask;
-            if (distance < 0.0)
-              distance = 0.0;
-            while (distance >= step && (buy.level_count + state.buy_skip_levels) < levels)
-            {
-              distance -= step;
-              state.buy_skip_levels++;
-              state.buy_skip_price -= step;
-              int skipped_index = buy.level_count + state.buy_skip_levels - 1;
-              if (skipped_index >= 0 && skipped_index < NM1::kMaxLevels)
-                EnsureBuyTarget(state, buy, step, skipped_index);
-              level_index = buy.level_count + state.buy_skip_levels;
-              step = base_step * LevelStepFactor(params, level_index + 1);
-            }
-            state.buy_skip_distance = distance;
-          }
-        }
-        else
-        {
-          if (!state.buy_stop_active)
-            state.buy_stop_active = true;
-          state.buy_skip_levels = 0;
-          state.buy_skip_distance = 0.0;
-          state.buy_skip_price = 0.0;
-        }
-      }
-      else
-      {
-        state.buy_stop_active = false;
-        state.buy_skip_price = 0.0;
-        if (!params.strict_nanpin_spacing)
-          state.buy_skip_levels = 0;
-      }
-    }
-    if (sell.count > 0)
-    {
-      if (sell_stop)
-      {
-        if (params.strict_nanpin_spacing)
-        {
-          double base_step = state.sell_grid_step > 0.0 ? state.sell_grid_step : grid_step;
-          int level_index = sell.level_count + state.sell_skip_levels;
-          double step = base_step * LevelStepFactor(params, level_index + 1);
-          if (!state.sell_stop_active)
-          {
-            state.sell_stop_active = true;
-            state.sell_skip_distance = 0.0;
-            state.sell_skip_price = bid;
-          }
-          if (step > 0.0 && state.sell_skip_price > 0.0)
-          {
-            double distance = bid - state.sell_skip_price;
-            if (distance < 0.0)
-              distance = 0.0;
-            while (distance >= step && (sell.level_count + state.sell_skip_levels) < levels)
-            {
-              distance -= step;
-              state.sell_skip_levels++;
-              state.sell_skip_price += step;
-              int skipped_index = sell.level_count + state.sell_skip_levels - 1;
-              if (skipped_index >= 0 && skipped_index < NM1::kMaxLevels)
-                EnsureSellTarget(state, sell, step, skipped_index);
-              level_index = sell.level_count + state.sell_skip_levels;
-              step = base_step * LevelStepFactor(params, level_index + 1);
-            }
-            state.sell_skip_distance = distance;
-          }
-        }
-        else
-        {
-          if (!state.sell_stop_active)
-            state.sell_stop_active = true;
-          state.sell_skip_levels = 0;
-          state.sell_skip_distance = 0.0;
-          state.sell_skip_price = 0.0;
-        }
-      }
-      else
-      {
-        state.sell_stop_active = false;
-        state.sell_skip_price = 0.0;
-        if (!params.strict_nanpin_spacing)
-          state.sell_skip_levels = 0;
-      }
-    }
-
-    if (buy.count > 0 && (buy.level_count + state.buy_skip_levels) < levels)
-    {
-      // Buy orders fill at ask, so compare ask to the grid.
-      double step = state.buy_grid_step > 0.0 ? state.buy_grid_step : grid_step;
-      int level_index = buy.level_count + state.buy_skip_levels;
-      step *= LevelStepFactor(params, level_index + 1);
-      bool apply_min_width = !params.strict_nanpin_spacing || state.buy_skip_levels > 0;
-      step = AdjustNanpinStep(state.buy_level_price, level_index, step, apply_min_width);
-      double target = 0.0;
-      target = EnsureBuyTarget(state, buy, step, level_index);
-      double point = state.point;
-      if (point <= 0.0)
-        point = 0.00001;
-      double tol = point * 0.5;
-      if (allow_buy_trigger && CanNanpin(params, state.last_buy_nanpin_time) && ask <= target + tol)
-      {
-        if (!state.buy_order_pending)
-        {
-          double lot = state.lot_seq[level_index];
-          int next_level = level_index + 1;
-          if (TryOpen(state, symbol, ORDER_TYPE_BUY, lot, MakeLevelComment(NM1::kCoreComment, next_level), next_level))
-          {
-            state.buy_order_pending = true;
-            state.buy_order_pending_time = now;
-            state.last_buy_nanpin_time = now;
-          }
-        }
-      }
-    }
-
-    if (sell.count > 0 && (sell.level_count + state.sell_skip_levels) < levels)
-    {
-      // Sell orders fill at bid, so compare bid to the grid.
-      double step = state.sell_grid_step > 0.0 ? state.sell_grid_step : grid_step;
-      int level_index = sell.level_count + state.sell_skip_levels;
-      step *= LevelStepFactor(params, level_index + 1);
-      bool apply_min_width = !params.strict_nanpin_spacing || state.sell_skip_levels > 0;
-      step = AdjustNanpinStep(state.sell_level_price, level_index, step, apply_min_width);
-      double target = 0.0;
-      target = EnsureSellTarget(state, sell, step, level_index);
-      double point = state.point;
-      if (point <= 0.0)
-        point = 0.00001;
-      double tol = point * 0.5;
-      if (allow_sell_trigger && CanNanpin(params, state.last_sell_nanpin_time) && bid >= target - tol)
-      {
-        if (!state.sell_order_pending)
-        {
-          double lot = state.lot_seq[level_index];
-          int next_level = level_index + 1;
-          if (TryOpen(state, symbol, ORDER_TYPE_SELL, lot, MakeLevelComment(NM1::kCoreComment, next_level), next_level))
-          {
-            state.sell_order_pending = true;
-            state.sell_order_pending_time = now;
-            state.last_sell_nanpin_time = now;
-          }
-        }
-      }
-    }
-
   }
 
   state.prev_buy_count = buy.count;
