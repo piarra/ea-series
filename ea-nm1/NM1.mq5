@@ -56,7 +56,7 @@ input string ManagementServerApiKey = "";
 input string LogServerHost = "ea-logserver.an-hc.workers.dev";
 
 input group "REGIME FILTER"
-input int RegimeOnBars = 3;
+input int RegimeOnBars = 1;
 input int RegimeOffBars = 3;
 input int RegimeCoolingBars = 3;
 input double RegimeAdxOn = 60.0;
