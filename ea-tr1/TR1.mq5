@@ -28,6 +28,15 @@ input double         SwingAtrTpMult = 1.05; // SWING 初期TP = ATR×1.05
 input double         SwingTrailMult = 1.00; // SWING トレーリング距離 = ATR×1.0
 input double         StopAtrMult    = 1.00; // 共通ストップ = ATR×1.0
 input int            ScalpRefillIntervalSec = 1; // SCALP消失後に新ペアを建てるまでの待機秒数
+input bool           EnableSwingPyramiding = true; // 強トレンド時のみ SWING を段階追加
+input int            MaxSwingPositions = 2; // SWING 本数上限（初期=2）
+input double         PyramidTrendStrengthThreshold = 0.25; // abs(fast-slow)/ATR の閾値
+input double         PyramidMinAdvanceAtr = 0.80; // 直近追加価格から必要な進行幅（ATR倍）
+input double         PyramidRiskCapR = 1.50; // 全SWING想定損失の上限（R）
+input double         MaxSpreadAtrRatio = 0.20; // spread/ATR 上限（追加SWING時）
+input double         DailyLossLimitCurrency = 0.0; // 当日損失上限（口座通貨、0で無効）
+input int            CooldownLossStreak = 0; // 連敗でクールダウン発動（0で無効）
+input int            CooldownAfterLossSec = 1800; // 連敗クールダウン秒数
 
 enum TrendDirection
 {
@@ -49,8 +58,7 @@ datetime g_last_refill_time = 0; // SCALP消失後の再エントリー間隔管
 enum OpenPhase
 {
   OPEN_IDLE = 0,   // 何も準備していない
-  OPEN_SWING,      // SWING 建玉を試行中
-  OPEN_SCALP       // SWING 成功後、SCALP を追加予定
+  OPEN_SWING       // SWING 建玉を試行中
 };
 
 OpenPhase g_open_phase = OPEN_IDLE;
@@ -63,6 +71,8 @@ int      g_bar_count = 0;
 double   g_fast_ema = 0, g_slow_ema = 0;
 int      g_trend_history[];
 bool     g_startup_done = false;
+
+double CurrentProfitPoints(int posType, double entryPrice);
 
 // pip換算 (5桁/3桁は10ポイント = 1pip)
 int PipSizeInPoints()
@@ -137,6 +147,71 @@ double SwingTrailPoints()
 double StopLossPoints()
 {
   return AtrPoints() * StopAtrMult;
+}
+
+bool IsScalpTag(const string tag)
+{
+  return (tag == "SCALP");
+}
+
+int SwingTagIndex(const string tag)
+{
+  if (tag == "SWING")
+    return 1; // 旧タグ互換
+
+  if (StringFind(tag, "SWING_") != 0)
+    return 0;
+
+  string suffix = StringSubstr(tag, 6);
+  if (suffix == "")
+    return 0;
+
+  int idx = (int)StringToInteger(suffix);
+  if (idx <= 0)
+    return 0;
+
+  return idx;
+}
+
+bool IsSwingTag(const string tag)
+{
+  return (SwingTagIndex(tag) > 0);
+}
+
+string SwingTagName(const int index)
+{
+  int safeIndex = MathMax(1, index);
+  return "SWING_" + IntegerToString(safeIndex);
+}
+
+TrendDirection PositionTypeToTrend(const int posType)
+{
+  if (posType == POSITION_TYPE_BUY)
+    return TREND_BUY;
+  if (posType == POSITION_TYPE_SELL)
+    return TREND_SELL;
+  return TREND_NONE;
+}
+
+double NormalizeVolumeToStep(double volume)
+{
+  double step   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+  double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+  double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+
+  if (step <= 0.0)
+    step = 0.01;
+  if (minLot <= 0.0)
+    minLot = step;
+  if (maxLot < minLot)
+    maxLot = minLot;
+
+  double clamped = MathMax(minLot, MathMin(maxLot, volume));
+  double units   = MathFloor((clamped - minLot) / step + 0.5);
+  double norm    = minLot + units * step;
+  norm = MathMax(minLot, MathMin(maxLot, norm));
+
+  return NormalizeDouble(norm, VolumeDigits());
 }
 
 // ポジションをインデックスで選択（PositionSelectByIndex が使えない環境向けフォールバック）
@@ -462,21 +537,304 @@ int CountPositionsByTag(const string tag)
   return count;
 }
 
-bool OpenSingle(const string tag, TrendDirection dir)
+int CountSwingPositions()
+{
+  int total = PositionsTotal();
+  int count = 0;
+  for (int i = 0; i < total; i++)
+  {
+    if (!SelectPositionByIndex(i))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+      continue;
+    if (!IsSwingTag(PositionGetString(POSITION_COMMENT)))
+      continue;
+    count++;
+  }
+  return count;
+}
+
+TrendDirection ActivePositionDirection(bool &mixed)
+{
+  mixed = false;
+  TrendDirection dir = TREND_NONE;
+
+  int total = PositionsTotal();
+  for (int i = 0; i < total; i++)
+  {
+    if (!SelectPositionByIndex(i))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+      continue;
+
+    TrendDirection cur = PositionTypeToTrend((int)PositionGetInteger(POSITION_TYPE));
+    if (cur == TREND_NONE)
+      continue;
+
+    if (dir == TREND_NONE)
+      dir = cur;
+    else if (dir != cur)
+    {
+      mixed = true;
+      return TREND_NONE;
+    }
+  }
+
+  return dir;
+}
+
+TrendDirection ActiveSwingDirection(bool &mixed)
+{
+  mixed = false;
+  TrendDirection dir = TREND_NONE;
+
+  int total = PositionsTotal();
+  for (int i = 0; i < total; i++)
+  {
+    if (!SelectPositionByIndex(i))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+      continue;
+
+    string tag = PositionGetString(POSITION_COMMENT);
+    if (!IsSwingTag(tag))
+      continue;
+
+    TrendDirection cur = PositionTypeToTrend((int)PositionGetInteger(POSITION_TYPE));
+    if (cur == TREND_NONE)
+      continue;
+
+    if (dir == TREND_NONE)
+      dir = cur;
+    else if (dir != cur)
+    {
+      mixed = true;
+      return TREND_NONE;
+    }
+  }
+
+  return dir;
+}
+
+double TrendStrengthRatio()
+{
+  if (g_tr_atr <= 0.0)
+    return 0.0;
+
+  return MathAbs(g_fast_ema - g_slow_ema) / g_tr_atr;
+}
+
+double CurrentSwingRiskR()
+{
+  double stopLossPts = StopLossPoints();
+  double baseLot     = NormalizeVolumeToStep(BaseLot);
+  if (stopLossPts <= 0.0 || baseLot <= 0.0)
+    return 0.0;
+
+  double totalRisk = 0.0;
+  int total = PositionsTotal();
+  for (int i = 0; i < total; i++)
+  {
+    if (!SelectPositionByIndex(i))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+      continue;
+
+    string tag = PositionGetString(POSITION_COMMENT);
+    if (!IsSwingTag(tag))
+      continue;
+
+    int    posType = (int)PositionGetInteger(POSITION_TYPE);
+    double entry   = PositionGetDouble(POSITION_PRICE_OPEN);
+    double sl      = PositionGetDouble(POSITION_SL);
+    double volume  = PositionGetDouble(POSITION_VOLUME);
+
+    double riskPts = stopLossPts;
+    if (sl > 0.0)
+    {
+      if (posType == POSITION_TYPE_BUY)
+        riskPts = (entry - sl) / _Point;
+      else
+        riskPts = (sl - entry) / _Point;
+    }
+    if (riskPts < 0.0)
+      riskPts = 0.0;
+
+    totalRisk += riskPts * volume;
+  }
+
+  return totalRisk / (stopLossPts * baseLot);
+}
+
+double ProjectedSwingRiskR(double addLot)
+{
+  double baseLot = NormalizeVolumeToStep(BaseLot);
+  if (baseLot <= 0.0)
+    return CurrentSwingRiskR();
+
+  double addNormLot = NormalizeVolumeToStep(addLot);
+  return CurrentSwingRiskR() + (addNormLot / baseLot);
+}
+
+double MaxSwingProfitPoints()
+{
+  bool found = false;
+  double maxProfit = 0.0;
+  int total = PositionsTotal();
+
+  for (int i = 0; i < total; i++)
+  {
+    if (!SelectPositionByIndex(i))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+      continue;
+
+    string tag = PositionGetString(POSITION_COMMENT);
+    if (!IsSwingTag(tag))
+      continue;
+
+    int    posType = (int)PositionGetInteger(POSITION_TYPE);
+    double entry   = PositionGetDouble(POSITION_PRICE_OPEN);
+    double profit  = CurrentProfitPoints(posType, entry);
+
+    if (!found || profit > maxProfit)
+    {
+      maxProfit = profit;
+      found = true;
+    }
+  }
+
+  if (!found)
+    return 0.0;
+  return maxProfit;
+}
+
+double LatestSwingEntryPrice()
+{
+  long latestTime = 0;
+  double latestEntry = 0.0;
+  int total = PositionsTotal();
+
+  for (int i = 0; i < total; i++)
+  {
+    if (!SelectPositionByIndex(i))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+      continue;
+
+    string tag = PositionGetString(POSITION_COMMENT);
+    if (!IsSwingTag(tag))
+      continue;
+
+    long opened = (long)PositionGetInteger(POSITION_TIME_MSC);
+    if (opened >= latestTime)
+    {
+      latestTime = opened;
+      latestEntry = PositionGetDouble(POSITION_PRICE_OPEN);
+    }
+  }
+
+  return latestEntry;
+}
+
+int NextSwingTagIndex()
+{
+  int maxIndex = 0;
+  int total = PositionsTotal();
+
+  for (int i = 0; i < total; i++)
+  {
+    if (!SelectPositionByIndex(i))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+      continue;
+
+    int idx = SwingTagIndex(PositionGetString(POSITION_COMMENT));
+    if (idx > maxIndex)
+      maxIndex = idx;
+  }
+
+  return MathMax(1, maxIndex + 1);
+}
+
+void CalcInitialSwingStops(const TrendDirection dir, double &sl, double &tp)
+{
+  sl = 0.0;
+  tp = 0.0;
+
+  double stopPts = StopLossPoints();
+  double tpPts   = SwingTakeProfitPoints();
+  if (stopPts <= 0.0 && tpPts <= 0.0)
+    return;
+
+  if (dir == TREND_BUY)
+  {
+    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    if (stopPts > 0.0)
+      sl = ask - stopPts * _Point;
+    if (tpPts > 0.0)
+      tp = ask + tpPts * _Point;
+  }
+  else if (dir == TREND_SELL)
+  {
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    if (stopPts > 0.0)
+      sl = bid + stopPts * _Point;
+    if (tpPts > 0.0)
+      tp = bid - tpPts * _Point;
+  }
+}
+
+bool OpenSingleEx(const string tag, TrendDirection dir, double lot, double sl, double tp)
 {
   if (!TradeRequestAllowed())
     return false;
 
+  if (dir != TREND_BUY && dir != TREND_SELL)
+    return false;
+
   ENUM_ORDER_TYPE type = (dir == TREND_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-  double lot = NormalizeDouble(BaseLot, VolumeDigits());
+  double normLot = NormalizeVolumeToStep(lot);
+  if (normLot <= 0.0)
+    return false;
+
+  double reqSL = (sl > 0.0) ? NormalizeDouble(sl, _Digits) : 0.0;
+  double reqTP = (tp > 0.0) ? NormalizeDouble(tp, _Digits) : 0.0;
 
   trade.SetExpertMagicNumber(MagicNumber);
   trade.SetDeviationInPoints(SlippagePoints);
 
-  bool ok = trade.PositionOpen(_Symbol, type, lot, 0, 0, 0, tag);
+  bool ok = trade.PositionOpen(_Symbol, type, normLot, 0, reqSL, reqTP, tag);
 
   MarkTradeRequest();
   return ok;
+}
+
+bool OpenSingle(const string tag, TrendDirection dir)
+{
+  return OpenSingleEx(tag, dir, BaseLot, 0.0, 0.0);
+}
+
+bool OpenSwingLeg(const int index, const TrendDirection dir, const double lot)
+{
+  double sl = 0.0;
+  double tp = 0.0;
+  CalcInitialSwingStops(dir, sl, tp);
+  return OpenSingleEx(SwingTagName(index), dir, lot, sl, tp);
 }
 
 void ProcessEntryEngine()
@@ -512,6 +870,9 @@ void ProcessEntryEngine()
       return;
 
     g_open_dir = DetectTrend();
+    if (g_open_dir == TREND_NONE)
+      return;
+
     g_last_open_attempt = TimeCurrent();
     // 先にSCALPを建て、次tickでSWINGを建てる（1tick=1OrderSendを維持）
     if (OpenSingle("SCALP", g_open_dir))
@@ -535,7 +896,15 @@ void ProcessEntryEngine()
       return;
     }
 
-    if (OpenSingle("SWING", g_open_dir))
+    // 初動SWINGは 1 本のみ
+    if (CountSwingPositions() > 0)
+    {
+      g_open_phase = OPEN_IDLE;
+      g_open_dir = TREND_NONE;
+      return;
+    }
+
+    if (OpenSwingLeg(1, g_open_dir, BaseLot))
     {
       g_open_phase = OPEN_IDLE;
       g_open_dir = TREND_NONE;
@@ -544,7 +913,7 @@ void ProcessEntryEngine()
   }
 }
 
-// SCALPがなくなったら新しいSWING+SCALPを同時に建てる
+// SCALPがなくなったら SCALP のみ補充する（SWING追加は別経路）
 void StartPairIfScalpMissing()
 {
   if (g_action_used_this_tick)
@@ -554,7 +923,7 @@ void StartPairIfScalpMissing()
   if (g_open_phase != OPEN_IDLE)
     return;
 
-  int swing = CountPositionsByTag("SWING");
+  int swing = CountSwingPositions();
   int scalp = CountPositionsByTag("SCALP");
 
   if (swing == 0)
@@ -577,14 +946,168 @@ void StartPairIfScalpMissing()
   if (g_bar_count == 0)
     return; // トレンド判定不可
 
-  TrendDirection dir = DetectTrend();
-  g_last_refill_time = TimeCurrent();
-  // 1tick=1action を守るため、まずSCALPのみ建て、次tickでSWINGを建てる
+  bool mixedSwingDir = false;
+  TrendDirection dir = ActiveSwingDirection(mixedSwingDir);
+  if (mixedSwingDir || dir == TREND_NONE)
+    return;
+
   if (OpenSingle("SCALP", dir))
+    g_last_refill_time = TimeCurrent();
+}
+
+bool EnsurePositionConsistency()
+{
+  int swingLimit = EnableSwingPyramiding ? MathMax(1, MaxSwingPositions) : 1;
+  int swingCount = 0;
+  int scalpCount = 0;
+
+  long mixedDirTicket  = 0;
+  long unknownTagTicket = 0;
+  long extraScalpTicket = 0;
+  long extraSwingTicket = 0;
+  long orphanScalpTicket = 0;
+
+  TrendDirection firstDir = TREND_NONE;
+  int total = PositionsTotal();
+
+  for (int i = total - 1; i >= 0; --i)
   {
-    g_open_phase = OPEN_SWING;
-    g_open_dir = dir;
+    if (!SelectPositionByIndex(i))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+      continue;
+
+    long ticket = PositionGetInteger(POSITION_TICKET);
+    int posType = (int)PositionGetInteger(POSITION_TYPE);
+    TrendDirection dir = PositionTypeToTrend(posType);
+    if (firstDir == TREND_NONE)
+      firstDir = dir;
+    else if (dir != TREND_NONE && dir != firstDir && mixedDirTicket == 0)
+      mixedDirTicket = ticket;
+
+    string tag = PositionGetString(POSITION_COMMENT);
+    if (IsScalpTag(tag))
+    {
+      scalpCount++;
+      if (orphanScalpTicket == 0)
+        orphanScalpTicket = ticket;
+      if (scalpCount > 1 && extraScalpTicket == 0)
+        extraScalpTicket = ticket;
+      continue;
+    }
+
+    if (IsSwingTag(tag))
+    {
+      swingCount++;
+      if (swingCount > swingLimit && extraSwingTicket == 0)
+        extraSwingTicket = ticket;
+      continue;
+    }
+
+    if (unknownTagTicket == 0)
+      unknownTagTicket = ticket;
   }
+
+  if (g_open_phase == OPEN_SWING && scalpCount == 0)
+  {
+    g_open_phase = OPEN_IDLE;
+    g_open_dir = TREND_NONE;
+  }
+
+  long fixTicket = 0;
+  string reason = "";
+
+  if (mixedDirTicket != 0)
+  {
+    fixTicket = mixedDirTicket;
+    reason = "mixed direction";
+  }
+  else if (unknownTagTicket != 0)
+  {
+    fixTicket = unknownTagTicket;
+    reason = "unknown tag";
+  }
+  else if (extraScalpTicket != 0)
+  {
+    fixTicket = extraScalpTicket;
+    reason = "extra SCALP";
+  }
+  else if (extraSwingTicket != 0)
+  {
+    fixTicket = extraSwingTicket;
+    reason = "extra SWING";
+  }
+  else if (g_open_phase != OPEN_SWING && swingCount == 0 && scalpCount > 0 && orphanScalpTicket != 0)
+  {
+    fixTicket = orphanScalpTicket;
+    reason = "orphan SCALP";
+  }
+
+  if (fixTicket == 0)
+    return true;
+
+  if (EnableInfoLog)
+    PrintFormat("%s: restore consistency (%s) ticket=%I64d", __FUNCTION__, reason, fixTicket);
+
+  if (!g_action_used_this_tick)
+    ClosePositionByTicket(fixTicket);
+
+  return false;
+}
+
+bool HandleTrendReversal()
+{
+  if (g_action_used_this_tick)
+    return false;
+
+  bool mixed = false;
+  TrendDirection posDir = ActivePositionDirection(mixed);
+  if (mixed || posDir == TREND_NONE)
+    return false;
+
+  TrendDirection trend = DetectTrend();
+  if (trend == TREND_NONE || trend == posDir)
+    return false;
+
+  long ticketToClose = 0;
+  int total = PositionsTotal();
+  for (int i = total - 1; i >= 0; --i)
+  {
+    if (!SelectPositionByIndex(i))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+      continue;
+
+    long ticket = PositionGetInteger(POSITION_TICKET);
+    string tag = PositionGetString(POSITION_COMMENT);
+
+    if (IsSwingTag(tag))
+    {
+      ticketToClose = ticket; // 反転時はSWING優先で解消
+      break;
+    }
+
+    if (ticketToClose == 0)
+      ticketToClose = ticket;
+  }
+
+  if (ticketToClose == 0)
+    return false;
+
+  if (EnableInfoLog)
+    PrintFormat("%s: reversal trend=%d pos=%d close=%I64d", __FUNCTION__, trend, posDir, ticketToClose);
+
+  bool ok = ClosePositionByTicket(ticketToClose);
+  if (ok)
+  {
+    g_open_phase = OPEN_IDLE;
+    g_open_dir = TREND_NONE;
+  }
+  return ok;
 }
 
 bool SpreadTooWide()
@@ -612,7 +1135,180 @@ double CurrentProfitPoints(int posType, double entryPrice)
     return (entryPrice - ask) / _Point;
 }
 
-// 2本構成（SWING/SCALP）のポジション管理
+double SpreadAtrRatio()
+{
+  double atrPts = AtrPoints();
+  if (atrPts <= 0.0)
+    return 0.0;
+  return CurrentSpreadPoints() / atrPts;
+}
+
+bool SpreadAtrTooWide()
+{
+  if (MaxSpreadAtrRatio <= 0.0)
+    return false;
+  return (SpreadAtrRatio() > MaxSpreadAtrRatio);
+}
+
+double ClosedProfitToday()
+{
+  datetime now = TimeCurrent();
+  datetime dayStart = StringToTime(TimeToString(now, TIME_DATE));
+  if (!HistorySelect(dayStart, now))
+    return 0.0;
+
+  double totalProfit = 0.0;
+  int deals = HistoryDealsTotal();
+  for (int i = 0; i < deals; ++i)
+  {
+    ulong deal = HistoryDealGetTicket(i);
+    if (deal == 0)
+      continue;
+    if ((int)HistoryDealGetInteger(deal, DEAL_MAGIC) != MagicNumber)
+      continue;
+    if (HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol)
+      continue;
+    if ((int)HistoryDealGetInteger(deal, DEAL_ENTRY) != DEAL_ENTRY_OUT)
+      continue;
+
+    double profit = HistoryDealGetDouble(deal, DEAL_PROFIT)
+                  + HistoryDealGetDouble(deal, DEAL_SWAP)
+                  + HistoryDealGetDouble(deal, DEAL_COMMISSION);
+    totalProfit += profit;
+  }
+
+  return totalProfit;
+}
+
+int ConsecutiveLossesToday(datetime &lastLossTime)
+{
+  lastLossTime = 0;
+  const double pnlEps = 1e-8;
+
+  datetime now = TimeCurrent();
+  datetime dayStart = StringToTime(TimeToString(now, TIME_DATE));
+  if (!HistorySelect(dayStart, now))
+    return 0;
+
+  int streak = 0;
+  for (int i = HistoryDealsTotal() - 1; i >= 0; --i)
+  {
+    ulong deal = HistoryDealGetTicket(i);
+    if (deal == 0)
+      continue;
+    if ((int)HistoryDealGetInteger(deal, DEAL_MAGIC) != MagicNumber)
+      continue;
+    if (HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol)
+      continue;
+    if ((int)HistoryDealGetInteger(deal, DEAL_ENTRY) != DEAL_ENTRY_OUT)
+      continue;
+
+    double profit = HistoryDealGetDouble(deal, DEAL_PROFIT)
+                  + HistoryDealGetDouble(deal, DEAL_SWAP)
+                  + HistoryDealGetDouble(deal, DEAL_COMMISSION);
+
+    if (profit < -pnlEps)
+    {
+      streak++;
+      if (lastLossTime == 0)
+        lastLossTime = (datetime)HistoryDealGetInteger(deal, DEAL_TIME);
+      continue;
+    }
+
+    if (profit > pnlEps)
+      break;
+  }
+
+  return streak;
+}
+
+bool LossCooldownActive()
+{
+  if (CooldownLossStreak <= 0 || CooldownAfterLossSec <= 0)
+    return false;
+
+  datetime lastLossTime = 0;
+  int streak = ConsecutiveLossesToday(lastLossTime);
+  if (streak < CooldownLossStreak || lastLossTime == 0)
+    return false;
+
+  return ((TimeCurrent() - lastLossTime) < CooldownAfterLossSec);
+}
+
+bool DailyLossLimitActive()
+{
+  if (DailyLossLimitCurrency <= 0.0)
+    return false;
+
+  double dayProfit = ClosedProfitToday();
+  return (dayProfit <= -MathAbs(DailyLossLimitCurrency));
+}
+
+void TryAddSwingPyramid()
+{
+  if (!EnableSwingPyramiding)
+    return;
+  if (g_action_used_this_tick)
+    return;
+  if (g_open_phase != OPEN_IDLE)
+    return;
+
+  int swingLimit = MathMax(1, MaxSwingPositions);
+  int swingCount = CountSwingPositions();
+  if (swingCount <= 0 || swingCount >= swingLimit)
+    return;
+
+  if (AtrPoints() <= 0.0)
+    return;
+  if (SpreadTooWide() || SpreadAtrTooWide())
+    return;
+  if (LossCooldownActive() || DailyLossLimitActive())
+    return;
+
+  bool mixedSwingDir = false;
+  TrendDirection swingDir = ActiveSwingDirection(mixedSwingDir);
+  if (mixedSwingDir || swingDir == TREND_NONE)
+    return;
+
+  TrendDirection trend = DetectTrend();
+  if (trend != swingDir) // 逆行シグナル時は追加禁止
+    return;
+
+  double stopLossPts = StopLossPoints();
+  if (stopLossPts <= 0.0)
+    return;
+
+  // 既存SWINGに +1R 以上の含み益があること
+  if (MaxSwingProfitPoints() < stopLossPts)
+    return;
+
+  double latestEntry = LatestSwingEntryPrice();
+  if (latestEntry <= 0.0)
+    return;
+
+  double refPrice = (swingDir == TREND_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                                            : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+  double advancedPts = (swingDir == TREND_BUY) ? (refPrice - latestEntry) / _Point
+                                               : (latestEntry - refPrice) / _Point;
+  double requiredAdvancePts = AtrPoints() * PyramidMinAdvanceAtr;
+  if (advancedPts < requiredAdvancePts)
+    return;
+
+  if (TrendStrengthRatio() < PyramidTrendStrengthThreshold)
+    return;
+
+  double projectedRiskR = ProjectedSwingRiskR(BaseLot);
+  if (projectedRiskR > PyramidRiskCapR)
+    return;
+
+  int nextIndex = NextSwingTagIndex();
+  if (nextIndex > swingLimit)
+    return;
+
+  OpenSwingLeg(nextIndex, swingDir, BaseLot);
+}
+
+// SCALP + SWING 群のポジション管理
 void ManageOpenPositions()
 {
   int total = PositionsTotal();
@@ -650,7 +1346,7 @@ void ManageOpenPositions()
       continue;
     }
 
-    if (tag == "SCALP")
+    if (IsScalpTag(tag))
     {
       if (scalpTpPts > 0 && profitPt >= scalpTpPts)
       {
@@ -659,7 +1355,7 @@ void ManageOpenPositions()
       continue;
     }
 
-    if (tag == "SWING")
+    if (IsSwingTag(tag))
     {
       double curSL = PositionGetDouble(POSITION_SL);
       double curTP = PositionGetDouble(POSITION_TP);
@@ -846,8 +1542,19 @@ void OnTick()
     TryStartupEntry();
   }
 
-  // オープン系は順番に試し、どれかがリクエストを使ったら残りはスキップされる
+  // まず整合性を確認し、不整合時は復旧を優先
+  if (!EnsurePositionConsistency())
+    return;
+
+  // 反転時は既存ポジションを即時解消（1tick=1actionで順次）
+  HandleTrendReversal();
+
+  // ポジション管理と追加エントリー（いずれも1tick=1action制約の下で動作）
   ManageOpenPositions();
+  if (!EnsurePositionConsistency())
+    return;
+
+  TryAddSwingPyramid();
   StartPairIfScalpMissing();
   ProcessEntryEngine();
 }
