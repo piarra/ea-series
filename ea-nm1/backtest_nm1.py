@@ -1141,17 +1141,12 @@ def process_tick(
                 distance = state.buy_skip_price - ask
                 if distance < 0.0:
                     distance = 0.0
-                while distance >= step and (buy.level_count + state.buy_skip_levels) < levels:
-                    distance -= step
-                    state.buy_skip_levels += 1
-                    state.buy_skip_price -= step
-                    skipped_index = buy.level_count + state.buy_skip_levels - 1
-                    if 0 <= skipped_index < K_MAX_LEVELS:
-                        ensure_buy_target(state, buy, step, skipped_index)
                 state.buy_skip_distance = distance
+            state.buy_skip_levels = 0
         else:
             state.buy_stop_active = False
             state.buy_skip_price = 0.0
+            state.buy_skip_levels = 0
 
     if sell.count > 0:
         if sell_stop:
@@ -1164,25 +1159,20 @@ def process_tick(
                 distance = bid - state.sell_skip_price
                 if distance < 0.0:
                     distance = 0.0
-                while distance >= step and (sell.level_count + state.sell_skip_levels) < levels:
-                    distance -= step
-                    state.sell_skip_levels += 1
-                    state.sell_skip_price += step
-                    skipped_index = sell.level_count + state.sell_skip_levels - 1
-                    if 0 <= skipped_index < K_MAX_LEVELS:
-                        ensure_sell_target(state, sell, step, skipped_index)
                 state.sell_skip_distance = distance
+            state.sell_skip_levels = 0
         else:
             state.sell_stop_active = False
             state.sell_skip_price = 0.0
+            state.sell_skip_levels = 0
 
     point = infer_point(bid, state.symbol, params.price_scale)
     tol = point * 0.5
 
-    if buy.count > 0 and (buy.level_count + state.buy_skip_levels) < levels:
+    if buy.count > 0 and buy.level_count < levels:
         step = state.buy_grid_step if state.buy_grid_step > 0.0 else grid_step
-        level_index = buy.level_count + state.buy_skip_levels
-        step = adjust_nanpin_step(state.buy_level_price, level_index, step, state.buy_skip_levels)
+        level_index = buy.level_count
+        step = adjust_nanpin_step(state.buy_level_price, level_index, step, 0)
         target = ensure_buy_target(state, buy, step, level_index)
         if allow_nanpin_buy and can_nanpin(state.last_buy_nanpin_time, tick_time, params.nanpin_sleep_seconds):
             if ask <= target + tol:
@@ -1230,10 +1220,10 @@ def process_tick(
                     )
                     state.last_buy_nanpin_time = tick_time
 
-    if sell.count > 0 and (sell.level_count + state.sell_skip_levels) < levels:
+    if sell.count > 0 and sell.level_count < levels:
         step = state.sell_grid_step if state.sell_grid_step > 0.0 else grid_step
-        level_index = sell.level_count + state.sell_skip_levels
-        step = adjust_nanpin_step(state.sell_level_price, level_index, step, state.sell_skip_levels)
+        level_index = sell.level_count
+        step = adjust_nanpin_step(state.sell_level_price, level_index, step, 0)
         target = ensure_sell_target(state, sell, step, level_index)
         if allow_nanpin_sell and can_nanpin(state.last_sell_nanpin_time, tick_time, params.nanpin_sleep_seconds):
             if bid >= target - tol:
