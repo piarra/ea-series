@@ -1,6 +1,6 @@
 # TR1 アルゴリズム詳細
 
-- **タイプ**: トレンドフォロー／ヘッジ口座向け。BUY / SELL の単方向ペア（SWING + SCALP）のみを同時保有。
+- **タイプ**: トレンドフォロー／ヘッジ口座向け。BUY / SELL の単方向運用（`SCALP<=1`、`SWING<=MaxSwingPositions`）。
 - **内部時間足**: `SyntheticBarSec` 秒（初期 10 秒）でオンメモリ生成するバーチャートを使用。各バーは Bid 価格から高値/安値/終値を更新し、スロットが進んだタイミングで確定する。
 - **トレンド判定**: バー確定ごとに FastEMA / SlowEMA（デフォルト 20 / 50）を終値で更新し、`fast >= slow` → BUY、`fast < slow` → SELL。最新バーの方向をそのまま採用（ヒストリ平均などは未使用）。
 - **ボラ計測**: 確定した内部バーで TR を計算し、`AtrPeriod`（初期 20）の EMA 平滑で ATR を保持。価格単位 → ポイント換算して各種閾値に利用。
@@ -8,8 +8,9 @@
 ## エントリー
 - **起動後の待機条件**: `EnterOnInit=true` かつ ATR が正、内部バー本数が `max(FastEmaPeriod, SlowEmaPeriod, ConfirmBarsStartup)`（初期 50 本）に達してからエントリーエンジンを有効化。
 - **共通ゲート**: スプレッドが `MaxSpreadPoints`（初期 40pt）以下、ATR>0、`MinTradeIntervalMs`（初期 300ms）を満たし、1 tick で 1 アクションのみ実行。クローズ直後は 1 秒クールダウン、新規ペア開始試行後は 2 秒ロック。
-- **初動ペア生成（ノーポジ時）**: 検知したトレンド方向で 1 tick 目に `SCALP` を建て、次の tick で `SWING` を建てる（同ロット `BaseLot` をシンボルのボリューム桁に正規化）。いずれか失敗時はフェーズをリセット。
-- **SCALP 再補充**: `SWING` が残り `SCALP` が消失した場合、`ScalpRefillIntervalSec`（初期 1 秒）経過後に最新トレンド方向で再び `SCALP` → 次 tick で `SWING` を建て直し、常に 2 本構成を維持。
+- **初動ペア生成（ノーポジ時）**: 検知したトレンド方向で 1 tick 目に `SCALP`、次 tick で `SWING_1` を建てる（`SWING` は初期SL/TPを同時設定）。
+- **SCALP 再補充**: `SWING` が残り `SCALP` が消失した場合、`ScalpRefillIntervalSec` 経過後に `SCALP` のみ補充する（補充経路では `SWING` を増やさない）。
+- **条件付きSWING追加（Phase 1.5）**: `EnableSwingPyramiding=true` 時のみ `SWING_2...` を段階追加。必須条件は `+1R` 含み益、`0.8ATR` 進行、`abs(fast-slow)/ATR` 閾値、`総SWINGリスク<=1.5R`。
 
 ## 決済ロジック
 - **共通ストップ**: 含み損が `ATR × StopAtrMult`（初期 1.0）に達したポジションは成行クローズ。
@@ -21,7 +22,8 @@
   - SL/TP 変更はフリーズレベル/ストップレベルを事前チェックし、要変更時のみ `OrderSend(TRADE_ACTION_SLTP)` で発行。
 
 ## 補足・制約
-- MagicNumber とシンボル一致を確認して自 EA のポジションだけを操作。コメントは `SCALP` / `SWING` を使用。
-- エントリー判定は常に最新の内部バー方向のみで、トレンド反転時の即時全決済・反転エントリーといったロジックは実装されていない。
+- MagicNumber とシンボル一致を確認して自 EA のポジションだけを操作。コメントは `SCALP` / `SWING_1..N`（旧 `SWING` も互換扱い）。
+- エントリー前に整合性チェックを実施し、不整合（方向混在・過剰本数・未知タグ・孤立SCALP）は復旧を優先して新規を停止。
+- トレンド反転シグナル時は既存ポジションを即時解消方針（1tick=1actionで順次クローズ）。
 - スプレッドが上限を超える場合は新規エントリーを行わない。決済系はスプレッドに依存せず実行。
-- 各 tick 冒頭でポジション管理 → SCALP 再補充 → エントリーの順に実行し、1 tick で複数 OrderSend を行わない設計。
+- 各 tick で `整合性チェック → 反転対応 → ポジション管理 → 条件付きSWING追加 → SCALP補充 → 新規ペア` の順で処理し、1 tick で複数 OrderSend を行わない設計。
