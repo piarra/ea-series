@@ -73,7 +73,7 @@ input double TrailingTakeProfitDistanceRatio = 0.45;
 input int AdxPeriod = 14;
 input double AdxMaxForNanpin = 20.0;
 input double DiGapMin = 2.0;
-input double MaxSpreadPoints = 0.0;
+input double MaxSpreadPoints = 400.0;
 
 input group "MANAGEMENT SERVER"
 input string ManagementServerHost = "";
@@ -103,7 +103,6 @@ input double AtrMultiplierXAUUSD = 1.2;
 input double NanpinLevelRatioXAUUSD = 1.1;
 input bool StrictNanpinSpacingXAUUSD = true;
 input double MinAtrXAUUSD = 1.6;
-input double ProfitBaseXAUUSD = 1.0;
 input int MaxLevelsXAUUSD = 4;
 input bool NoMartingaleXAUUSD = false;
 input bool DoubleSecondLotXAUUSD = false;
@@ -116,7 +115,6 @@ input double AtrMultiplierEURUSD = 3.0;
 input double NanpinLevelRatioEURUSD = 1.1;
 input bool StrictNanpinSpacingEURUSD = true;
 input double MinAtrEURUSD = 0.00050;
-input double ProfitBaseEURUSD = 0.00010;
 input int MaxLevelsEURUSD = 4;
 input bool NoMartingaleEURUSD = false;
 input bool DoubleSecondLotEURUSD = false;
@@ -129,7 +127,6 @@ input double AtrMultiplierUSDJPY = 3.0;
 input double NanpinLevelRatioUSDJPY = 1.1;
 input bool StrictNanpinSpacingUSDJPY = true;
 input double MinAtrUSDJPY = 0.05;
-input double ProfitBaseUSDJPY = 0.01;
 input int MaxLevelsUSDJPY = 4;
 input bool NoMartingaleUSDJPY = false;
 input bool DoubleSecondLotUSDJPY = false;
@@ -142,7 +139,6 @@ input double AtrMultiplierAUDUSD = 1.2;
 input double NanpinLevelRatioAUDUSD = 1.1;
 input bool StrictNanpinSpacingAUDUSD = true;
 input double MinAtrAUDUSD = 0.00015;
-input double ProfitBaseAUDUSD = 1.0;
 input int MaxLevelsAUDUSD = 4;
 input bool NoMartingaleAUDUSD = false;
 input bool DoubleSecondLotAUDUSD = false;
@@ -155,7 +151,6 @@ input double AtrMultiplierBTCUSD = 2.5;
 input double NanpinLevelRatioBTCUSD = 1.1;
 input bool StrictNanpinSpacingBTCUSD = true;
 input double MinAtrBTCUSD = 10.0;
-input double ProfitBaseBTCUSD = 4.0;
 input int MaxLevelsBTCUSD = 4;
 input bool NoMartingaleBTCUSD = true;
 input bool DoubleSecondLotBTCUSD = false;
@@ -168,7 +163,6 @@ input double AtrMultiplierETHUSD = 1.6;
 input double NanpinLevelRatioETHUSD = 1.1;
 input bool StrictNanpinSpacingETHUSD = true;
 input double MinAtrETHUSD = 1.2;
-input double ProfitBaseETHUSD = 1.0;
 input int MaxLevelsETHUSD = 4;
 input bool NoMartingaleETHUSD = false;
 input bool DoubleSecondLotETHUSD = false;
@@ -186,7 +180,6 @@ struct NM2Params
   double safe_k;
   double safe_slope_k;
   double base_lot;
-  double profit_base;
   double take_profit_atr_multiplier;
   bool trailing_take_profit;
   double trailing_take_profit_distance_ratio;
@@ -588,7 +581,6 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.strict_nanpin_spacing = StrictNanpinSpacingXAUUSD;
     params.min_atr = MinAtrXAUUSD;
     params.base_lot = BaseLotXAUUSD;
-    params.profit_base = ProfitBaseXAUUSD;
     params.max_levels = MaxLevelsXAUUSD;
     params.no_martingale = NoMartingaleXAUUSD;
     params.double_second_lot = DoubleSecondLotXAUUSD;
@@ -600,7 +592,6 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.strict_nanpin_spacing = StrictNanpinSpacingEURUSD;
     params.min_atr = MinAtrEURUSD;
     params.base_lot = BaseLotEURUSD;
-    params.profit_base = ProfitBaseEURUSD;
     params.max_levels = MaxLevelsEURUSD;
     params.no_martingale = NoMartingaleEURUSD;
     params.double_second_lot = DoubleSecondLotEURUSD;
@@ -612,7 +603,6 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.strict_nanpin_spacing = StrictNanpinSpacingUSDJPY;
     params.min_atr = MinAtrUSDJPY;
     params.base_lot = BaseLotUSDJPY;
-    params.profit_base = ProfitBaseUSDJPY;
     params.max_levels = MaxLevelsUSDJPY;
     params.no_martingale = NoMartingaleUSDJPY;
     params.double_second_lot = DoubleSecondLotUSDJPY;
@@ -624,7 +614,6 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.strict_nanpin_spacing = StrictNanpinSpacingAUDUSD;
     params.min_atr = MinAtrAUDUSD;
     params.base_lot = BaseLotAUDUSD;
-    params.profit_base = ProfitBaseAUDUSD;
     params.max_levels = MaxLevelsAUDUSD;
     params.no_martingale = NoMartingaleAUDUSD;
     params.double_second_lot = DoubleSecondLotAUDUSD;
@@ -636,7 +625,6 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.strict_nanpin_spacing = StrictNanpinSpacingBTCUSD;
     params.min_atr = MinAtrBTCUSD;
     params.base_lot = BaseLotBTCUSD;
-    params.profit_base = ProfitBaseBTCUSD;
     params.max_levels = MaxLevelsBTCUSD;
     params.no_martingale = NoMartingaleBTCUSD;
     params.double_second_lot = DoubleSecondLotBTCUSD;
@@ -648,7 +636,6 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.strict_nanpin_spacing = StrictNanpinSpacingETHUSD;
     params.min_atr = MinAtrETHUSD;
     params.base_lot = BaseLotETHUSD;
-    params.profit_base = ProfitBaseETHUSD;
     params.max_levels = MaxLevelsETHUSD;
     params.no_martingale = NoMartingaleETHUSD;
     params.double_second_lot = DoubleSecondLotETHUSD;
@@ -2158,7 +2145,7 @@ void ProcessSymbolTick(SymbolState &state)
   const bool allow_entry_sell = (state.regime != REGIME_TREND_UP);
   if (!state.initial_started && (TimeCurrent() - state.start_time) >= params.start_delay_seconds)
   {
-    if (buy.count == 0 && sell.count == 0 && is_trading_time && !safety_triggered)
+    if (buy.count == 0 && sell.count == 0 && is_trading_time && !safety_triggered && spread_ok)
     {
       bool opened_buy = false;
       bool opened_sell = false;
