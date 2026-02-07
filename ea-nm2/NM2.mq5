@@ -95,7 +95,7 @@ input int RegimeOffBars = 3;
 input int RegimeCoolingBars = 3;
 input double RegimeDiGapOn = 2.0;
 input double RegimeDiGapOff = 2.0;
-input double TrendLotMultiplier = 4.0;
+input double TrendLotMultiplier = 2.0;
 
 input group "DEBUG"
 input bool DebugMode = false;
@@ -139,20 +139,20 @@ input bool DoubleSecondLotEURUSD = false;
 input group "USDJPY"
 input bool EnableUSDJPY = false;
 input string SymbolUSDJPY = "USDJPY";
-input double BaseLotUSDJPY = 0.3;
-input double AtrMultiplierUSDJPY = 3.0;
+input double BaseLotUSDJPY = 0.1;
+input double AtrMultiplierUSDJPY = 1.0;
 input double NanpinLevelRatioUSDJPY = 1.1;
 input bool StrictNanpinSpacingUSDJPY = true;
-input double MinAtrUSDJPY = 0.05;
-input double TakeProfitAtrMultiplierUSDJPY = 1.2;
-input double TrailingTakeProfitDistanceRatioUSDJPY = 0.45;
+input double MinAtrUSDJPY = 0.18;
+input double TakeProfitAtrMultiplierUSDJPY = 2.0;
+input double TrailingTakeProfitDistanceRatioUSDJPY = 0.3;
 input int AdxPeriodUSDJPY = 14;
-input double RegimeAdxOnUSDJPY = 60;
-input double RegimeAdxOffUSDJPY = 40.0;
+input double RegimeAdxOnUSDJPY = 35.0;
+input double RegimeAdxOffUSDJPY = 20.0;
 input double MaxSpreadPointsUSDJPY = 400.0;
 input int MaxLevelsUSDJPY = 4;
 input bool NoMartingaleUSDJPY = false;
-input bool DoubleSecondLotUSDJPY = false;
+input bool DoubleSecondLotUSDJPY = true;
 
 input group "AUDUSD"
 input bool EnableAUDUSD = false;
