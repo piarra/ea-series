@@ -79,9 +79,9 @@ input double DiGapMin = 2.0;
 input group "RISK CONTROL"
 input bool EnableBalanceGuard = false;
 input double MinAccountBalance = 0.0;
-input bool ClosePositionsOnLowBalance = true;
-input bool EnableBasketLossStop = true;
-input double BasketLossStopRatio = 0.05;
+input bool ClosePositionsOnLowBalance = false;
+input bool EnableBasketLossStop = false;
+input double BasketLossStopRatio = 0.20;
 
 input group "MANAGEMENT SERVER"
 input string ManagementServerHost = "";
