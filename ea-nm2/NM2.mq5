@@ -47,7 +47,7 @@ enum RegimeState
 
 input group "COMMON"
 input string SymbolSuffix = "c";
-input int MagicNumber = 202507;
+input int MagicNumber = 202602;
 input int SlippagePoints = 4;
 input int StartDelaySeconds = 5;
 input int CloseRetryCount = 3;
@@ -55,7 +55,7 @@ input int CloseRetryDelayMs = 200;
 input bool SafetyMode = true;
 input double SafeK = 2.0;
 input double SafeSlopeK = 0.3;
-input int RestartDelaySeconds = 5;
+input int RestartDelaySeconds = 20;
 input double RestartDelayAtrFactorMin = 0.8;
 input double RestartDelayAtrFactorMax = 2.0;
 input int NanpinSleepSeconds = 10;
@@ -69,8 +69,8 @@ input double TimedExitCoolingRegimeFactor = 0.85;
 input double TimedExitSafetyFactor = 0.55;
 input double TimedExitAtrFactorMin = 0.70;
 input double TimedExitAtrFactorMax = 1.50;
-input double TakeProfitAtrMultiplier = 1.0;
-input bool EnableTrailingTakeProfit = false;
+input double TakeProfitAtrMultiplier = 1.2;
+input bool EnableTrailingTakeProfit = true;
 input double TrailingTakeProfitDistanceRatio = 0.45;
 input int AdxPeriod = 14;
 input double AdxMaxForNanpin = 20.0;
@@ -87,9 +87,9 @@ input group "REGIME FILTER"
 input int RegimeOnBars = 2;
 input int RegimeOffBars = 3;
 input int RegimeCoolingBars = 3;
-input double RegimeAdxOn = 32.5;
+input double RegimeAdxOn = 60;
 input double RegimeDiGapOn = 2.0;
-input double RegimeAdxOff = 20.0;
+input double RegimeAdxOff = 40.0;
 input double RegimeDiGapOff = 2.0;
 input double TrendLotMultiplier = 4.0;
 
@@ -100,8 +100,8 @@ input group "XAUUSD"
 input bool EnableXAUUSD = true;
 input string SymbolXAUUSD = "XAUUSD";
 input double BaseLotXAUUSD = 0.1;
-input double AtrMultiplierXAUUSD = 1.2;
-input double NanpinLevelRatioXAUUSD = 1.1;
+input double AtrMultiplierXAUUSD = 1.4;
+input double NanpinLevelRatioXAUUSD = 1.2;
 input bool StrictNanpinSpacingXAUUSD = true;
 input double MinAtrXAUUSD = 1.6;
 input int MaxLevelsXAUUSD = 4;
