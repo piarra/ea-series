@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.43"
+#property version   "1.44"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -21,6 +21,7 @@
 // v1.41 旧ネームスペース定数をNM2へ統一
 // v1.42 旧命名(型名/コメントID/ログID)をNM2へ統一
 // v1.43 通貨別に利確ATR倍率/利確トレール距離比を設定可能化
+// v1.44 口座残高ガードを追加 (しきい値以下で新規停止、任意で保有クローズ)
 
 #include <Trade/Trade.mqh>
 
@@ -73,6 +74,11 @@ input double TimedExitAtrFactorMax = 1.50;
 input bool EnableTrailingTakeProfit = true;
 input double AdxMaxForNanpin = 20.0;
 input double DiGapMin = 2.0;
+
+input group "RISK CONTROL"
+input bool EnableBalanceGuard = false;
+input double MinAccountBalance = 0.0;
+input bool ClosePositionsOnLowBalance = true;
 
 input group "MANAGEMENT SERVER"
 input string ManagementServerHost = "";
@@ -245,6 +251,9 @@ struct NM2Params
   double timed_exit_atr_factor_max;
   int close_retry_count;
   int close_retry_delay_ms;
+  bool enable_balance_guard;
+  double min_account_balance;
+  bool close_positions_on_low_balance;
   bool no_martingale;
   bool double_second_lot;
 };
@@ -309,6 +318,7 @@ struct SymbolState
   int adx_h1_handle;
   int adx_h4_handle;
   bool safety_active;
+  bool low_balance_active;
   bool buy_take_profit_trailing_active;
   bool sell_take_profit_trailing_active;
   double buy_take_profit_peak_price;
@@ -525,6 +535,7 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.adx_h1_handle = INVALID_HANDLE;
   state.adx_h4_handle = INVALID_HANDLE;
   state.safety_active = false;
+  state.low_balance_active = false;
   state.buy_take_profit_trailing_active = false;
   state.sell_take_profit_trailing_active = false;
   state.buy_take_profit_peak_price = 0.0;
@@ -599,6 +610,9 @@ void ApplyCommonParams(NM2Params &params)
   params.trailing_take_profit_distance_ratio = 0.45;
   params.close_retry_count = CloseRetryCount;
   params.close_retry_delay_ms = CloseRetryDelayMs;
+  params.enable_balance_guard = EnableBalanceGuard;
+  params.min_account_balance = MinAccountBalance;
+  params.close_positions_on_low_balance = ClosePositionsOnLowBalance;
   params.double_second_lot = false;
 }
 
@@ -2104,6 +2118,31 @@ void ProcessSymbolTick(SymbolState &state)
   double di_minus_now = 0.0;
   double di_minus_prev = 0.0;
   bool has_adx = GetAdxSnapshot(state, adx_now, adx_prev, di_plus_now, di_plus_prev, di_minus_now, di_minus_prev);
+  bool balance_guard_enabled = params.enable_balance_guard && params.min_account_balance > 0.0;
+  double account_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+  bool low_balance = balance_guard_enabled && account_balance <= params.min_account_balance;
+  if (state.low_balance_active != low_balance)
+  {
+    state.low_balance_active = low_balance;
+    string ts = TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS);
+    if (low_balance)
+    {
+      PrintFormat("Balance guard ON: %s (%s) balance=%.2f threshold=%.2f",
+                  ts, symbol, account_balance, params.min_account_balance);
+    }
+    else
+    {
+      PrintFormat("Balance guard OFF: %s (%s) balance=%.2f threshold=%.2f",
+                  ts, symbol, account_balance, params.min_account_balance);
+    }
+  }
+  if (low_balance && params.close_positions_on_low_balance)
+  {
+    if (buy.count > 0)
+      CloseBasket(state, POSITION_TYPE_BUY);
+    if (sell.count > 0)
+      CloseBasket(state, POSITION_TYPE_SELL);
+  }
   if (!is_trading_time)
   {
     double threshold_distance = -0.5 * take_profit_distance;
@@ -2236,7 +2275,7 @@ void ProcessSymbolTick(SymbolState &state)
   const bool allow_entry_sell = (state.regime != REGIME_TREND_UP);
   if (!state.initial_started && (TimeCurrent() - state.start_time) >= params.start_delay_seconds)
   {
-    if (buy.count == 0 && sell.count == 0 && is_trading_time && !safety_triggered && spread_ok)
+    if (buy.count == 0 && sell.count == 0 && is_trading_time && !safety_triggered && !low_balance && spread_ok)
     {
       bool opened_buy = false;
       bool opened_sell = false;
@@ -2317,11 +2356,11 @@ void ProcessSymbolTick(SymbolState &state)
   if (sell.count > 0)
     state.sell_grid_step = MathMax(state.sell_grid_step, grid_step);
 
-  bool allow_nanpin = !safety_triggered;
+  bool allow_nanpin = !safety_triggered && !low_balance;
   if (params.safety_mode)
   {
     bool prev = state.safety_active;
-    state.safety_active = safety_triggered || !allow_nanpin;
+    state.safety_active = safety_triggered;
     if (state.safety_active != prev)
     {
       string ts = TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS);
@@ -2462,7 +2501,7 @@ void ProcessSymbolTick(SymbolState &state)
     return;
   }
 
-  if (is_trading_time && state.initial_started && !safety_triggered)
+  if (is_trading_time && state.initial_started && !safety_triggered && !low_balance)
   {
     if (params.enable_hedged_entry)
     {
