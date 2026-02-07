@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.42"
+#property version   "1.43"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -20,6 +20,7 @@
 // v1.40 スプレッドフィルタ追加, TrendLotMultiplier整合, 未使用部分利確状態を整理
 // v1.41 旧ネームスペース定数をNM2へ統一
 // v1.42 旧命名(型名/コメントID/ログID)をNM2へ統一
+// v1.43 通貨別に利確ATR倍率/利確トレール距離比を設定可能化
 
 #include <Trade/Trade.mqh>
 
@@ -61,17 +62,15 @@ input double RestartDelayAtrFactorMax = 2.0;
 input int NanpinSleepSeconds = 10;
 input int OrderPendingTimeoutSeconds = 2;
 input bool EnableHedgedEntry = true;
-input int Level4TimedExitMinutes = 30;
-input int Level4TimedExitMinMinutes = 8;
-input int Level4TimedExitMaxMinutes = 60;
+input int DeepestTimedExitMinutes = 30;
+input int DeepestTimedExitMinMinutes = 8;
+input int DeepestTimedExitMaxMinutes = 60;
 input double TimedExitTrendRegimeFactor = 0.60;
 input double TimedExitCoolingRegimeFactor = 0.85;
 input double TimedExitSafetyFactor = 0.55;
 input double TimedExitAtrFactorMin = 0.70;
 input double TimedExitAtrFactorMax = 1.50;
-input double TakeProfitAtrMultiplier = 1.2;
 input bool EnableTrailingTakeProfit = true;
-input double TrailingTakeProfitDistanceRatio = 0.45;
 input int AdxPeriod = 14;
 input double AdxMaxForNanpin = 20.0;
 input double DiGapMin = 2.0;
@@ -104,9 +103,11 @@ input double AtrMultiplierXAUUSD = 1.4;
 input double NanpinLevelRatioXAUUSD = 1.2;
 input bool StrictNanpinSpacingXAUUSD = true;
 input double MinAtrXAUUSD = 1.6;
+input double TakeProfitAtrMultiplierXAUUSD = 1.2;
+input double TrailingTakeProfitDistanceRatioXAUUSD = 0.45;
 input int MaxLevelsXAUUSD = 4;
 input bool NoMartingaleXAUUSD = false;
-input bool DoubleSecondLotXAUUSD = false;
+input bool DoubleSecondLotXAUUSD = true;
 
 input group "EURUSD"
 input bool EnableEURUSD = false;
@@ -116,6 +117,8 @@ input double AtrMultiplierEURUSD = 3.0;
 input double NanpinLevelRatioEURUSD = 1.1;
 input bool StrictNanpinSpacingEURUSD = true;
 input double MinAtrEURUSD = 0.00050;
+input double TakeProfitAtrMultiplierEURUSD = 1.2;
+input double TrailingTakeProfitDistanceRatioEURUSD = 0.45;
 input int MaxLevelsEURUSD = 4;
 input bool NoMartingaleEURUSD = false;
 input bool DoubleSecondLotEURUSD = false;
@@ -128,6 +131,8 @@ input double AtrMultiplierUSDJPY = 3.0;
 input double NanpinLevelRatioUSDJPY = 1.1;
 input bool StrictNanpinSpacingUSDJPY = true;
 input double MinAtrUSDJPY = 0.05;
+input double TakeProfitAtrMultiplierUSDJPY = 1.2;
+input double TrailingTakeProfitDistanceRatioUSDJPY = 0.45;
 input int MaxLevelsUSDJPY = 4;
 input bool NoMartingaleUSDJPY = false;
 input bool DoubleSecondLotUSDJPY = false;
@@ -140,6 +145,8 @@ input double AtrMultiplierAUDUSD = 1.2;
 input double NanpinLevelRatioAUDUSD = 1.1;
 input bool StrictNanpinSpacingAUDUSD = true;
 input double MinAtrAUDUSD = 0.00015;
+input double TakeProfitAtrMultiplierAUDUSD = 1.2;
+input double TrailingTakeProfitDistanceRatioAUDUSD = 0.45;
 input int MaxLevelsAUDUSD = 4;
 input bool NoMartingaleAUDUSD = false;
 input bool DoubleSecondLotAUDUSD = false;
@@ -148,13 +155,15 @@ input group "BTCUSD"
 input bool EnableBTCUSD = false;
 input string SymbolBTCUSD = "BTCUSD";
 input double BaseLotBTCUSD = 0.3;
-input double AtrMultiplierBTCUSD = 2.5;
+input double AtrMultiplierBTCUSD = 3.5;
 input double NanpinLevelRatioBTCUSD = 1.1;
 input bool StrictNanpinSpacingBTCUSD = true;
-input double MinAtrBTCUSD = 10.0;
+input double MinAtrBTCUSD = 16.0;
+input double TakeProfitAtrMultiplierBTCUSD = 3.5;
+input double TrailingTakeProfitDistanceRatioBTCUSD = 0.50;
 input int MaxLevelsBTCUSD = 4;
-input bool NoMartingaleBTCUSD = true;
-input bool DoubleSecondLotBTCUSD = false;
+input bool NoMartingaleBTCUSD = false;
+input bool DoubleSecondLotBTCUSD = true;
 
 input group "ETHUSD"
 input bool EnableETHUSD = false;
@@ -164,6 +173,8 @@ input double AtrMultiplierETHUSD = 1.6;
 input double NanpinLevelRatioETHUSD = 1.1;
 input bool StrictNanpinSpacingETHUSD = true;
 input double MinAtrETHUSD = 1.2;
+input double TakeProfitAtrMultiplierETHUSD = 1.2;
+input double TrailingTakeProfitDistanceRatioETHUSD = 0.45;
 input int MaxLevelsETHUSD = 4;
 input bool NoMartingaleETHUSD = false;
 input bool DoubleSecondLotETHUSD = false;
@@ -203,9 +214,9 @@ struct NM2Params
   int nanpin_sleep_seconds;
   int order_pending_timeout_seconds;
   bool enable_hedged_entry;
-  int level4_timed_exit_minutes;
-  int level4_timed_exit_min_minutes;
-  int level4_timed_exit_max_minutes;
+  int deepest_timed_exit_minutes;
+  int deepest_timed_exit_min_minutes;
+  int deepest_timed_exit_max_minutes;
   double timed_exit_trend_regime_factor;
   double timed_exit_cooling_regime_factor;
   double timed_exit_safety_factor;
@@ -262,8 +273,8 @@ struct SymbolState
   datetime last_sell_nanpin_time;
   datetime buy_open_time;
   datetime sell_open_time;
-  datetime buy_level4_entry_time;
-  datetime sell_level4_entry_time;
+  datetime buy_deepest_entry_time;
+  datetime sell_deepest_entry_time;
   bool buy_order_pending;
   bool sell_order_pending;
   datetime buy_order_pending_time;
@@ -478,8 +489,8 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.last_sell_nanpin_time = 0;
   state.buy_open_time = 0;
   state.sell_open_time = 0;
-  state.buy_level4_entry_time = 0;
-  state.sell_level4_entry_time = 0;
+  state.buy_deepest_entry_time = 0;
+  state.sell_deepest_entry_time = 0;
   state.buy_order_pending = false;
   state.sell_order_pending = false;
   state.buy_order_pending_time = 0;
@@ -558,17 +569,17 @@ void ApplyCommonParams(NM2Params &params)
   params.nanpin_sleep_seconds = NanpinSleepSeconds;
   params.order_pending_timeout_seconds = OrderPendingTimeoutSeconds;
   params.enable_hedged_entry = EnableHedgedEntry;
-  params.level4_timed_exit_minutes = Level4TimedExitMinutes;
-  params.level4_timed_exit_min_minutes = Level4TimedExitMinMinutes;
-  params.level4_timed_exit_max_minutes = Level4TimedExitMaxMinutes;
+  params.deepest_timed_exit_minutes = DeepestTimedExitMinutes;
+  params.deepest_timed_exit_min_minutes = DeepestTimedExitMinMinutes;
+  params.deepest_timed_exit_max_minutes = DeepestTimedExitMaxMinutes;
   params.timed_exit_trend_regime_factor = TimedExitTrendRegimeFactor;
   params.timed_exit_cooling_regime_factor = TimedExitCoolingRegimeFactor;
   params.timed_exit_safety_factor = TimedExitSafetyFactor;
   params.timed_exit_atr_factor_min = TimedExitAtrFactorMin;
   params.timed_exit_atr_factor_max = TimedExitAtrFactorMax;
-  params.take_profit_atr_multiplier = TakeProfitAtrMultiplier;
   params.trailing_take_profit = EnableTrailingTakeProfit;
-  params.trailing_take_profit_distance_ratio = TrailingTakeProfitDistanceRatio;
+  params.take_profit_atr_multiplier = 1.2;
+  params.trailing_take_profit_distance_ratio = 0.45;
   params.close_retry_count = CloseRetryCount;
   params.close_retry_delay_ms = CloseRetryDelayMs;
   params.double_second_lot = false;
@@ -583,6 +594,8 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.nanpin_level_ratio = NanpinLevelRatioXAUUSD;
     params.strict_nanpin_spacing = StrictNanpinSpacingXAUUSD;
     params.min_atr = MinAtrXAUUSD;
+    params.take_profit_atr_multiplier = TakeProfitAtrMultiplierXAUUSD;
+    params.trailing_take_profit_distance_ratio = TrailingTakeProfitDistanceRatioXAUUSD;
     params.base_lot = BaseLotXAUUSD;
     params.max_levels = MaxLevelsXAUUSD;
     params.no_martingale = NoMartingaleXAUUSD;
@@ -594,6 +607,8 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.nanpin_level_ratio = NanpinLevelRatioEURUSD;
     params.strict_nanpin_spacing = StrictNanpinSpacingEURUSD;
     params.min_atr = MinAtrEURUSD;
+    params.take_profit_atr_multiplier = TakeProfitAtrMultiplierEURUSD;
+    params.trailing_take_profit_distance_ratio = TrailingTakeProfitDistanceRatioEURUSD;
     params.base_lot = BaseLotEURUSD;
     params.max_levels = MaxLevelsEURUSD;
     params.no_martingale = NoMartingaleEURUSD;
@@ -605,6 +620,8 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.nanpin_level_ratio = NanpinLevelRatioUSDJPY;
     params.strict_nanpin_spacing = StrictNanpinSpacingUSDJPY;
     params.min_atr = MinAtrUSDJPY;
+    params.take_profit_atr_multiplier = TakeProfitAtrMultiplierUSDJPY;
+    params.trailing_take_profit_distance_ratio = TrailingTakeProfitDistanceRatioUSDJPY;
     params.base_lot = BaseLotUSDJPY;
     params.max_levels = MaxLevelsUSDJPY;
     params.no_martingale = NoMartingaleUSDJPY;
@@ -616,6 +633,8 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.nanpin_level_ratio = NanpinLevelRatioAUDUSD;
     params.strict_nanpin_spacing = StrictNanpinSpacingAUDUSD;
     params.min_atr = MinAtrAUDUSD;
+    params.take_profit_atr_multiplier = TakeProfitAtrMultiplierAUDUSD;
+    params.trailing_take_profit_distance_ratio = TrailingTakeProfitDistanceRatioAUDUSD;
     params.base_lot = BaseLotAUDUSD;
     params.max_levels = MaxLevelsAUDUSD;
     params.no_martingale = NoMartingaleAUDUSD;
@@ -627,6 +646,8 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.nanpin_level_ratio = NanpinLevelRatioBTCUSD;
     params.strict_nanpin_spacing = StrictNanpinSpacingBTCUSD;
     params.min_atr = MinAtrBTCUSD;
+    params.take_profit_atr_multiplier = TakeProfitAtrMultiplierBTCUSD;
+    params.trailing_take_profit_distance_ratio = TrailingTakeProfitDistanceRatioBTCUSD;
     params.base_lot = BaseLotBTCUSD;
     params.max_levels = MaxLevelsBTCUSD;
     params.no_martingale = NoMartingaleBTCUSD;
@@ -638,6 +659,8 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.nanpin_level_ratio = NanpinLevelRatioETHUSD;
     params.strict_nanpin_spacing = StrictNanpinSpacingETHUSD;
     params.min_atr = MinAtrETHUSD;
+    params.take_profit_atr_multiplier = TakeProfitAtrMultiplierETHUSD;
+    params.trailing_take_profit_distance_ratio = TrailingTakeProfitDistanceRatioETHUSD;
     params.base_lot = BaseLotETHUSD;
     params.max_levels = MaxLevelsETHUSD;
     params.no_martingale = NoMartingaleETHUSD;
@@ -1818,7 +1841,7 @@ int TimedExitMinutesDynamic(const SymbolState &state,
                             double &safety_factor,
                             double &atr_factor)
 {
-  double base_minutes = state.params.level4_timed_exit_minutes;
+  double base_minutes = state.params.deepest_timed_exit_minutes;
   if (base_minutes < 1.0)
     base_minutes = 1.0;
 
@@ -1849,8 +1872,8 @@ int TimedExitMinutesDynamic(const SymbolState &state,
   }
 
   double dynamic_minutes = base_minutes * regime_factor * safety_factor * atr_factor;
-  int min_minutes = state.params.level4_timed_exit_min_minutes;
-  int max_minutes = state.params.level4_timed_exit_max_minutes;
+  int min_minutes = state.params.deepest_timed_exit_min_minutes;
+  int max_minutes = state.params.deepest_timed_exit_max_minutes;
   if (min_minutes < 1)
     min_minutes = 1;
   if (max_minutes < min_minutes)
@@ -2087,7 +2110,7 @@ void ProcessSymbolTick(SymbolState &state)
     ClearLevelPrices(state.buy_level_price);
     state.buy_grid_step = 0.0;
     state.buy_open_time = 0;
-    state.buy_level4_entry_time = 0;
+    state.buy_deepest_entry_time = 0;
   }
   if (state.prev_sell_count > 0 && sell.count == 0)
   {
@@ -2101,7 +2124,7 @@ void ProcessSymbolTick(SymbolState &state)
     ClearLevelPrices(state.sell_level_price);
     state.sell_grid_step = 0.0;
     state.sell_open_time = 0;
-    state.sell_level4_entry_time = 0;
+    state.sell_deepest_entry_time = 0;
   }
   if (state.prev_buy_count == 0 && buy.count > 0)
     state.buy_open_time = TimeCurrent();
@@ -2116,21 +2139,21 @@ void ProcessSymbolTick(SymbolState &state)
     timed_exit_level = levels;
   if (buy.level_count >= timed_exit_level)
   {
-    if (state.buy_level4_entry_time == 0)
-      state.buy_level4_entry_time = now;
+    if (state.buy_deepest_entry_time == 0)
+      state.buy_deepest_entry_time = now;
   }
   else
   {
-    state.buy_level4_entry_time = 0;
+    state.buy_deepest_entry_time = 0;
   }
   if (sell.level_count >= timed_exit_level)
   {
-    if (state.sell_level4_entry_time == 0)
-      state.sell_level4_entry_time = now;
+    if (state.sell_deepest_entry_time == 0)
+      state.sell_deepest_entry_time = now;
   }
   else
   {
-    state.sell_level4_entry_time = 0;
+    state.sell_deepest_entry_time = 0;
   }
 
   double timed_exit_regime_factor = 1.0;
@@ -2142,20 +2165,20 @@ void ProcessSymbolTick(SymbolState &state)
                                                    timed_exit_atr_factor);
   int timed_exit_seconds = timed_exit_minutes * 60;
   bool timed_exit_closed = false;
-  if (buy.count > 0 && state.buy_level4_entry_time > 0
-      && (now - state.buy_level4_entry_time) >= timed_exit_seconds)
+  if (buy.count > 0 && state.buy_deepest_entry_time > 0
+      && (now - state.buy_deepest_entry_time) >= timed_exit_seconds)
   {
     PrintFormat("Timed exit triggered: %s BUY reached level %d for %d minutes (base=%d regime=%s factors=%.2f/%.2f/%.2f atr_now=%.5f atr_base=%.5f)",
-                symbol, timed_exit_level, timed_exit_minutes, params.level4_timed_exit_minutes, RegimeName(state.regime),
+                symbol, timed_exit_level, timed_exit_minutes, params.deepest_timed_exit_minutes, RegimeName(state.regime),
                 timed_exit_regime_factor, timed_exit_safety_factor, timed_exit_atr_factor, atr_now, atr_base);
     CloseBasket(state, POSITION_TYPE_BUY);
     timed_exit_closed = true;
   }
-  if (sell.count > 0 && state.sell_level4_entry_time > 0
-      && (now - state.sell_level4_entry_time) >= timed_exit_seconds)
+  if (sell.count > 0 && state.sell_deepest_entry_time > 0
+      && (now - state.sell_deepest_entry_time) >= timed_exit_seconds)
   {
     PrintFormat("Timed exit triggered: %s SELL reached level %d for %d minutes (base=%d regime=%s factors=%.2f/%.2f/%.2f atr_now=%.5f atr_base=%.5f)",
-                symbol, timed_exit_level, timed_exit_minutes, params.level4_timed_exit_minutes, RegimeName(state.regime),
+                symbol, timed_exit_level, timed_exit_minutes, params.deepest_timed_exit_minutes, RegimeName(state.regime),
                 timed_exit_regime_factor, timed_exit_safety_factor, timed_exit_atr_factor, atr_now, atr_base);
     CloseBasket(state, POSITION_TYPE_SELL);
     timed_exit_closed = true;
