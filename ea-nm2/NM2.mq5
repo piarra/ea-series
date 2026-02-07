@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.44"
+#property version   "1.45"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -22,6 +22,7 @@
 // v1.42 旧命名(型名/コメントID/ログID)をNM2へ統一
 // v1.43 通貨別に利確ATR倍率/利確トレール距離比を設定可能化
 // v1.44 口座残高ガードを追加 (しきい値以下で新規停止、任意で保有クローズ)
+// v1.45 バスケット損失ストップを追加 (残高比率から損失pips目安を動的換算)
 
 #include <Trade/Trade.mqh>
 
@@ -79,6 +80,8 @@ input group "RISK CONTROL"
 input bool EnableBalanceGuard = false;
 input double MinAccountBalance = 0.0;
 input bool ClosePositionsOnLowBalance = true;
+input bool EnableBasketLossStop = true;
+input double BasketLossStopRatio = 0.05;
 
 input group "MANAGEMENT SERVER"
 input string ManagementServerHost = "";
@@ -181,8 +184,8 @@ input double MinAtrBTCUSD = 16.0;
 input double TakeProfitAtrMultiplierBTCUSD = 3.5;
 input double TrailingTakeProfitDistanceRatioBTCUSD = 0.50;
 input int AdxPeriodBTCUSD = 14;
-input double RegimeAdxOnBTCUSD = 60;
-input double RegimeAdxOffBTCUSD = 40.0;
+input double RegimeAdxOnBTCUSD = 35.0;
+input double RegimeAdxOffBTCUSD = 20.0;
 input double MaxSpreadPointsBTCUSD = 2000.0;
 input int MaxLevelsBTCUSD = 4;
 input bool NoMartingaleBTCUSD = false;
@@ -254,6 +257,8 @@ struct NM2Params
   bool enable_balance_guard;
   double min_account_balance;
   bool close_positions_on_low_balance;
+  bool enable_basket_loss_stop;
+  double basket_loss_stop_ratio;
   bool no_martingale;
   bool double_second_lot;
 };
@@ -613,6 +618,8 @@ void ApplyCommonParams(NM2Params &params)
   params.enable_balance_guard = EnableBalanceGuard;
   params.min_account_balance = MinAccountBalance;
   params.close_positions_on_low_balance = ClosePositionsOnLowBalance;
+  params.enable_basket_loss_stop = EnableBasketLossStop;
+  params.basket_loss_stop_ratio = BasketLossStopRatio;
   params.double_second_lot = false;
 }
 
@@ -1834,6 +1841,19 @@ bool IsSpreadAllowed(const NM2Params &params, double spread_points)
   return spread_points <= params.max_spread_points;
 }
 
+double LossDistancePoints(const SymbolState &state, const BasketInfo &basket, double loss_currency, double value_per_unit)
+{
+  if (basket.volume <= 0.0 || loss_currency <= 0.0 || value_per_unit <= 0.0)
+    return 0.0;
+  double distance = loss_currency / (basket.volume * value_per_unit);
+  if (distance <= 0.0)
+    return 0.0;
+  double point = state.point;
+  if (point <= 0.0)
+    point = 0.00001;
+  return distance / point;
+}
+
 void ResetBuyTakeProfitTrail(SymbolState &state)
 {
   state.buy_take_profit_trailing_active = false;
@@ -2142,6 +2162,53 @@ void ProcessSymbolTick(SymbolState &state)
       CloseBasket(state, POSITION_TYPE_BUY);
     if (sell.count > 0)
       CloseBasket(state, POSITION_TYPE_SELL);
+  }
+  bool basket_loss_closed = false;
+  bool basket_loss_stop_enabled = params.enable_basket_loss_stop
+                                  && params.basket_loss_stop_ratio > 0.0
+                                  && account_balance > 0.0;
+  if (basket_loss_stop_enabled && !(low_balance && params.close_positions_on_low_balance))
+  {
+    double loss_limit = account_balance * params.basket_loss_stop_ratio;
+    double ratio_percent = params.basket_loss_stop_ratio * 100.0;
+    if (buy.count > 0 && buy.profit <= -loss_limit)
+    {
+      double points = LossDistancePoints(state, buy, loss_limit, value_per_unit);
+      if (points > 0.0)
+      {
+        PrintFormat("Basket loss stop triggered: %s BUY profit=%.2f threshold=-%.2f points=%.1f balance=%.2f ratio=%.2f%%",
+                    symbol, buy.profit, loss_limit, points, account_balance, ratio_percent);
+      }
+      else
+      {
+        PrintFormat("Basket loss stop triggered: %s BUY profit=%.2f threshold=-%.2f balance=%.2f ratio=%.2f%%",
+                    symbol, buy.profit, loss_limit, account_balance, ratio_percent);
+      }
+      CloseBasket(state, POSITION_TYPE_BUY);
+      basket_loss_closed = true;
+    }
+    if (sell.count > 0 && sell.profit <= -loss_limit)
+    {
+      double points = LossDistancePoints(state, sell, loss_limit, value_per_unit);
+      if (points > 0.0)
+      {
+        PrintFormat("Basket loss stop triggered: %s SELL profit=%.2f threshold=-%.2f points=%.1f balance=%.2f ratio=%.2f%%",
+                    symbol, sell.profit, loss_limit, points, account_balance, ratio_percent);
+      }
+      else
+      {
+        PrintFormat("Basket loss stop triggered: %s SELL profit=%.2f threshold=-%.2f balance=%.2f ratio=%.2f%%",
+                    symbol, sell.profit, loss_limit, account_balance, ratio_percent);
+      }
+      CloseBasket(state, POSITION_TYPE_SELL);
+      basket_loss_closed = true;
+    }
+  }
+  if (basket_loss_closed)
+  {
+    state.prev_buy_count = buy.count;
+    state.prev_sell_count = sell.count;
+    return;
   }
   if (!is_trading_time)
   {
