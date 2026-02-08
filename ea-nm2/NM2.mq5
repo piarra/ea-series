@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.46"
+#property version   "1.47"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -24,6 +24,7 @@
 // v1.44 口座残高ガードを追加 (しきい値以下で新規停止、任意で保有クローズ)
 // v1.45 バスケット損失ストップを追加 (残高比率から損失pips目安を動的換算)
 // v1.46 固定利幅での利確トレーリング開始条件を追加 (ATR条件とのOR)
+// v1.47 非取引時間はナンピン3段まで許可し、4段目到達価格で損切り
 
 #include <Trade/Trade.mqh>
 
@@ -38,6 +39,7 @@ const double kMaxLot = 100.0;
 const string kCoreComment = "NM2_CORE";
 const int kLevelCap = 4;
 const int kTimedExitLevel = 4;
+const int kOffHoursMaxNanpinLevel = 3;
 const double kLotMultiplierFromLevel3 = 1.5;
 }
 
@@ -876,6 +878,14 @@ int EffectiveMaxLevels(const NM2Params &params)
 int EffectiveMaxLevelsRuntime(const SymbolState &state)
 {
   return EffectiveMaxLevels(state.params);
+}
+
+int EffectiveNanpinLevelsRuntime(const SymbolState &state, bool is_trading_time)
+{
+  int levels = EffectiveMaxLevelsRuntime(state);
+  if (!is_trading_time && levels > NM2::kOffHoursMaxNanpinLevel)
+    levels = NM2::kOffHoursMaxNanpinLevel;
+  return levels;
 }
 
 void BuildLotSequence(SymbolState &state)
@@ -2205,6 +2215,7 @@ void ProcessSymbolTick(SymbolState &state)
   GetAtrSnapshot(state, atr_base, atr_now, atr_slope);
   double take_profit_distance = TakeProfitDistanceFromAtr(state, atr_base, atr_now);
   bool is_trading_time = IsTradingTime();
+  int nanpin_levels = EffectiveNanpinLevelsRuntime(state, is_trading_time);
   double value_per_unit = PriceValuePerUnitCached(state);
   datetime confirmed_bar_time = iTime(state.broker_symbol, _Period, 1);
   bool safety_triggered = false;
@@ -2566,14 +2577,14 @@ void ProcessSymbolTick(SymbolState &state)
   }
 
   bool final_level_sl_closed = false;
-  if (levels >= 2 && buy.count > 0 && buy.level_count >= levels)
+  if (nanpin_levels >= 2 && buy.count > 0 && buy.level_count >= nanpin_levels)
   {
     double base_step = state.buy_grid_step > 0.0 ? state.buy_grid_step : grid_step;
-    int next_level_index = levels;
+    int next_level_index = nanpin_levels;
     double stop_step = base_step * LevelStepFactor(params, next_level_index + 1);
     bool apply_min_width = !params.strict_nanpin_spacing;
     stop_step = AdjustNanpinStep(state.buy_level_price, next_level_index, stop_step, apply_min_width);
-    double base_price = state.buy_level_price[levels - 1];
+    double base_price = state.buy_level_price[nanpin_levels - 1];
     if (base_price <= 0.0)
       base_price = buy.min_price;
     double point = state.point;
@@ -2592,14 +2603,14 @@ void ProcessSymbolTick(SymbolState &state)
       }
     }
   }
-  if (levels >= 2 && sell.count > 0 && sell.level_count >= levels)
+  if (nanpin_levels >= 2 && sell.count > 0 && sell.level_count >= nanpin_levels)
   {
     double base_step = state.sell_grid_step > 0.0 ? state.sell_grid_step : grid_step;
-    int next_level_index = levels;
+    int next_level_index = nanpin_levels;
     double stop_step = base_step * LevelStepFactor(params, next_level_index + 1);
     bool apply_min_width = !params.strict_nanpin_spacing;
     stop_step = AdjustNanpinStep(state.sell_level_price, next_level_index, stop_step, apply_min_width);
-    double base_price = state.sell_level_price[levels - 1];
+    double base_price = state.sell_level_price[nanpin_levels - 1];
     if (base_price <= 0.0)
       base_price = sell.max_price;
     double point = state.point;
@@ -2791,7 +2802,7 @@ void ProcessSymbolTick(SymbolState &state)
     }
   }
 
-  if (buy.count > 0 && buy.level_count < levels)
+  if (buy.count > 0 && buy.level_count < nanpin_levels)
   {
     // Buy orders fill at ask, so compare ask to the grid.
     double step = state.buy_grid_step > 0.0 ? state.buy_grid_step : grid_step;
@@ -2821,7 +2832,7 @@ void ProcessSymbolTick(SymbolState &state)
     }
   }
 
-  if (sell.count > 0 && sell.level_count < levels)
+  if (sell.count > 0 && sell.level_count < nanpin_levels)
   {
     // Sell orders fill at bid, so compare bid to the grid.
     double step = state.sell_grid_step > 0.0 ? state.sell_grid_step : grid_step;
