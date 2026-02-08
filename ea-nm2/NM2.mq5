@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.45"
+#property version   "1.46"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -23,6 +23,7 @@
 // v1.43 通貨別に利確ATR倍率/利確トレール距離比を設定可能化
 // v1.44 口座残高ガードを追加 (しきい値以下で新規停止、任意で保有クローズ)
 // v1.45 バスケット損失ストップを追加 (残高比率から損失pips目安を動的換算)
+// v1.46 固定利幅での利確トレーリング開始条件を追加 (ATR条件とのOR)
 
 #include <Trade/Trade.mqh>
 
@@ -75,6 +76,17 @@ input double TimedExitAtrFactorMax = 1.50;
 input bool EnableTrailingTakeProfit = true;
 input double AdxMaxForNanpin = 20.0;
 input double DiGapMin = 2.0;
+
+input group "TAKE PROFIT"
+input bool EnableFixedTrailStart = true;
+input double FixedTrailStartPointsXAUUSD = 1800.0;
+input double FixedTrailStartPointsEURUSD = 120.0;
+input double FixedTrailStartPointsUSDJPY = 120.0;
+input double FixedTrailStartPointsAUDUSD = 120.0;
+input double FixedTrailStartPointsBTCUSD = 3600.0;
+input double FixedTrailStartPointsETHUSD = 3000.0;
+input bool EnableTakeProfitTrailDistanceCap = true;
+input double FixedTrailDistanceCapRatio = 0.24;
 
 input group "RISK CONTROL"
 input bool EnableBalanceGuard = false;
@@ -1897,6 +1909,72 @@ double TakeProfitTrailDistance(const SymbolState &state, double take_profit_dist
   return distance;
 }
 
+double FixedTrailStartDistancePoints(const SymbolState &state)
+{
+  if (state.logical_symbol == "XAUUSD")
+    return FixedTrailStartPointsXAUUSD;
+  if (state.logical_symbol == "EURUSD")
+    return FixedTrailStartPointsEURUSD;
+  if (state.logical_symbol == "USDJPY")
+    return FixedTrailStartPointsUSDJPY;
+  if (state.logical_symbol == "AUDUSD")
+    return FixedTrailStartPointsAUDUSD;
+  if (state.logical_symbol == "BTCUSD")
+    return FixedTrailStartPointsBTCUSD;
+  if (state.logical_symbol == "ETHUSD")
+    return FixedTrailStartPointsETHUSD;
+  return 0.0;
+}
+
+double FixedTrailStartDistancePrice(const SymbolState &state)
+{
+  if (!EnableFixedTrailStart)
+    return 0.0;
+  double distance_points = FixedTrailStartDistancePoints(state);
+  if (distance_points <= 0.0)
+    return 0.0;
+  double point = state.point;
+  if (point <= 0.0)
+    point = 0.00001;
+  return distance_points * point;
+}
+
+bool FixedTrailStartReachedBuy(const SymbolState &state, const BasketInfo &buy, double bid)
+{
+  double distance = FixedTrailStartDistancePrice(state);
+  if (distance <= 0.0)
+    return false;
+  return bid >= (buy.avg_price + distance);
+}
+
+bool FixedTrailStartReachedSell(const SymbolState &state, const BasketInfo &sell, double ask)
+{
+  double distance = FixedTrailStartDistancePrice(state);
+  if (distance <= 0.0)
+    return false;
+  return ask <= (sell.avg_price - distance);
+}
+
+double TakeProfitTrailDistanceCapped(const SymbolState &state, double take_profit_distance)
+{
+  double atr_trail_distance = TakeProfitTrailDistance(state, take_profit_distance);
+  if (!EnableTakeProfitTrailDistanceCap)
+    return atr_trail_distance;
+  double cap_ratio = FixedTrailDistanceCapRatio;
+  if (cap_ratio <= 0.0)
+    return atr_trail_distance;
+  double fixed_start_distance = FixedTrailStartDistancePrice(state);
+  if (fixed_start_distance <= 0.0)
+    return atr_trail_distance;
+  double cap_distance = fixed_start_distance * cap_ratio;
+  double point = state.point;
+  if (point <= 0.0)
+    point = 0.00001;
+  if (cap_distance < point)
+    cap_distance = point;
+  return MathMin(atr_trail_distance, cap_distance);
+}
+
 double ClampDouble(double value, double min_value, double max_value)
 {
   if (max_value < min_value)
@@ -1977,11 +2055,11 @@ bool ShouldCloseSellTakeProfit(const SymbolState &state, const BasketInfo &sell,
 
 bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, double take_profit_distance)
 {
-  bool close_signal = ShouldCloseBuyTakeProfit(state, buy, bid, take_profit_distance);
+  bool atr_reached = ShouldCloseBuyTakeProfit(state, buy, bid, take_profit_distance);
   if (!state.params.trailing_take_profit)
   {
     ResetBuyTakeProfitTrail(state);
-    if (close_signal)
+    if (atr_reached)
     {
       CloseBasket(state, POSITION_TYPE_BUY);
       return true;
@@ -1991,11 +2069,14 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
 
   if (!state.buy_take_profit_trailing_active)
   {
-    if (close_signal)
+    bool fixed_reached = FixedTrailStartReachedBuy(state, buy, bid);
+    bool arm_signal = atr_reached || fixed_reached;
+    if (arm_signal)
     {
       state.buy_take_profit_trailing_active = true;
       state.buy_take_profit_peak_price = bid;
-      PrintFormat("Take-profit trail armed: %s BUY start=%.5f", state.broker_symbol, bid);
+      PrintFormat("Take-profit trail armed: %s BUY start=%.5f (atr=%d fixed=%d)",
+                  state.broker_symbol, bid, (int)atr_reached, (int)fixed_reached);
     }
     return false;
   }
@@ -2003,7 +2084,7 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
   if (bid > state.buy_take_profit_peak_price)
     state.buy_take_profit_peak_price = bid;
 
-  double trail_distance = TakeProfitTrailDistance(state, take_profit_distance);
+  double trail_distance = TakeProfitTrailDistanceCapped(state, take_profit_distance);
   double stop_price = state.buy_take_profit_peak_price - trail_distance;
   double point = state.point;
   if (point <= 0.0)
@@ -2021,11 +2102,11 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
 
 bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask, double take_profit_distance)
 {
-  bool close_signal = ShouldCloseSellTakeProfit(state, sell, ask, take_profit_distance);
+  bool atr_reached = ShouldCloseSellTakeProfit(state, sell, ask, take_profit_distance);
   if (!state.params.trailing_take_profit)
   {
     ResetSellTakeProfitTrail(state);
-    if (close_signal)
+    if (atr_reached)
     {
       CloseBasket(state, POSITION_TYPE_SELL);
       return true;
@@ -2035,11 +2116,14 @@ bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask
 
   if (!state.sell_take_profit_trailing_active)
   {
-    if (close_signal)
+    bool fixed_reached = FixedTrailStartReachedSell(state, sell, ask);
+    bool arm_signal = atr_reached || fixed_reached;
+    if (arm_signal)
     {
       state.sell_take_profit_trailing_active = true;
       state.sell_take_profit_bottom_price = ask;
-      PrintFormat("Take-profit trail armed: %s SELL start=%.5f", state.broker_symbol, ask);
+      PrintFormat("Take-profit trail armed: %s SELL start=%.5f (atr=%d fixed=%d)",
+                  state.broker_symbol, ask, (int)atr_reached, (int)fixed_reached);
     }
     return false;
   }
@@ -2047,7 +2131,7 @@ bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask
   if (ask < state.sell_take_profit_bottom_price)
     state.sell_take_profit_bottom_price = ask;
 
-  double trail_distance = TakeProfitTrailDistance(state, take_profit_distance);
+  double trail_distance = TakeProfitTrailDistanceCapped(state, take_profit_distance);
   double stop_price = state.sell_take_profit_bottom_price + trail_distance;
   double point = state.point;
   if (point <= 0.0)
