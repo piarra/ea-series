@@ -1365,7 +1365,8 @@ string BuildLogServerUrl()
   if (StringLen(LogServerHost) == 0)
     return "";
   string host = LogServerHost;
-  string lower = StringToLower(host);
+  string lower = host;
+  StringToLower(lower);
   if (StringFind(lower, "http://") == 0)
     host = StringSubstr(host, 7);
   else if (StringFind(lower, "https://") == 0)
@@ -1777,13 +1778,13 @@ void CloseAllPositionsByMagic(const int magic)
   close_trade.SetDeviationInPoints(SlippagePoints);
   close_trade.SetAsyncMode(true);
   ulong tickets[];
-  string symbols[];
+  string position_symbols[];
   int count = 0;
   int total = PositionsTotal();
   if (total > 0)
   {
     ArrayResize(tickets, total);
-    ArrayResize(symbols, total);
+    ArrayResize(position_symbols, total);
   }
   for (int i = total - 1; i >= 0; --i)
   {
@@ -1793,20 +1794,20 @@ void CloseAllPositionsByMagic(const int magic)
     if (PositionGetInteger(POSITION_MAGIC) != magic)
       continue;
     tickets[count] = ticket;
-    symbols[count] = PositionGetString(POSITION_SYMBOL);
+    position_symbols[count] = PositionGetString(POSITION_SYMBOL);
     count++;
   }
   if (count > 0)
   {
     ArrayResize(tickets, count);
-    ArrayResize(symbols, count);
+    ArrayResize(position_symbols, count);
   }
 
   for (int i = 0; i < count; ++i)
   {
     bool closed = false;
     int attempts = 0;
-    int filling = (int)SymbolInfoInteger(symbols[i], SYMBOL_FILLING_MODE);
+    int filling = (int)SymbolInfoInteger(position_symbols[i], SYMBOL_FILLING_MODE);
     if (filling == ORDER_FILLING_FOK || filling == ORDER_FILLING_IOC || filling == ORDER_FILLING_RETURN)
       close_trade.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
     while (attempts <= CloseRetryCount)
