@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.50"
+#property version   "1.51"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -28,6 +28,7 @@
 // v1.48 バスケット絶対損切りラインを追加 (L1=ATRx3, L2+=確定済み平均ナンピン幅x5)
 // v1.49 いずれかのバスケットがL3以上かつ合計PLがATR閾値超えで全決済
 // v1.50 バスケット損切り距離をinput化し、旧BasketLossStopRatioを削除
+// v1.51 L3+バスケットはPL正転で利確トレーリング開始し、戻り時は建値付近をロック
 
 #include <Trade/Trade.mqh>
 
@@ -45,6 +46,7 @@ const int kTimedExitLevel = 4;
 const int kOffHoursMaxNanpinLevel = 3;
 const int kCombinedProfitCloseLevel = 3;
 const double kLotMultiplierFromLevel3 = 1.5;
+const double kDeepLevelTrailLockPoints = 2.0;
 }
 
 enum RegimeState
@@ -2028,6 +2030,22 @@ bool FixedTrailStartReachedSell(const SymbolState &state, const BasketInfo &sell
   return ask <= (sell.avg_price - distance);
 }
 
+bool DeepLevelProfitTrailStartReached(const BasketInfo &basket)
+{
+  return (basket.level_count >= NM2::kCombinedProfitCloseLevel && basket.profit > 0.0);
+}
+
+double DeepLevelTrailLockDistancePrice(const SymbolState &state)
+{
+  double point = state.point;
+  if (point <= 0.0)
+    point = 0.00001;
+  double lock_distance = point * NM2::kDeepLevelTrailLockPoints;
+  if (lock_distance < 0.0)
+    lock_distance = 0.0;
+  return lock_distance;
+}
+
 double TakeProfitTrailDistanceCapped(const SymbolState &state, double take_profit_distance)
 {
   double atr_trail_distance = TakeProfitTrailDistance(state, take_profit_distance);
@@ -2129,6 +2147,7 @@ bool ShouldCloseSellTakeProfit(const SymbolState &state, const BasketInfo &sell,
 bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, double take_profit_distance)
 {
   bool atr_reached = ShouldCloseBuyTakeProfit(state, buy, bid, take_profit_distance);
+  bool deep_profit_reached = DeepLevelProfitTrailStartReached(buy);
   if (!state.params.trailing_take_profit)
   {
     ResetBuyTakeProfitTrail(state);
@@ -2143,13 +2162,13 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
   if (!state.buy_take_profit_trailing_active)
   {
     bool fixed_reached = FixedTrailStartReachedBuy(state, buy, bid);
-    bool arm_signal = atr_reached || fixed_reached;
+    bool arm_signal = atr_reached || fixed_reached || deep_profit_reached;
     if (arm_signal)
     {
       state.buy_take_profit_trailing_active = true;
       state.buy_take_profit_peak_price = bid;
-      PrintFormat("Take-profit trail armed: %s BUY start=%.5f (atr=%d fixed=%d)",
-                  state.broker_symbol, bid, (int)atr_reached, (int)fixed_reached);
+      PrintFormat("Take-profit trail armed: %s BUY start=%.5f (atr=%d fixed=%d deep_pl=%d)",
+                  state.broker_symbol, bid, (int)atr_reached, (int)fixed_reached, (int)deep_profit_reached);
     }
     return false;
   }
@@ -2162,6 +2181,12 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
   double point = state.point;
   if (point <= 0.0)
     point = 0.00001;
+  if (buy.level_count >= NM2::kCombinedProfitCloseLevel)
+  {
+    double lock_price = buy.avg_price + DeepLevelTrailLockDistancePrice(state);
+    if (stop_price < lock_price)
+      stop_price = lock_price;
+  }
   double tol = point * 0.5;
   if (bid <= stop_price + tol)
   {
@@ -2176,6 +2201,7 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
 bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask, double take_profit_distance)
 {
   bool atr_reached = ShouldCloseSellTakeProfit(state, sell, ask, take_profit_distance);
+  bool deep_profit_reached = DeepLevelProfitTrailStartReached(sell);
   if (!state.params.trailing_take_profit)
   {
     ResetSellTakeProfitTrail(state);
@@ -2190,13 +2216,13 @@ bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask
   if (!state.sell_take_profit_trailing_active)
   {
     bool fixed_reached = FixedTrailStartReachedSell(state, sell, ask);
-    bool arm_signal = atr_reached || fixed_reached;
+    bool arm_signal = atr_reached || fixed_reached || deep_profit_reached;
     if (arm_signal)
     {
       state.sell_take_profit_trailing_active = true;
       state.sell_take_profit_bottom_price = ask;
-      PrintFormat("Take-profit trail armed: %s SELL start=%.5f (atr=%d fixed=%d)",
-                  state.broker_symbol, ask, (int)atr_reached, (int)fixed_reached);
+      PrintFormat("Take-profit trail armed: %s SELL start=%.5f (atr=%d fixed=%d deep_pl=%d)",
+                  state.broker_symbol, ask, (int)atr_reached, (int)fixed_reached, (int)deep_profit_reached);
     }
     return false;
   }
@@ -2209,6 +2235,12 @@ bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask
   double point = state.point;
   if (point <= 0.0)
     point = 0.00001;
+  if (sell.level_count >= NM2::kCombinedProfitCloseLevel)
+  {
+    double lock_price = sell.avg_price - DeepLevelTrailLockDistancePrice(state);
+    if (stop_price > lock_price)
+      stop_price = lock_price;
+  }
   double tol = point * 0.5;
   if (ask >= stop_price - tol)
   {
