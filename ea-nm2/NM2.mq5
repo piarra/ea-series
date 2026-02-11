@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.51"
+#property version   "1.52"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -29,22 +29,20 @@
 // v1.49 いずれかのバスケットがL3以上かつ合計PLがATR閾値超えで全決済
 // v1.50 バスケット損切り距離をinput化し、旧BasketLossStopRatioを削除
 // v1.51 L3+バスケットはPL正転で利確トレーリング開始し、戻り時は建値付近をロック
+// v1.52 最大段数の上限を20に拡張し、TimedExit基準レベルをMaxLevel連動へ変更
 
 #include <Trade/Trade.mqh>
 
 namespace NM2
 {
-enum { kMaxLevels = 13 };
+enum { kMaxLevels = 20 };
 enum { kMaxSymbols = 6 };
 const int kAtrBasePeriod = 14;
 const int kLotDigits = 2;
 const double kMinLot = 0.01;
 const double kMaxLot = 100.0;
 const string kCoreComment = "NM2_CORE";
-const int kLevelCap = 4;
-const int kTimedExitLevel = 4;
-const int kOffHoursMaxNanpinLevel = 3;
-const int kCombinedProfitCloseLevel = 3;
+const int kLevelCap = 8;
 const double kLotMultiplierFromLevel3 = 1.5;
 const double kDeepLevelTrailLockPoints = 2.0;
 }
@@ -103,6 +101,7 @@ input bool ClosePositionsOnLowBalance = false;
 input bool EnableBasketLossStop = true;
 input double BasketLossStopAtrMultiplierLevel1 = 6.0;
 input double BasketLossStopNanpinWidthMultiplierLevel2Plus = 6.0;
+input int CombinedProfitCloseLevel = 3;
 input double CombinedProfitCloseAtrMultiplier = 4.60;
 
 input group "MANAGEMENT SERVER"
@@ -125,7 +124,7 @@ input bool DebugMode = false;
 input group "XAUUSD"
 input bool EnableXAUUSD = true;
 input string SymbolXAUUSD = "XAUUSD";
-input double BaseLotXAUUSD = 0.1;
+input double BaseLotXAUUSD = 0.01;
 input double AtrMultiplierXAUUSD = 1.4;
 input double NanpinLevelRatioXAUUSD = 0.9;
 input bool StrictNanpinSpacingXAUUSD = true;
@@ -282,6 +281,7 @@ struct NM2Params
   bool enable_basket_loss_stop;
   double basket_loss_stop_atr_multiplier_level1;
   double basket_loss_stop_nanpin_width_multiplier_level2_plus;
+  int combined_profit_close_level;
   double combined_profit_close_atr_multiplier;
   bool no_martingale;
   bool double_second_lot;
@@ -645,6 +645,7 @@ void ApplyCommonParams(NM2Params &params)
   params.enable_basket_loss_stop = EnableBasketLossStop;
   params.basket_loss_stop_atr_multiplier_level1 = BasketLossStopAtrMultiplierLevel1;
   params.basket_loss_stop_nanpin_width_multiplier_level2_plus = BasketLossStopNanpinWidthMultiplierLevel2Plus;
+  params.combined_profit_close_level = CombinedProfitCloseLevel;
   params.combined_profit_close_atr_multiplier = CombinedProfitCloseAtrMultiplier;
   params.double_second_lot = false;
 }
@@ -900,9 +901,21 @@ int EffectiveMaxLevelsRuntime(const SymbolState &state)
 int EffectiveNanpinLevelsRuntime(const SymbolState &state, bool is_trading_time)
 {
   int levels = EffectiveMaxLevelsRuntime(state);
-  if (!is_trading_time && levels > NM2::kOffHoursMaxNanpinLevel)
-    levels = NM2::kOffHoursMaxNanpinLevel;
+  if (!is_trading_time)
+  {
+    levels -= 1;
+    if (levels < 0)
+      levels = 0;
+  }
   return levels;
+}
+
+int EffectiveCombinedProfitCloseLevel(const SymbolState &state)
+{
+  int level = state.params.combined_profit_close_level;
+  if (level < 1)
+    level = 1;
+  return level;
 }
 
 void BuildLotSequence(SymbolState &state)
@@ -2030,9 +2043,9 @@ bool FixedTrailStartReachedSell(const SymbolState &state, const BasketInfo &sell
   return ask <= (sell.avg_price - distance);
 }
 
-bool DeepLevelProfitTrailStartReached(const BasketInfo &basket)
+bool DeepLevelProfitTrailStartReached(const BasketInfo &basket, int combined_profit_close_level)
 {
-  return (basket.level_count >= NM2::kCombinedProfitCloseLevel && basket.profit > 0.0);
+  return (basket.level_count >= combined_profit_close_level && basket.profit > 0.0);
 }
 
 double DeepLevelTrailLockDistancePrice(const SymbolState &state)
@@ -2147,7 +2160,8 @@ bool ShouldCloseSellTakeProfit(const SymbolState &state, const BasketInfo &sell,
 bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, double take_profit_distance)
 {
   bool atr_reached = ShouldCloseBuyTakeProfit(state, buy, bid, take_profit_distance);
-  bool deep_profit_reached = DeepLevelProfitTrailStartReached(buy);
+  int combined_profit_close_level = EffectiveCombinedProfitCloseLevel(state);
+  bool deep_profit_reached = DeepLevelProfitTrailStartReached(buy, combined_profit_close_level);
   if (!state.params.trailing_take_profit)
   {
     ResetBuyTakeProfitTrail(state);
@@ -2181,7 +2195,7 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
   double point = state.point;
   if (point <= 0.0)
     point = 0.00001;
-  if (buy.level_count >= NM2::kCombinedProfitCloseLevel)
+  if (buy.level_count >= combined_profit_close_level)
   {
     double lock_price = buy.avg_price + DeepLevelTrailLockDistancePrice(state);
     if (stop_price < lock_price)
@@ -2201,7 +2215,8 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
 bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask, double take_profit_distance)
 {
   bool atr_reached = ShouldCloseSellTakeProfit(state, sell, ask, take_profit_distance);
-  bool deep_profit_reached = DeepLevelProfitTrailStartReached(sell);
+  int combined_profit_close_level = EffectiveCombinedProfitCloseLevel(state);
+  bool deep_profit_reached = DeepLevelProfitTrailStartReached(sell, combined_profit_close_level);
   if (!state.params.trailing_take_profit)
   {
     ResetSellTakeProfitTrail(state);
@@ -2235,7 +2250,7 @@ bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask
   double point = state.point;
   if (point <= 0.0)
     point = 0.00001;
-  if (sell.level_count >= NM2::kCombinedProfitCloseLevel)
+  if (sell.level_count >= combined_profit_close_level)
   {
     double lock_price = sell.avg_price - DeepLevelTrailLockDistancePrice(state);
     if (stop_price > lock_price)
@@ -2353,9 +2368,10 @@ void ProcessSymbolTick(SymbolState &state)
     if (sell.count > 0)
       CloseBasket(state, POSITION_TYPE_SELL);
   }
+  int combined_profit_close_level = EffectiveCombinedProfitCloseLevel(state);
   bool combined_profit_close_enabled = params.combined_profit_close_atr_multiplier > 0.0;
-  bool has_deep_level = (buy.level_count >= NM2::kCombinedProfitCloseLevel
-                         || sell.level_count >= NM2::kCombinedProfitCloseLevel);
+  bool has_deep_level = (buy.level_count >= combined_profit_close_level
+                         || sell.level_count >= combined_profit_close_level);
   if (combined_profit_close_enabled && has_deep_level)
   {
     double total_profit = buy.profit + sell.profit;
@@ -2368,7 +2384,7 @@ void ProcessSymbolTick(SymbolState &state)
       if (total_profit >= threshold_profit)
       {
         PrintFormat("Combined profit close triggered: %s level_trigger=%d total_profit=%.2f threshold=%.2f atr=%.5f atr_mult=%.3f",
-                    symbol, NM2::kCombinedProfitCloseLevel, total_profit, threshold_profit,
+                    symbol, combined_profit_close_level, total_profit, threshold_profit,
                     atr_ref, params.combined_profit_close_atr_multiplier);
         CloseAllPositionsByMagic(params.magic_number);
         state.prev_buy_count = buy.count;
@@ -2519,9 +2535,7 @@ void ProcessSymbolTick(SymbolState &state)
   if (buy.count > 0 || sell.count > 0)
     SyncLevelPricesFromPositions(state);
 
-  int timed_exit_level = NM2::kTimedExitLevel;
-  if (timed_exit_level > levels)
-    timed_exit_level = levels;
+  int timed_exit_level = levels;
   if (buy.level_count >= timed_exit_level)
   {
     if (state.buy_deepest_entry_time == 0)
@@ -2738,8 +2752,8 @@ void ProcessSymbolTick(SymbolState &state)
       double stop_price = base_price - stop_step;
       if (ask <= stop_price + tol)
       {
-        PrintFormat("Final level stop-loss triggered: %s BUY ask=%.5f stop=%.5f",
-                    symbol, ask, stop_price);
+        PrintFormat("Final level stop-loss triggered: %s BUY level=%d max_levels=%d nanpin_levels=%d is_trading_time=%s ask=%.5f stop=%.5f",
+                    symbol, buy.level_count, levels, nanpin_levels, is_trading_time ? "true" : "false", ask, stop_price);
         CloseBasket(state, POSITION_TYPE_BUY);
         final_level_sl_closed = true;
       }
@@ -2764,8 +2778,8 @@ void ProcessSymbolTick(SymbolState &state)
       double stop_price = base_price + stop_step;
       if (bid >= stop_price - tol)
       {
-        PrintFormat("Final level stop-loss triggered: %s SELL bid=%.5f stop=%.5f",
-                    symbol, bid, stop_price);
+        PrintFormat("Final level stop-loss triggered: %s SELL level=%d max_levels=%d nanpin_levels=%d is_trading_time=%s bid=%.5f stop=%.5f",
+                    symbol, sell.level_count, levels, nanpin_levels, is_trading_time ? "true" : "false", bid, stop_price);
         CloseBasket(state, POSITION_TYPE_SELL);
         final_level_sl_closed = true;
       }
