@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.52"
+#property version   "1.55"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -30,6 +30,9 @@
 // v1.50 バスケット損切り距離をinput化し、旧BasketLossStopRatioを削除
 // v1.51 L3+バスケットはPL正転で利確トレーリング開始し、戻り時は建値付近をロック
 // v1.52 最大段数の上限を20に拡張し、TimedExit基準レベルをMaxLevel連動へ変更
+// v1.53 Titan FX口座ではXAUUSDのpoint補正を追加
+// v1.54 Titan FX口座ではXAUUSDのpointを10倍で扱うよう補正値を修正
+// v1.55 Titan FX口座のXAUUSD point補正を0.1倍に戻し、Exness基準のpoint感覚へ再調整
 
 #include <Trade/Trade.mqh>
 
@@ -135,7 +138,7 @@ input int AdxPeriodXAUUSD = 14;
 input double RegimeAdxOnXAUUSD = 40.0;
 input double RegimeAdxOffXAUUSD = 25.0;
 input double MaxSpreadPointsXAUUSD = 400.0;
-input int MaxLevelsXAUUSD = 4;
+input int MaxLevelsXAUUSD = 8;
 input bool NoMartingaleXAUUSD = false;
 input bool DoubleSecondLotXAUUSD = true;
 
@@ -594,6 +597,8 @@ void RefreshSymbolInfo(SymbolState &state)
 {
   const string symbol = state.broker_symbol;
   state.point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+  if (AccountInfoString(ACCOUNT_COMPANY) == "Titan FX Limited" && state.logical_symbol == "XAUUSD")
+    state.point *= 0.1;
   state.digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
   state.volume_step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
   state.volume_min = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
@@ -985,6 +990,7 @@ string MakeLevelComment(const string base, int level)
 
 int OnInit()
 {
+  Print("Broker=", AccountInfoString(ACCOUNT_COMPANY));
   BuildSymbols();
   if (symbols_count == 0)
     return INIT_FAILED;
