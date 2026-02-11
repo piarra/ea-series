@@ -101,7 +101,7 @@ input group "RISK CONTROL"
 input bool EnableBalanceGuard = false;
 input double MinAccountBalance = 0.0;
 input bool ClosePositionsOnLowBalance = false;
-input bool EnableBasketLossStop = true;
+input bool EnableBasketLossStop = false;
 input double BasketLossStopAtrMultiplierLevel1 = 6.0;
 input double BasketLossStopNanpinWidthMultiplierLevel2Plus = 6.0;
 input int CombinedProfitCloseLevel = 3;
