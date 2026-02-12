@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.59"
+#property version   "1.60"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -37,6 +37,7 @@
 // v1.57 SL更新前の同値判定をtick_size基準へ変更し、no-op modify送信を抑止
 // v1.58 トレールSL更新に送信間隔/レート制限クールダウンを追加し、too many requestsを抑制
 // v1.59 SL更新の停止条件をブローカーpoint基準へ修正し、invalid stops時の再クランプ再試行を追加
+// v1.60 ATR連動利確距離に最小points下限を追加 (XAUUSD: 120pt)
 
 #include <Trade/Trade.mqh>
 
@@ -139,6 +140,7 @@ input double NanpinLevelRatioXAUUSD = 1.1;
 input bool StrictNanpinSpacingXAUUSD = true;
 input double MinAtrXAUUSD = 1.6;
 input double TakeProfitAtrMultiplierXAUUSD = 1.4;
+input double MinTakeProfitPointsXAUUSD = 1200.0;
 input double TrailingTakeProfitDistanceRatioXAUUSD = 0.40;
 input int AdxPeriodXAUUSD = 14;
 input double RegimeAdxOnXAUUSD = 40.0;
@@ -253,6 +255,7 @@ struct NM2Params
   double safe_slope_k;
   double base_lot;
   double take_profit_atr_multiplier;
+  double min_take_profit_points;
   bool trailing_take_profit;
   double trailing_take_profit_distance_ratio;
   int adx_period;
@@ -657,6 +660,7 @@ void ApplyCommonParams(NM2Params &params)
   params.timed_exit_atr_factor_max = TimedExitAtrFactorMax;
   params.trailing_take_profit = EnableTrailingTakeProfit;
   params.take_profit_atr_multiplier = 1.2;
+  params.min_take_profit_points = 0.0;
   params.trailing_take_profit_distance_ratio = 0.55;
   params.close_retry_count = CloseRetryCount;
   params.close_retry_delay_ms = CloseRetryDelayMs;
@@ -683,6 +687,7 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.strict_nanpin_spacing = StrictNanpinSpacingXAUUSD;
     params.min_atr = MinAtrXAUUSD;
     params.take_profit_atr_multiplier = TakeProfitAtrMultiplierXAUUSD;
+    params.min_take_profit_points = MinTakeProfitPointsXAUUSD;
     params.trailing_take_profit_distance_ratio = TrailingTakeProfitDistanceRatioXAUUSD;
     params.adx_period = AdxPeriodXAUUSD;
     params.regime_adx_on = RegimeAdxOnXAUUSD;
@@ -2242,8 +2247,14 @@ double TakeProfitDistanceFromAtr(const SymbolState &state, double atr_base, doub
   if (atr_ref <= 0.0)
     atr_ref = point;
   double distance = atr_ref * state.params.take_profit_atr_multiplier;
-  if (distance < point)
-    distance = point;
+  double min_points = state.params.min_take_profit_points;
+  if (min_points < 0.0)
+    min_points = 0.0;
+  double min_distance = point;
+  if (min_points > 0.0)
+    min_distance = MathMax(min_distance, min_points * point);
+  if (distance < min_distance)
+    distance = min_distance;
   return distance;
 }
 
