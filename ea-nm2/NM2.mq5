@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.55"
+#property version   "1.57"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -33,6 +33,8 @@
 // v1.53 Titan FX口座ではXAUUSDのpoint補正を追加
 // v1.54 Titan FX口座ではXAUUSDのpointを10倍で扱うよう補正値を修正
 // v1.55 Titan FX口座のXAUUSD point補正を0.1倍に戻し、Exness基準のpoint感覚へ再調整
+// v1.56 利確トレール発動後は成行クローズ優先からSL追従優先へ変更 (失敗時のみフォールバッククローズ)
+// v1.57 SL更新前の同値判定をtick_size基準へ変更し、no-op modify送信を抑止
 
 #include <Trade/Trade.mqh>
 
@@ -94,7 +96,7 @@ input double FixedTrailStartPointsUSDJPY = 120.0;
 input double FixedTrailStartPointsAUDUSD = 120.0;
 input double FixedTrailStartPointsBTCUSD = 3600.0;
 input double FixedTrailStartPointsETHUSD = 3000.0;
-input bool EnableTakeProfitTrailDistanceCap = true;
+input bool EnableTakeProfitTrailDistanceCap = false;
 input double FixedTrailDistanceCapRatio = 0.24;
 
 input group "RISK CONTROL"
@@ -151,7 +153,7 @@ input double NanpinLevelRatioEURUSD = 1.1;
 input bool StrictNanpinSpacingEURUSD = true;
 input double MinAtrEURUSD = 0.00090;
 input double TakeProfitAtrMultiplierEURUSD = 1.4;
-input double TrailingTakeProfitDistanceRatioEURUSD = 0.45;
+input double TrailingTakeProfitDistanceRatioEURUSD = 0.55;
 input int AdxPeriodEURUSD = 14;
 input double RegimeAdxOnEURUSD = 60;
 input double RegimeAdxOffEURUSD = 15.0;
@@ -187,7 +189,7 @@ input double NanpinLevelRatioAUDUSD = 1.1;
 input bool StrictNanpinSpacingAUDUSD = true;
 input double MinAtrAUDUSD = 0.00015;
 input double TakeProfitAtrMultiplierAUDUSD = 1.2;
-input double TrailingTakeProfitDistanceRatioAUDUSD = 0.45;
+input double TrailingTakeProfitDistanceRatioAUDUSD = 0.55;
 input int AdxPeriodAUDUSD = 14;
 input double RegimeAdxOnAUDUSD = 60;
 input double RegimeAdxOffAUDUSD = 40.0;
@@ -224,7 +226,7 @@ input double NanpinLevelRatioETHUSD = 1.1;
 input bool StrictNanpinSpacingETHUSD = true;
 input double MinAtrETHUSD = 1.2;
 input double TakeProfitAtrMultiplierETHUSD = 1.2;
-input double TrailingTakeProfitDistanceRatioETHUSD = 0.45;
+input double TrailingTakeProfitDistanceRatioETHUSD = 0.55;
 input int AdxPeriodETHUSD = 14;
 input double RegimeAdxOnETHUSD = 60;
 input double RegimeAdxOffETHUSD = 40.0;
@@ -641,7 +643,7 @@ void ApplyCommonParams(NM2Params &params)
   params.timed_exit_atr_factor_max = TimedExitAtrFactorMax;
   params.trailing_take_profit = EnableTrailingTakeProfit;
   params.take_profit_atr_multiplier = 1.2;
-  params.trailing_take_profit_distance_ratio = 0.45;
+  params.trailing_take_profit_distance_ratio = 0.55;
   params.close_retry_count = CloseRetryCount;
   params.close_retry_delay_ms = CloseRetryDelayMs;
   params.enable_balance_guard = EnableBalanceGuard;
@@ -1719,6 +1721,133 @@ void CloseBasket(const SymbolState &state, ENUM_POSITION_TYPE type)
   }
 }
 
+bool UpdateBasketSL(const SymbolState &state,
+                    ENUM_POSITION_TYPE type,
+                    double requested_sl,
+                    double &applied_sl)
+{
+  const string symbol = state.broker_symbol;
+  const int magic = state.params.magic_number;
+  applied_sl = requested_sl;
+
+  int stops_level = (int)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
+  int freeze_level = (int)SymbolInfoInteger(symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+  if (stops_level < 0)
+    stops_level = 0;
+  if (freeze_level < 0)
+    freeze_level = 0;
+
+  double point = state.point;
+  if (point <= 0.0)
+    point = 0.00001;
+  double price_step = state.tick_size;
+  if (price_step <= 0.0)
+    price_step = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+  if (price_step <= 0.0)
+    price_step = point;
+  if (price_step <= 0.0)
+    price_step = 0.00001;
+  int price_digits = state.digits;
+  if (price_digits < 0)
+    price_digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+  if (price_digits < 0)
+    price_digits = 5;
+
+  MqlTick tick;
+  if (!SymbolInfoTick(symbol, tick))
+    return false;
+
+  double min_dist = (stops_level + freeze_level + 2) * point;
+  if (type == POSITION_TYPE_BUY)
+  {
+    double max_sl = tick.bid - min_dist;
+    if (applied_sl > max_sl)
+      applied_sl = max_sl;
+    applied_sl = MathFloor(applied_sl / price_step) * price_step;
+  }
+  else
+  {
+    double min_sl = tick.ask + min_dist;
+    if (applied_sl < min_sl)
+      applied_sl = min_sl;
+    applied_sl = MathCeil(applied_sl / price_step) * price_step;
+  }
+  applied_sl = NormalizeDouble(applied_sl, price_digits);
+
+  CTrade tr;
+  tr.SetExpertMagicNumber(magic);
+  tr.SetDeviationInPoints(state.params.slippage_points);
+  int filling = state.filling_mode;
+  if (filling == ORDER_FILLING_FOK || filling == ORDER_FILLING_IOC || filling == ORDER_FILLING_RETURN)
+    tr.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
+
+  bool any_position = false;
+  bool all_protected = true;
+  double tol = price_step * 0.5;
+
+  for (int i = PositionsTotal() - 1; i >= 0; --i)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if (!PositionSelectByTicket(ticket))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != magic)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != symbol)
+      continue;
+    if ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != type)
+      continue;
+    any_position = true;
+
+    double cur_sl = PositionGetDouble(POSITION_SL);
+    double tp = PositionGetDouble(POSITION_TP);
+    double cur_sl_cmp = cur_sl;
+    if (cur_sl_cmp > 0.0)
+      cur_sl_cmp = NormalizeDouble(MathRound(cur_sl_cmp / price_step) * price_step, price_digits);
+    double tp_req = tp;
+    if (tp_req > 0.0)
+      tp_req = NormalizeDouble(MathRound(tp_req / price_step) * price_step, price_digits);
+
+    if (cur_sl_cmp > 0.0 && MathAbs(applied_sl - cur_sl_cmp) <= tol)
+      continue;
+
+    if (type == POSITION_TYPE_BUY)
+    {
+      if (cur_sl_cmp > 0.0 && applied_sl <= cur_sl_cmp + tol)
+        continue;
+    }
+    else
+    {
+      if (cur_sl_cmp > 0.0 && applied_sl >= cur_sl_cmp - tol)
+        continue;
+    }
+
+    bool modified = false;
+    int attempts = 0;
+    while (attempts <= state.params.close_retry_count)
+    {
+      if (tr.PositionModify(ticket, applied_sl, tp_req))
+      {
+        modified = true;
+        break;
+      }
+      attempts++;
+      if (attempts <= state.params.close_retry_count && state.params.close_retry_delay_ms > 0)
+        Sleep(state.params.close_retry_delay_ms);
+    }
+
+    if (!modified)
+    {
+      all_protected = false;
+      PrintFormat("Trail SL update failed: %s ticket=%I64u type=%d sl=%.5f retcode=%d %s",
+                  symbol, ticket, (int)type, applied_sl, tr.ResultRetcode(), tr.ResultRetcodeDescription());
+    }
+  }
+
+  if (!any_position)
+    return true;
+  return all_protected;
+}
+
 bool TryOpen(const SymbolState &state,
              const string symbol,
              ENUM_ORDER_TYPE order_type,
@@ -2207,13 +2336,18 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
     if (stop_price < lock_price)
       stop_price = lock_price;
   }
+  double applied_sl = stop_price;
+  bool sl_update_ok = UpdateBasketSL(state, POSITION_TYPE_BUY, stop_price, applied_sl);
   double tol = point * 0.5;
   if (bid <= stop_price + tol)
   {
-    PrintFormat("Take-profit trail hit: %s BUY bid=%.5f stop=%.5f peak=%.5f",
-                state.broker_symbol, bid, stop_price, state.buy_take_profit_peak_price);
-    CloseBasket(state, POSITION_TYPE_BUY);
-    return true;
+    if (!sl_update_ok)
+    {
+      PrintFormat("Take-profit trail fallback close: %s BUY bid=%.5f stop=%.5f applied_sl=%.5f peak=%.5f",
+                  state.broker_symbol, bid, stop_price, applied_sl, state.buy_take_profit_peak_price);
+      CloseBasket(state, POSITION_TYPE_BUY);
+      return true;
+    }
   }
   return false;
 }
@@ -2262,13 +2396,18 @@ bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask
     if (stop_price > lock_price)
       stop_price = lock_price;
   }
+  double applied_sl = stop_price;
+  bool sl_update_ok = UpdateBasketSL(state, POSITION_TYPE_SELL, stop_price, applied_sl);
   double tol = point * 0.5;
   if (ask >= stop_price - tol)
   {
-    PrintFormat("Take-profit trail hit: %s SELL ask=%.5f stop=%.5f bottom=%.5f",
-                state.broker_symbol, ask, stop_price, state.sell_take_profit_bottom_price);
-    CloseBasket(state, POSITION_TYPE_SELL);
-    return true;
+    if (!sl_update_ok)
+    {
+      PrintFormat("Take-profit trail fallback close: %s SELL ask=%.5f stop=%.5f applied_sl=%.5f bottom=%.5f",
+                  state.broker_symbol, ask, stop_price, applied_sl, state.sell_take_profit_bottom_price);
+      CloseBasket(state, POSITION_TYPE_SELL);
+      return true;
+    }
   }
   return false;
 }
