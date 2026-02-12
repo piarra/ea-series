@@ -144,7 +144,7 @@ input int AdxPeriodXAUUSD = 14;
 input double RegimeAdxOnXAUUSD = 40.0;
 input double RegimeAdxOffXAUUSD = 25.0;
 input double MaxSpreadPointsXAUUSD = 320.0;
-input int MaxLevelsXAUUSD = 8;
+input int MaxLevelsXAUUSD = 4;
 input bool NoMartingaleXAUUSD = false;
 input bool DoubleSecondLotXAUUSD = true;
 
