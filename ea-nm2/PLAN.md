@@ -1,61 +1,144 @@
-# NM2 PF改善 PLAN
+# NM2 約定力改善プラン
 
 ## 目的
-PF (Profit Factor) を引き上げる。  
-優先順位は「総損失の削減」→「利益取りこぼしの削減」。
+バックテストでよい成績なのにリアル口座で勝てない問題を解消する
 
-## 優先度付き施策
+## 施策
 
-1. [対応済み] 両建て初期/再エントリーを片側化する
-現状: `NM2.mq5:1997`, `NM2.mq5:2217` で通常時は buy/sell を同時に建てる。  
-変更: DI方向またはRegime方向に合わせて片側エントリーを基本とする。  
-期待効果: スプレッド負け由来の固定コスト減少、PF改善。
+ただしあなたのEAは バスケット（複数ポジ）を平均建値ベースで管理しているので、やるならおすすめはこの形です：
 
-2. [対応済み] SafetyMode時はナンピンだけでなく新規も停止する
-現状: `NM2.mq5:2051` で停止するのはナンピン中心、再エントリーは継続しうる。  
-変更: Safety ON中は初期/再エントリーも禁止。  
-期待効果: 高ボラ局面での連続損失抑制。
+おすすめ：ハイブリッド（発動までは現状、発動後はSLで追う）
+	•	トレール“開始判定”（ATR到達 / 固定幅到達 / deep-profit到達）は今のまま
+	•	いったん開始したら、以後の“戻り判定”で CloseBasket() する代わりに
+全ポジのSLを stop_price に寄せていく（サーバー側で刈らせる）
 
-3. [対応済み] Regime判定を早めつつ安定化する
-現状: `RegimeAdxOn=60`, `RegimeOnBars=1` (`NM2.mq5:79`, `NM2.mq5:76`)。  
-変更: `RegimeAdxOn` を段階的に下げ、`RegimeOnBars` を2以上で検証。  
-期待効果: 逆張り側の抱え込み削減、PFの下振れ抑制。
+これでリアルで起きがちな「ティック遅延→成行が滑る」「ヒゲで判定→成行が悪約定」をかなり減らせます。
 
-4. [対応済み] 利確基準と停止時間中クローズ基準をATRスケールに統一する
-現状: 利確はATR基準 (`NM2.mq5:1665`)、停止時間中クローズは `profit_base` 基準 (`NM2.mq5:1869`)。  
-変更: 停止時間中の閾値もATR連動へ統一。  
-期待効果: ボラティリティ変化時の過剰損切/過剰粘りを削減。
+⸻
 
-5. [対応済み] 最終段撤退を固定時間から動的化する
-現状: 最終段タイムアウトは固定分 (`NM2.mq5:1964`)。  
-変更: Regime/Safety/ATRで撤退時間を可変化。  
-期待効果: 強トレンドでの大損抑制、通常時の過剰撤退回避。
+Titan/Exness前提での注意点（ここだけ押さえれば事故りにくい）
 
-6. [対応済み] スプレッドフィルタを追加する
-現状: エントリー/ナンピン前にスプレッド上限判定なし (`NM2.mq5:2320`, `NM2.mq5:2350`)。  
-変更: `MaxSpreadPoints` を追加し、超過時は新規発注しない。  
-期待効果: 不利約定の削減。
+1) StopLevel / FreezeLevel を毎回チェック
 
-7. [対応済み] TrendLotMultiplierの実装不整合を修正する
-現状: 入力 `TrendLotMultiplier` (`NM2.mq5:84`) が実質未使用で、固定倍率ロジック (`NM2.mq5:997`) が使われる。  
-変更: 入力値が確実に反映される設計に統一。  
-期待効果: 最適化パラメータの有効化、再現性向上。
+銘柄・時間帯で変わることがあるので、SL更新前に
+	•	SYMBOL_TRADE_STOPS_LEVEL
+	•	SYMBOL_TRADE_FREEZE_LEVEL
+を見て、現在価格から近すぎるSLは通さない（または少し離す）。
 
-8. [対応済み] 部分利確関連の状態変数を整理する
-現状: `has_partial_*` / `realized_*` はリセット中心で、実ロジックとの整合が弱い (`NM2.mq5:487`, `NM2.mq5:1906`)。  
-変更: 部分利確を実装するか、未使用状態管理を除去して判定を単純化。  
-期待効果: 判定の一貫性改善、検証結果の解釈容易化。
+2) バスケットの“平均建値ロック”をSLでも再現する
 
-## 実施順序
+あなたの実装には「L3+で建値付近ロック」思想がありますよね。
+SL化でも同じで、stop_price を
+	•	BUY: max(stop_price, buy.avg_price + lock_distance)
+	•	SELL: min(stop_price, sell.avg_price - lock_distance)
+で下限/上限を作るのが大事です。
 
-フェーズ1 (即効性): 1 -> 2 -> 4  
-フェーズ2 (損失上限制御): 5 -> 6  
-フェーズ3 (最適化基盤整備): 7 -> 8  
-フェーズ4 (追加チューニング): 3
+⸻
 
-## 検証方針
+実装イメージ（MQL5・最小構成）
 
-1. ベースラインを固定し、各施策を単独でAB比較する。  
-2. 有効施策のみを順次積み上げて再検証する。  
-3. 評価指標は PF, Net Profit, Max Drawdown, 勝率, 取引回数。  
-4. PF改善時でも取引回数の急減やDD悪化が大きい設定は採用しない。
+あなたの ManageBuyTakeProfit / ManageSellTakeProfit の「trail hit で CloseBasket」部分を **“SL更新”**に置き換えます。
+
+1) stop_price を計算するのは今のまま
+
+既にここがあるので、その stop_price を使います。
+
+2) バスケット内の全ポジに SL を当てる
+
+（TPは付けなくてOK。TP付けると挙動が複雑になることが多い）
+
+bool UpdateBasketSL(const SymbolState &state, ENUM_POSITION_TYPE type, double new_sl)
+{
+  const string symbol = state.broker_symbol;
+  const int magic = state.params.magic_number;
+
+  int stops_level = (int)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
+  int freeze_level = (int)SymbolInfoInteger(symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+  double point = state.point; if(point<=0) point=0.00001;
+
+  MqlTick t; if(!SymbolInfoTick(symbol, t)) return false;
+  double bid=t.bid, ask=t.ask;
+
+  // SLが近すぎるとModifyが通らないので最低距離を確保
+  double min_dist = (stops_level + freeze_level + 2) * point;
+
+  // typeごとに価格から見て妥当な位置へクランプ
+  if(type == POSITION_TYPE_BUY)
+  {
+    double max_sl = bid - min_dist;
+    if(new_sl > max_sl) new_sl = max_sl;
+  }
+  else
+  {
+    double min_sl = ask + min_dist;
+    if(new_sl < min_sl) new_sl = min_sl;
+  }
+
+  CTrade tr;
+  tr.SetExpertMagicNumber(magic);
+  tr.SetDeviationInPoints(state.params.slippage_points);
+  int filling = state.filling_mode;
+  if(filling==ORDER_FILLING_FOK||filling==ORDER_FILLING_IOC||filling==ORDER_FILLING_RETURN)
+    tr.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
+
+  bool any=false;
+
+  for(int i=PositionsTotal()-1;i>=0;--i)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if(!PositionSelectByTicket(ticket)) continue;
+    if((int)PositionGetInteger(POSITION_MAGIC) != magic) continue;
+    if(PositionGetString(POSITION_SYMBOL) != symbol) continue;
+    if((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != type) continue;
+
+    double cur_sl = PositionGetDouble(POSITION_SL);
+    double tp     = PositionGetDouble(POSITION_TP);
+
+    // 「改善方向」のSLだけ更新（BUYならSLを上げる、SELLならSLを下げる）
+    if(type==POSITION_TYPE_BUY)
+    {
+      if(cur_sl > 0 && new_sl <= cur_sl + point*0.5) continue;
+    }
+    else
+    {
+      if(cur_sl > 0 && new_sl >= cur_sl - point*0.5) continue;
+    }
+
+    // PositionModifyはsymbol指定（ヘッジ口座でもsymbol単位で通る）
+    if(tr.PositionModify(symbol, new_sl, tp))
+      any=true;
+  }
+  return any;
+}
+
+3) “トレールヒット”判定を消す（または保険として残す）
+
+本来は「SLが刺さる」ので CloseBasket() を呼ばなくてよいです。
+ただし保険で、
+	•	SL更新が何回も失敗した
+	•	価格が既に抜けた（判定遅れ）
+みたいな時だけ CloseBasket() を使う、という二段構えが安定します。
+
+⸻
+
+パラメータ面での調整（SL化すると効き方が変わる）
+
+SLトレールにすると「トレールが実弾」になるので、
+	•	TrailingTakeProfitDistanceRatio は 現状より少し広めが安全（0.45→0.55〜0.65）
+	•	EnableTakeProfitTrailDistanceCap は まずOFFで挙動確認がおすすめ
+（キャップが効くとSLがタイトになりすぎて“ちょい戻り刈り”が増えることがある）
+
+⸻
+
+まずの優先順位（Titan/Exnessで勝ちやすくする順）
+	1.	TPトレール発動後はSL更新方式（今回の話）
+	2.	できれば EnableHedgedEntry=false（SL方式と相性が良い）
+	3.	SL更新に StopLevel/FreezeLevel ガード＋リトライ＋失敗時フォールバックClose を入れる
+
+⸻
+
+もし次に教えてもらえるなら、かなり精密に詰められます：
+	•	口座タイプ：Hedge口座でOK？（Titan/Exnessでも口座タイプ選べることが多い）
+	•	「リアルで増えてる損切り」がどれか：Absolute basket stop / Final level stop / Timed exit
+
+それが分かると、SL化の効果が最大化する箇所（深いレベルロックの入れ方、トレール開始条件の最適化）まで一気に設計できます。
