@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.60"
+#property version   "1.61"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -38,6 +38,7 @@
 // v1.58 トレールSL更新に送信間隔/レート制限クールダウンを追加し、too many requestsを抑制
 // v1.59 SL更新の停止条件をブローカーpoint基準へ修正し、invalid stops時の再クランプ再試行を追加
 // v1.60 ATR連動利確距離に最小points下限を追加 (XAUUSD: 120pt)
+// v1.61 利確距離のATR連動を廃止し、通貨別points指定へ変更
 
 #include <Trade/Trade.mqh>
 
@@ -139,8 +140,7 @@ input double AtrMultiplierXAUUSD = 1.4;
 input double NanpinLevelRatioXAUUSD = 1.1;
 input bool StrictNanpinSpacingXAUUSD = true;
 input double MinAtrXAUUSD = 1.6;
-input double TakeProfitAtrMultiplierXAUUSD = 1.4;
-input double MinTakeProfitPointsXAUUSD = 1200.0;
+input double TakeProfitPointsXAUUSD = 1200.0;
 input double TrailingTakeProfitDistanceRatioXAUUSD = 0.40;
 input int AdxPeriodXAUUSD = 14;
 input double RegimeAdxOnXAUUSD = 40.0;
@@ -158,7 +158,7 @@ input double AtrMultiplierEURUSD = 3.6;
 input double NanpinLevelRatioEURUSD = 1.1;
 input bool StrictNanpinSpacingEURUSD = true;
 input double MinAtrEURUSD = 0.00090;
-input double TakeProfitAtrMultiplierEURUSD = 1.4;
+input double TakeProfitPointsEURUSD = 120.0;
 input double TrailingTakeProfitDistanceRatioEURUSD = 0.55;
 input int AdxPeriodEURUSD = 14;
 input double RegimeAdxOnEURUSD = 60;
@@ -176,7 +176,7 @@ input double AtrMultiplierUSDJPY = 1.0;
 input double NanpinLevelRatioUSDJPY = 1.1;
 input bool StrictNanpinSpacingUSDJPY = true;
 input double MinAtrUSDJPY = 0.18;
-input double TakeProfitAtrMultiplierUSDJPY = 2.0;
+input double TakeProfitPointsUSDJPY = 120.0;
 input double TrailingTakeProfitDistanceRatioUSDJPY = 0.3;
 input int AdxPeriodUSDJPY = 14;
 input double RegimeAdxOnUSDJPY = 35.0;
@@ -194,7 +194,7 @@ input double AtrMultiplierAUDUSD = 1.2;
 input double NanpinLevelRatioAUDUSD = 1.1;
 input bool StrictNanpinSpacingAUDUSD = true;
 input double MinAtrAUDUSD = 0.00015;
-input double TakeProfitAtrMultiplierAUDUSD = 1.2;
+input double TakeProfitPointsAUDUSD = 120.0;
 input double TrailingTakeProfitDistanceRatioAUDUSD = 0.55;
 input int AdxPeriodAUDUSD = 14;
 input double RegimeAdxOnAUDUSD = 60;
@@ -213,7 +213,7 @@ input double AtrMultiplierBTCUSD = 3.5;
 input double NanpinLevelRatioBTCUSD = 1.1;
 input bool StrictNanpinSpacingBTCUSD = true;
 input double MinAtrBTCUSD = 16.0;
-input double TakeProfitAtrMultiplierBTCUSD = 4.5;
+input double TakeProfitPointsBTCUSD = 3600.0;
 input double TrailingTakeProfitDistanceRatioBTCUSD = 0.50;
 input int AdxPeriodBTCUSD = 14;
 input double RegimeAdxOnBTCUSD = 35.0;
@@ -231,7 +231,7 @@ input double AtrMultiplierETHUSD = 1.6;
 input double NanpinLevelRatioETHUSD = 1.1;
 input bool StrictNanpinSpacingETHUSD = true;
 input double MinAtrETHUSD = 1.2;
-input double TakeProfitAtrMultiplierETHUSD = 1.2;
+input double TakeProfitPointsETHUSD = 3000.0;
 input double TrailingTakeProfitDistanceRatioETHUSD = 0.55;
 input int AdxPeriodETHUSD = 14;
 input double RegimeAdxOnETHUSD = 60;
@@ -254,8 +254,7 @@ struct NM2Params
   double safe_k;
   double safe_slope_k;
   double base_lot;
-  double take_profit_atr_multiplier;
-  double min_take_profit_points;
+  double take_profit_points;
   bool trailing_take_profit;
   double trailing_take_profit_distance_ratio;
   int adx_period;
@@ -659,8 +658,7 @@ void ApplyCommonParams(NM2Params &params)
   params.timed_exit_atr_factor_min = TimedExitAtrFactorMin;
   params.timed_exit_atr_factor_max = TimedExitAtrFactorMax;
   params.trailing_take_profit = EnableTrailingTakeProfit;
-  params.take_profit_atr_multiplier = 1.2;
-  params.min_take_profit_points = 0.0;
+  params.take_profit_points = 120.0;
   params.trailing_take_profit_distance_ratio = 0.55;
   params.close_retry_count = CloseRetryCount;
   params.close_retry_delay_ms = CloseRetryDelayMs;
@@ -686,8 +684,7 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.nanpin_level_ratio = NanpinLevelRatioXAUUSD;
     params.strict_nanpin_spacing = StrictNanpinSpacingXAUUSD;
     params.min_atr = MinAtrXAUUSD;
-    params.take_profit_atr_multiplier = TakeProfitAtrMultiplierXAUUSD;
-    params.min_take_profit_points = MinTakeProfitPointsXAUUSD;
+    params.take_profit_points = TakeProfitPointsXAUUSD;
     params.trailing_take_profit_distance_ratio = TrailingTakeProfitDistanceRatioXAUUSD;
     params.adx_period = AdxPeriodXAUUSD;
     params.regime_adx_on = RegimeAdxOnXAUUSD;
@@ -704,7 +701,7 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.nanpin_level_ratio = NanpinLevelRatioEURUSD;
     params.strict_nanpin_spacing = StrictNanpinSpacingEURUSD;
     params.min_atr = MinAtrEURUSD;
-    params.take_profit_atr_multiplier = TakeProfitAtrMultiplierEURUSD;
+    params.take_profit_points = TakeProfitPointsEURUSD;
     params.trailing_take_profit_distance_ratio = TrailingTakeProfitDistanceRatioEURUSD;
     params.adx_period = AdxPeriodEURUSD;
     params.regime_adx_on = RegimeAdxOnEURUSD;
@@ -721,7 +718,7 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.nanpin_level_ratio = NanpinLevelRatioUSDJPY;
     params.strict_nanpin_spacing = StrictNanpinSpacingUSDJPY;
     params.min_atr = MinAtrUSDJPY;
-    params.take_profit_atr_multiplier = TakeProfitAtrMultiplierUSDJPY;
+    params.take_profit_points = TakeProfitPointsUSDJPY;
     params.trailing_take_profit_distance_ratio = TrailingTakeProfitDistanceRatioUSDJPY;
     params.adx_period = AdxPeriodUSDJPY;
     params.regime_adx_on = RegimeAdxOnUSDJPY;
@@ -738,7 +735,7 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.nanpin_level_ratio = NanpinLevelRatioAUDUSD;
     params.strict_nanpin_spacing = StrictNanpinSpacingAUDUSD;
     params.min_atr = MinAtrAUDUSD;
-    params.take_profit_atr_multiplier = TakeProfitAtrMultiplierAUDUSD;
+    params.take_profit_points = TakeProfitPointsAUDUSD;
     params.trailing_take_profit_distance_ratio = TrailingTakeProfitDistanceRatioAUDUSD;
     params.adx_period = AdxPeriodAUDUSD;
     params.regime_adx_on = RegimeAdxOnAUDUSD;
@@ -755,7 +752,7 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.nanpin_level_ratio = NanpinLevelRatioBTCUSD;
     params.strict_nanpin_spacing = StrictNanpinSpacingBTCUSD;
     params.min_atr = MinAtrBTCUSD;
-    params.take_profit_atr_multiplier = TakeProfitAtrMultiplierBTCUSD;
+    params.take_profit_points = TakeProfitPointsBTCUSD;
     params.trailing_take_profit_distance_ratio = TrailingTakeProfitDistanceRatioBTCUSD;
     params.adx_period = AdxPeriodBTCUSD;
     params.regime_adx_on = RegimeAdxOnBTCUSD;
@@ -772,7 +769,7 @@ void LoadParamsForIndex(int index, NM2Params &params)
     params.nanpin_level_ratio = NanpinLevelRatioETHUSD;
     params.strict_nanpin_spacing = StrictNanpinSpacingETHUSD;
     params.min_atr = MinAtrETHUSD;
-    params.take_profit_atr_multiplier = TakeProfitAtrMultiplierETHUSD;
+    params.take_profit_points = TakeProfitPointsETHUSD;
     params.trailing_take_profit_distance_ratio = TrailingTakeProfitDistanceRatioETHUSD;
     params.adx_period = AdxPeriodETHUSD;
     params.regime_adx_on = RegimeAdxOnETHUSD;
@@ -2234,27 +2231,17 @@ void ResetSellTakeProfitTrail(SymbolState &state)
   state.sell_take_profit_bottom_price = 0.0;
 }
 
-double TakeProfitDistanceFromAtr(const SymbolState &state, double atr_base, double atr_now)
+double TakeProfitDistanceFromPoints(const SymbolState &state)
 {
-  double atr_ref = atr_now;
-  if (atr_ref <= 0.0)
-    atr_ref = atr_base;
-  if (atr_ref <= 0.0)
-    atr_ref = state.params.min_atr;
   double point = state.point;
   if (point <= 0.0)
     point = 0.00001;
-  if (atr_ref <= 0.0)
-    atr_ref = point;
-  double distance = atr_ref * state.params.take_profit_atr_multiplier;
-  double min_points = state.params.min_take_profit_points;
-  if (min_points < 0.0)
-    min_points = 0.0;
-  double min_distance = point;
-  if (min_points > 0.0)
-    min_distance = MathMax(min_distance, min_points * point);
-  if (distance < min_distance)
-    distance = min_distance;
+  double distance_points = state.params.take_profit_points;
+  if (distance_points < 0.0)
+    distance_points = 0.0;
+  double distance = distance_points * point;
+  if (distance < point)
+    distance = point;
   return distance;
 }
 
@@ -2433,13 +2420,13 @@ bool ShouldCloseSellTakeProfit(const SymbolState &state, const BasketInfo &sell,
 
 bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, double take_profit_distance)
 {
-  bool atr_reached = ShouldCloseBuyTakeProfit(state, buy, bid, take_profit_distance);
+  bool tp_reached = ShouldCloseBuyTakeProfit(state, buy, bid, take_profit_distance);
   int combined_profit_close_level = EffectiveCombinedProfitCloseLevel(state);
   bool deep_profit_reached = DeepLevelProfitTrailStartReached(buy, combined_profit_close_level);
   if (!state.params.trailing_take_profit)
   {
     ResetBuyTakeProfitTrail(state);
-    if (atr_reached)
+    if (tp_reached)
     {
       CloseBasket(state, POSITION_TYPE_BUY);
       return true;
@@ -2450,13 +2437,13 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
   if (!state.buy_take_profit_trailing_active)
   {
     bool fixed_reached = FixedTrailStartReachedBuy(state, buy, bid);
-    bool arm_signal = atr_reached || fixed_reached || deep_profit_reached;
+    bool arm_signal = tp_reached || fixed_reached || deep_profit_reached;
     if (arm_signal)
     {
       state.buy_take_profit_trailing_active = true;
       state.buy_take_profit_peak_price = bid;
-      PrintFormat("Take-profit trail armed: %s BUY start=%.5f (atr=%d fixed=%d deep_pl=%d)",
-                  state.broker_symbol, bid, (int)atr_reached, (int)fixed_reached, (int)deep_profit_reached);
+      PrintFormat("Take-profit trail armed: %s BUY start=%.5f (tp=%d fixed=%d deep_pl=%d)",
+                  state.broker_symbol, bid, (int)tp_reached, (int)fixed_reached, (int)deep_profit_reached);
     }
     return false;
   }
@@ -2493,13 +2480,13 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
 
 bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask, double take_profit_distance)
 {
-  bool atr_reached = ShouldCloseSellTakeProfit(state, sell, ask, take_profit_distance);
+  bool tp_reached = ShouldCloseSellTakeProfit(state, sell, ask, take_profit_distance);
   int combined_profit_close_level = EffectiveCombinedProfitCloseLevel(state);
   bool deep_profit_reached = DeepLevelProfitTrailStartReached(sell, combined_profit_close_level);
   if (!state.params.trailing_take_profit)
   {
     ResetSellTakeProfitTrail(state);
-    if (atr_reached)
+    if (tp_reached)
     {
       CloseBasket(state, POSITION_TYPE_SELL);
       return true;
@@ -2510,13 +2497,13 @@ bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask
   if (!state.sell_take_profit_trailing_active)
   {
     bool fixed_reached = FixedTrailStartReachedSell(state, sell, ask);
-    bool arm_signal = atr_reached || fixed_reached || deep_profit_reached;
+    bool arm_signal = tp_reached || fixed_reached || deep_profit_reached;
     if (arm_signal)
     {
       state.sell_take_profit_trailing_active = true;
       state.sell_take_profit_bottom_price = ask;
-      PrintFormat("Take-profit trail armed: %s SELL start=%.5f (atr=%d fixed=%d deep_pl=%d)",
-                  state.broker_symbol, ask, (int)atr_reached, (int)fixed_reached, (int)deep_profit_reached);
+      PrintFormat("Take-profit trail armed: %s SELL start=%.5f (tp=%d fixed=%d deep_pl=%d)",
+                  state.broker_symbol, ask, (int)tp_reached, (int)fixed_reached, (int)deep_profit_reached);
     }
     return false;
   }
@@ -2606,7 +2593,7 @@ void ProcessSymbolTick(SymbolState &state)
   double atr_now = 0.0;
   double atr_slope = 0.0;
   GetAtrSnapshot(state, atr_base, atr_now, atr_slope);
-  double take_profit_distance = TakeProfitDistanceFromAtr(state, atr_base, atr_now);
+  double take_profit_distance = TakeProfitDistanceFromPoints(state);
   bool is_trading_time = IsTradingTime() || IgnoreTradingTimeForSymbol(state);
   int nanpin_levels = EffectiveNanpinLevelsRuntime(state, is_trading_time);
   double value_per_unit = PriceValuePerUnitCached(state);
