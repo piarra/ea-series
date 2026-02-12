@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.57"
+#property version   "1.59"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -35,6 +35,8 @@
 // v1.55 Titan FX口座のXAUUSD point補正を0.1倍に戻し、Exness基準のpoint感覚へ再調整
 // v1.56 利確トレール発動後は成行クローズ優先からSL追従優先へ変更 (失敗時のみフォールバッククローズ)
 // v1.57 SL更新前の同値判定をtick_size基準へ変更し、no-op modify送信を抑止
+// v1.58 トレールSL更新に送信間隔/レート制限クールダウンを追加し、too many requestsを抑制
+// v1.59 SL更新の停止条件をブローカーpoint基準へ修正し、invalid stops時の再クランプ再試行を追加
 
 #include <Trade/Trade.mqh>
 
@@ -67,6 +69,8 @@ input int SlippagePoints = 4;
 input int StartDelaySeconds = 5;
 input int CloseRetryCount = 3;
 input int CloseRetryDelayMs = 200;
+input int TrailSLModifyMinIntervalMs = 600;
+input int TrailSLRateLimitCooldownMs = 2000;
 input bool SafetyMode = false;
 input double SafeK = 2.0;
 input double SafeSlopeK = 0.3;
@@ -90,14 +94,14 @@ input double DiGapMin = 2.0;
 
 input group "TAKE PROFIT"
 input bool EnableFixedTrailStart = true;
-input double FixedTrailStartPointsXAUUSD = 1800.0;
+input double FixedTrailStartPointsXAUUSD = 2000.0;
 input double FixedTrailStartPointsEURUSD = 120.0;
 input double FixedTrailStartPointsUSDJPY = 120.0;
 input double FixedTrailStartPointsAUDUSD = 120.0;
 input double FixedTrailStartPointsBTCUSD = 3600.0;
 input double FixedTrailStartPointsETHUSD = 3000.0;
-input bool EnableTakeProfitTrailDistanceCap = false;
-input double FixedTrailDistanceCapRatio = 0.24;
+input bool EnableTakeProfitTrailDistanceCap = true;
+input double FixedTrailDistanceCapRatio = 0.20;
 
 input group "RISK CONTROL"
 input bool EnableBalanceGuard = false;
@@ -134,12 +138,12 @@ input double AtrMultiplierXAUUSD = 1.4;
 input double NanpinLevelRatioXAUUSD = 1.1;
 input bool StrictNanpinSpacingXAUUSD = true;
 input double MinAtrXAUUSD = 1.6;
-input double TakeProfitAtrMultiplierXAUUSD = 1.2;
-input double TrailingTakeProfitDistanceRatioXAUUSD = 0.55;
+input double TakeProfitAtrMultiplierXAUUSD = 1.3;
+input double TrailingTakeProfitDistanceRatioXAUUSD = 0.40;
 input int AdxPeriodXAUUSD = 14;
 input double RegimeAdxOnXAUUSD = 40.0;
 input double RegimeAdxOffXAUUSD = 25.0;
-input double MaxSpreadPointsXAUUSD = 400.0;
+input double MaxSpreadPointsXAUUSD = 320.0;
 input int MaxLevelsXAUUSD = 8;
 input bool NoMartingaleXAUUSD = false;
 input bool DoubleSecondLotXAUUSD = true;
@@ -280,6 +284,8 @@ struct NM2Params
   double timed_exit_atr_factor_max;
   int close_retry_count;
   int close_retry_delay_ms;
+  int trail_sl_modify_min_interval_ms;
+  int trail_sl_rate_limit_cooldown_ms;
   bool enable_balance_guard;
   double min_account_balance;
   bool close_positions_on_low_balance;
@@ -357,6 +363,10 @@ struct SymbolState
   bool sell_take_profit_trailing_active;
   double buy_take_profit_peak_price;
   double sell_take_profit_bottom_price;
+  ulong buy_trail_sl_last_send_ms;
+  ulong sell_trail_sl_last_send_ms;
+  ulong buy_trail_sl_cooldown_until_ms;
+  ulong sell_trail_sl_cooldown_until_ms;
   bool buy_stop_active;
   bool sell_stop_active;
   int buy_skip_levels;
@@ -574,6 +584,10 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.sell_take_profit_trailing_active = false;
   state.buy_take_profit_peak_price = 0.0;
   state.sell_take_profit_bottom_price = 0.0;
+  state.buy_trail_sl_last_send_ms = 0;
+  state.sell_trail_sl_last_send_ms = 0;
+  state.buy_trail_sl_cooldown_until_ms = 0;
+  state.sell_trail_sl_cooldown_until_ms = 0;
   state.buy_stop_active = false;
   state.sell_stop_active = false;
   state.buy_skip_levels = 0;
@@ -646,6 +660,8 @@ void ApplyCommonParams(NM2Params &params)
   params.trailing_take_profit_distance_ratio = 0.55;
   params.close_retry_count = CloseRetryCount;
   params.close_retry_delay_ms = CloseRetryDelayMs;
+  params.trail_sl_modify_min_interval_ms = TrailSLModifyMinIntervalMs;
+  params.trail_sl_rate_limit_cooldown_ms = TrailSLRateLimitCooldownMs;
   params.enable_balance_guard = EnableBalanceGuard;
   params.min_account_balance = MinAccountBalance;
   params.close_positions_on_low_balance = ClosePositionsOnLowBalance;
@@ -1721,13 +1737,31 @@ void CloseBasket(const SymbolState &state, ENUM_POSITION_TYPE type)
   }
 }
 
-bool UpdateBasketSL(const SymbolState &state,
+bool UpdateBasketSL(SymbolState &state,
                     ENUM_POSITION_TYPE type,
                     double requested_sl,
                     double &applied_sl)
 {
   const string symbol = state.broker_symbol;
   const int magic = state.params.magic_number;
+  bool is_buy = (type == POSITION_TYPE_BUY);
+  ulong now_ms = GetTickCount();
+
+  ulong cooldown_until_ms = is_buy ? state.buy_trail_sl_cooldown_until_ms : state.sell_trail_sl_cooldown_until_ms;
+  if (cooldown_until_ms > 0 && now_ms < cooldown_until_ms)
+    return true;
+
+  int min_interval_ms = state.params.trail_sl_modify_min_interval_ms;
+  if (min_interval_ms < 0)
+    min_interval_ms = 0;
+  ulong last_send_ms = is_buy ? state.buy_trail_sl_last_send_ms : state.sell_trail_sl_last_send_ms;
+  if (min_interval_ms > 0 && last_send_ms > 0)
+  {
+    ulong elapsed_ms = (now_ms >= last_send_ms) ? (now_ms - last_send_ms) : 0;
+    if (elapsed_ms < (ulong)min_interval_ms)
+      return true;
+  }
+
   applied_sl = requested_sl;
 
   int stops_level = (int)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
@@ -1737,14 +1771,17 @@ bool UpdateBasketSL(const SymbolState &state,
   if (freeze_level < 0)
     freeze_level = 0;
 
-  double point = state.point;
-  if (point <= 0.0)
-    point = 0.00001;
+  double broker_point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+  if (broker_point <= 0.0)
+    broker_point = state.point;
+  if (broker_point <= 0.0)
+    broker_point = 0.00001;
+
   double price_step = state.tick_size;
   if (price_step <= 0.0)
     price_step = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
   if (price_step <= 0.0)
-    price_step = point;
+    price_step = broker_point;
   if (price_step <= 0.0)
     price_step = 0.00001;
   int price_digits = state.digits;
@@ -1757,7 +1794,9 @@ bool UpdateBasketSL(const SymbolState &state,
   if (!SymbolInfoTick(symbol, tick))
     return false;
 
-  double min_dist = (stops_level + freeze_level + 2) * point;
+  double stops_dist = stops_level * broker_point;
+  double freeze_dist = freeze_level * broker_point;
+  double min_dist = stops_dist + (2.0 * broker_point);
   if (type == POSITION_TYPE_BUY)
   {
     double max_sl = tick.bid - min_dist;
@@ -1784,6 +1823,8 @@ bool UpdateBasketSL(const SymbolState &state,
   bool any_position = false;
   bool all_protected = true;
   double tol = price_step * 0.5;
+  bool attempted_modify = false;
+  bool rate_limited = false;
 
   for (int i = PositionsTotal() - 1; i >= 0; --i)
   {
@@ -1821,19 +1862,76 @@ bool UpdateBasketSL(const SymbolState &state,
         continue;
     }
 
+    if (cur_sl_cmp > 0.0 && freeze_dist > 0.0)
+    {
+      if (type == POSITION_TYPE_BUY && (tick.bid - cur_sl_cmp) <= (freeze_dist + tol))
+        continue;
+      if (type == POSITION_TYPE_SELL && (cur_sl_cmp - tick.ask) <= (freeze_dist + tol))
+        continue;
+    }
+
     bool modified = false;
     int attempts = 0;
     while (attempts <= state.params.close_retry_count)
     {
-      if (tr.PositionModify(ticket, applied_sl, tp_req))
+      MqlTick t_now;
+      if (!SymbolInfoTick(symbol, t_now))
+      {
+        attempts++;
+        continue;
+      }
+      double step_up = (double)(attempts * 2);
+      double min_dist_now = stops_dist + (2.0 + step_up) * broker_point;
+      double sl_try = applied_sl;
+      if (type == POSITION_TYPE_BUY)
+      {
+        double max_sl_now = t_now.bid - min_dist_now;
+        if (sl_try > max_sl_now)
+          sl_try = max_sl_now;
+        sl_try = MathFloor(sl_try / price_step) * price_step;
+      }
+      else
+      {
+        double min_sl_now = t_now.ask + min_dist_now;
+        if (sl_try < min_sl_now)
+          sl_try = min_sl_now;
+        sl_try = MathCeil(sl_try / price_step) * price_step;
+      }
+      sl_try = NormalizeDouble(sl_try, price_digits);
+
+      if (cur_sl_cmp > 0.0 && MathAbs(sl_try - cur_sl_cmp) <= tol)
       {
         modified = true;
         break;
+      }
+
+      attempted_modify = true;
+      if (tr.PositionModify(ticket, sl_try, tp_req))
+      {
+        applied_sl = sl_try;
+        modified = true;
+        break;
+      }
+      uint retcode = tr.ResultRetcode();
+      if (retcode == TRADE_RETCODE_TOO_MANY_REQUESTS)
+      {
+        rate_limited = true;
+        break;
+      }
+      if (retcode == TRADE_RETCODE_INVALID_STOPS)
+      {
+        attempts++;
+        if (attempts <= state.params.close_retry_count && state.params.close_retry_delay_ms > 0)
+          Sleep(state.params.close_retry_delay_ms);
+        continue;
       }
       attempts++;
       if (attempts <= state.params.close_retry_count && state.params.close_retry_delay_ms > 0)
         Sleep(state.params.close_retry_delay_ms);
     }
+
+    if (rate_limited)
+      break;
 
     if (!modified)
     {
@@ -1842,6 +1940,36 @@ bool UpdateBasketSL(const SymbolState &state,
                   symbol, ticket, (int)type, applied_sl, tr.ResultRetcode(), tr.ResultRetcodeDescription());
     }
   }
+
+  if (attempted_modify)
+  {
+    if (is_buy)
+      state.buy_trail_sl_last_send_ms = now_ms;
+    else
+      state.sell_trail_sl_last_send_ms = now_ms;
+  }
+
+  if (rate_limited)
+  {
+    int cooldown_ms = state.params.trail_sl_rate_limit_cooldown_ms;
+    if (cooldown_ms < min_interval_ms)
+      cooldown_ms = min_interval_ms;
+    if (cooldown_ms < 0)
+      cooldown_ms = 0;
+    ulong until_ms = now_ms + (ulong)cooldown_ms;
+    if (is_buy)
+      state.buy_trail_sl_cooldown_until_ms = until_ms;
+    else
+      state.sell_trail_sl_cooldown_until_ms = until_ms;
+    PrintFormat("Trail SL rate limited: %s type=%d cooldown_ms=%d",
+                symbol, (int)type, cooldown_ms);
+    return true;
+  }
+
+  if (is_buy)
+    state.buy_trail_sl_cooldown_until_ms = 0;
+  else
+    state.sell_trail_sl_cooldown_until_ms = 0;
 
   if (!any_position)
     return true;
