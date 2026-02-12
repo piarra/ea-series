@@ -94,14 +94,14 @@ input double DiGapMin = 2.0;
 
 input group "TAKE PROFIT"
 input bool EnableFixedTrailStart = true;
-input double FixedTrailStartPointsXAUUSD = 2000.0;
+input double FixedTrailStartPointsXAUUSD = 2500.0;
 input double FixedTrailStartPointsEURUSD = 120.0;
 input double FixedTrailStartPointsUSDJPY = 120.0;
 input double FixedTrailStartPointsAUDUSD = 120.0;
 input double FixedTrailStartPointsBTCUSD = 3600.0;
 input double FixedTrailStartPointsETHUSD = 3000.0;
 input bool EnableTakeProfitTrailDistanceCap = true;
-input double FixedTrailDistanceCapRatio = 0.20;
+input double FixedTrailDistanceCapRatio = 0.24;
 
 input group "RISK CONTROL"
 input bool EnableBalanceGuard = false;
@@ -111,7 +111,7 @@ input bool EnableBasketLossStop = false;
 input double BasketLossStopAtrMultiplierLevel1 = 6.0;
 input double BasketLossStopNanpinWidthMultiplierLevel2Plus = 6.0;
 input int CombinedProfitCloseLevel = 3;
-input double CombinedProfitCloseAtrMultiplier = 4.60;
+input double CombinedProfitCloseAtrMultiplier = 3.80;
 
 input group "MANAGEMENT SERVER"
 input string ManagementServerHost = "";
@@ -138,7 +138,7 @@ input double AtrMultiplierXAUUSD = 1.4;
 input double NanpinLevelRatioXAUUSD = 1.1;
 input bool StrictNanpinSpacingXAUUSD = true;
 input double MinAtrXAUUSD = 1.6;
-input double TakeProfitAtrMultiplierXAUUSD = 1.3;
+input double TakeProfitAtrMultiplierXAUUSD = 1.4;
 input double TrailingTakeProfitDistanceRatioXAUUSD = 0.40;
 input int AdxPeriodXAUUSD = 14;
 input double RegimeAdxOnXAUUSD = 40.0;
