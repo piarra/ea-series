@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.62"
+#property version   "1.65"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -40,6 +40,9 @@
 // v1.60 ATR連動利確距離に最小points下限を追加 (XAUUSD: 120pt)
 // v1.61 利確距離のATR連動を廃止し、通貨別points指定へ変更
 // v1.62 利確トレールをSL更新方式/一括Close方式で切替可能化 (デフォルト: 一括Close)
+// v1.63 最深レベルのみトレール継続し、COMMENTへバスケット連番(Bxx)を付与
+// v1.64 L1単独でも利確後トレールを継続できるようにし、完了済みバスケットを分離管理
+// v1.65 非同期クローズ時の同一ticket重複ログ/lot集計を抑止
 
 #include <Trade/Trade.mqh>
 
@@ -47,12 +50,16 @@ namespace NM2
 {
 enum { kMaxLevels = 20 };
 enum { kMaxSymbols = 6 };
+enum { kMaxTrackedBaskets = 64 };
 const int kAtrBasePeriod = 14;
 const int kLotDigits = 2;
 const double kMinLot = 0.01;
 const double kMaxLot = 100.0;
 const string kCoreComment = "NM2_CORE";
 const int kLevelCap = 8;
+const int kRecentCloseRequestCap = 256;
+const ulong kRecentCloseRequestTtlMs = 3000;
+const int kClosedTicketCountCap = 4096;
 const double kLotMultiplierFromLevel3 = 1.5;
 const double kDeepLevelTrailLockPoints = 2.0;
 }
@@ -305,8 +312,11 @@ struct NM2Params
 
 struct BasketInfo
 {
+  int basket_id;
   int count;
   int level_count;
+  int deepest_level;
+  ulong deepest_ticket;
   double volume;
   double avg_price;
   double min_price;
@@ -319,6 +329,9 @@ CTrade close_trade;
 
 double cumulative_trade_lots = 0.0;
 datetime cumulative_lot_start_time = 0;
+ulong recent_close_request_tickets[];
+ulong recent_close_request_times_ms[];
+ulong counted_closed_tickets[];
 
 struct SymbolState
 {
@@ -337,6 +350,15 @@ struct SymbolState
   int filling_mode;
   datetime start_time;
   bool initial_started;
+  int next_basket_id;
+  int buy_active_basket_id;
+  int sell_active_basket_id;
+  bool buy_close_as_completed;
+  bool sell_close_as_completed;
+  int buy_completed_basket_count;
+  int sell_completed_basket_count;
+  int buy_completed_basket_ids[NM2::kMaxTrackedBaskets];
+  int sell_completed_basket_ids[NM2::kMaxTrackedBaskets];
   double lot_seq[NM2::kMaxLevels];
   double buy_level_price[NM2::kMaxLevels];
   double sell_level_price[NM2::kMaxLevels];
@@ -392,6 +414,9 @@ struct SymbolState
 SymbolState symbols[NM2::kMaxSymbols];
 int symbols_count = 0;
 
+int BasketIdFromComment(const string comment);
+double TakeProfitTrailDistanceCapped(const SymbolState &state, double take_profit_distance);
+
 bool IsManagedMagic(const int magic)
 {
   if (magic == MagicNumber)
@@ -399,14 +424,120 @@ bool IsManagedMagic(const int magic)
   return false;
 }
 
+void ClearCloseTracking()
+{
+  ArrayResize(recent_close_request_tickets, 0);
+  ArrayResize(recent_close_request_times_ms, 0);
+  ArrayResize(counted_closed_tickets, 0);
+}
+
+int FindTicketIndex(const ulong &tickets[], const ulong ticket)
+{
+  int count = ArraySize(tickets);
+  for (int i = 0; i < count; ++i)
+  {
+    if (tickets[i] == ticket)
+      return i;
+  }
+  return -1;
+}
+
+void CleanupRecentCloseRequests(const ulong now_ms)
+{
+  int count = ArraySize(recent_close_request_tickets);
+  if (count <= 0)
+    return;
+  int write_index = 0;
+  for (int i = 0; i < count; ++i)
+  {
+    ulong sent_ms = recent_close_request_times_ms[i];
+    ulong elapsed_ms = (now_ms >= sent_ms) ? (now_ms - sent_ms) : 0;
+    if (elapsed_ms > NM2::kRecentCloseRequestTtlMs)
+      continue;
+    if (write_index != i)
+    {
+      recent_close_request_tickets[write_index] = recent_close_request_tickets[i];
+      recent_close_request_times_ms[write_index] = recent_close_request_times_ms[i];
+    }
+    write_index++;
+  }
+  if (write_index < count)
+  {
+    ArrayResize(recent_close_request_tickets, write_index);
+    ArrayResize(recent_close_request_times_ms, write_index);
+  }
+}
+
+bool IsRecentCloseRequestPending(const ulong ticket, const ulong now_ms)
+{
+  CleanupRecentCloseRequests(now_ms);
+  int idx = FindTicketIndex(recent_close_request_tickets, ticket);
+  if (idx < 0)
+    return false;
+  ulong sent_ms = recent_close_request_times_ms[idx];
+  ulong elapsed_ms = (now_ms >= sent_ms) ? (now_ms - sent_ms) : 0;
+  return elapsed_ms <= NM2::kRecentCloseRequestTtlMs;
+}
+
+void MarkRecentCloseRequest(const ulong ticket, const ulong now_ms)
+{
+  int idx = FindTicketIndex(recent_close_request_tickets, ticket);
+  if (idx >= 0)
+  {
+    recent_close_request_times_ms[idx] = now_ms;
+    return;
+  }
+  int count = ArraySize(recent_close_request_tickets);
+  if (count >= NM2::kRecentCloseRequestCap)
+  {
+    for (int i = 1; i < count; ++i)
+    {
+      recent_close_request_tickets[i - 1] = recent_close_request_tickets[i];
+      recent_close_request_times_ms[i - 1] = recent_close_request_times_ms[i];
+    }
+    count--;
+    ArrayResize(recent_close_request_tickets, count);
+    ArrayResize(recent_close_request_times_ms, count);
+  }
+  ArrayResize(recent_close_request_tickets, count + 1);
+  ArrayResize(recent_close_request_times_ms, count + 1);
+  recent_close_request_tickets[count] = ticket;
+  recent_close_request_times_ms[count] = now_ms;
+}
+
+bool IsTicketAlreadyCounted(const ulong ticket)
+{
+  return (FindTicketIndex(counted_closed_tickets, ticket) >= 0);
+}
+
+void MarkTicketCounted(const ulong ticket)
+{
+  if (IsTicketAlreadyCounted(ticket))
+    return;
+  int count = ArraySize(counted_closed_tickets);
+  if (count >= NM2::kClosedTicketCountCap)
+  {
+    for (int i = 1; i < count; ++i)
+      counted_closed_tickets[i - 1] = counted_closed_tickets[i];
+    count--;
+    ArrayResize(counted_closed_tickets, count);
+  }
+  ArrayResize(counted_closed_tickets, count + 1);
+  counted_closed_tickets[count] = ticket;
+}
+
 void InitCumulativeLotTracking()
 {
   cumulative_trade_lots = 0.0;
   cumulative_lot_start_time = TimeCurrent();
+  ClearCloseTracking();
 }
 
 bool ClosePositionWithLog(const ulong ticket, const string context)
 {
+  ulong now_ms = GetTickCount();
+  if (IsRecentCloseRequestPending(ticket, now_ms))
+    return true;
   double volume = 0.0;
   string symbol = "";
   int magic = 0;
@@ -419,18 +550,24 @@ bool ClosePositionWithLog(const ulong ticket, const string context)
     has_info = true;
   }
   bool closed = close_trade.PositionClose(ticket);
+  if (closed)
+    MarkRecentCloseRequest(ticket, now_ms);
   if (closed && has_info && IsManagedMagic(magic) && volume > 0.0)
   {
-    cumulative_trade_lots += volume;
-    if (StringLen(context) > 0)
+    if (!IsTicketAlreadyCounted(ticket))
     {
-      PrintFormat("Position closed: ticket=%I64u symbol=%s lots=%.2f total=%.2f (%s)",
-                  ticket, symbol, volume, cumulative_trade_lots, context);
-    }
-    else
-    {
-      PrintFormat("Position closed: ticket=%I64u symbol=%s lots=%.2f total=%.2f",
-                  ticket, symbol, volume, cumulative_trade_lots);
+      cumulative_trade_lots += volume;
+      MarkTicketCounted(ticket);
+      if (StringLen(context) > 0)
+      {
+        PrintFormat("Position closed: ticket=%I64u symbol=%s lots=%.2f total=%.2f (%s)",
+                    ticket, symbol, volume, cumulative_trade_lots, context);
+      }
+      else
+      {
+        PrintFormat("Position closed: ticket=%I64u symbol=%s lots=%.2f total=%.2f",
+                    ticket, symbol, volume, cumulative_trade_lots);
+      }
     }
   }
   return closed;
@@ -563,6 +700,18 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.filling_mode = 0;
   state.start_time = TimeCurrent();
   state.initial_started = false;
+  state.next_basket_id = 1;
+  state.buy_active_basket_id = 0;
+  state.sell_active_basket_id = 0;
+  state.buy_close_as_completed = false;
+  state.sell_close_as_completed = false;
+  state.buy_completed_basket_count = 0;
+  state.sell_completed_basket_count = 0;
+  for (int i = 0; i < NM2::kMaxTrackedBaskets; ++i)
+  {
+    state.buy_completed_basket_ids[i] = 0;
+    state.sell_completed_basket_ids[i] = 0;
+  }
   state.last_buy_close_time = 0;
   state.last_sell_close_time = 0;
   state.last_buy_nanpin_time = 0;
@@ -874,7 +1023,7 @@ void ClearLevelPrices(double &prices[])
     prices[i] = 0.0;
 }
 
-void SyncLevelPricesFromPositions(SymbolState &state)
+void SyncLevelPricesFromPositions(SymbolState &state, int buy_basket_id, int sell_basket_id)
 {
   const string symbol = state.broker_symbol;
   const int magic = state.params.magic_number;
@@ -888,6 +1037,7 @@ void SyncLevelPricesFromPositions(SymbolState &state)
     if (PositionGetString(POSITION_SYMBOL) != symbol)
       continue;
     string comment = PositionGetString(POSITION_COMMENT);
+    int basket_id = BasketIdFromComment(comment);
     int level = ExtractLevelFromComment(comment);
     if (level <= 0)
       level = 1;
@@ -897,11 +1047,15 @@ void SyncLevelPricesFromPositions(SymbolState &state)
     int type = (int)PositionGetInteger(POSITION_TYPE);
     if (type == POSITION_TYPE_BUY)
     {
+      if (buy_basket_id <= 0 || basket_id != buy_basket_id)
+        continue;
       if (state.buy_level_price[level - 1] <= 0.0)
         state.buy_level_price[level - 1] = price;
     }
     else if (type == POSITION_TYPE_SELL)
     {
+      if (sell_basket_id <= 0 || basket_id != sell_basket_id)
+        continue;
       if (state.sell_level_price[level - 1] <= 0.0)
         state.sell_level_price[level - 1] = price;
     }
@@ -993,6 +1147,26 @@ bool HasOpenPosition(const SymbolState &state)
   return false;
 }
 
+bool HasOpenPositionByType(const SymbolState &state, ENUM_POSITION_TYPE type)
+{
+  const string symbol = state.broker_symbol;
+  const int magic = state.params.magic_number;
+  for (int i = PositionsTotal() - 1; i >= 0; --i)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if (!PositionSelectByTicket(ticket))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != magic)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != symbol)
+      continue;
+    if ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != type)
+      continue;
+    return true;
+  }
+  return false;
+}
+
 int ExtractLevelFromComment(const string comment)
 {
   int pos = StringFind(comment, "_L");
@@ -1005,11 +1179,230 @@ int ExtractLevelFromComment(const string comment)
   return level;
 }
 
-string MakeLevelComment(const string base, int level)
+int ExtractBasketIdFromComment(const string comment)
 {
+  int pos = StringFind(comment, "_B");
+  if (pos < 0)
+    return 0;
+  int tail_start = pos + 2;
+  int level_pos = StringFind(comment, "_L", tail_start);
+  string tail = "";
+  if (level_pos >= 0)
+    tail = StringSubstr(comment, tail_start, level_pos - tail_start);
+  else
+    tail = StringSubstr(comment, tail_start);
+  int basket_id = (int)StringToInteger(tail);
+  if (basket_id < 0)
+    return 0;
+  return basket_id;
+}
+
+int BasketIdFromComment(const string comment)
+{
+  int basket_id = ExtractBasketIdFromComment(comment);
+  if (basket_id <= 0)
+    basket_id = 1;
+  return basket_id;
+}
+
+int NextBasketId(const SymbolState &state)
+{
+  if (state.next_basket_id > 0)
+    return state.next_basket_id;
+  return 1;
+}
+
+int FindCompletedBasketIndex(const int &basket_ids[], int count, int basket_id)
+{
+  for (int i = 0; i < count; ++i)
+  {
+    if (basket_ids[i] == basket_id)
+      return i;
+  }
+  return -1;
+}
+
+bool IsCompletedBasket(const SymbolState &state, ENUM_POSITION_TYPE type, int basket_id)
+{
+  if (basket_id <= 0)
+    return false;
+  if (type == POSITION_TYPE_BUY)
+    return FindCompletedBasketIndex(state.buy_completed_basket_ids, state.buy_completed_basket_count, basket_id) >= 0;
+  if (type == POSITION_TYPE_SELL)
+    return FindCompletedBasketIndex(state.sell_completed_basket_ids, state.sell_completed_basket_count, basket_id) >= 0;
+  return false;
+}
+
+bool HasBasketPosition(const SymbolState &state, ENUM_POSITION_TYPE type, int basket_id)
+{
+  if (basket_id <= 0)
+    return false;
+  const string symbol = state.broker_symbol;
+  const int magic = state.params.magic_number;
+  for (int i = PositionsTotal() - 1; i >= 0; --i)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if (!PositionSelectByTicket(ticket))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != magic)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != symbol)
+      continue;
+    if ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != type)
+      continue;
+    string comment = PositionGetString(POSITION_COMMENT);
+    if (BasketIdFromComment(comment) != basket_id)
+      continue;
+    return true;
+  }
+  return false;
+}
+
+void RemoveCompletedBasketAt(int &basket_ids[], int &count, int index)
+{
+  if (index < 0 || index >= count)
+    return;
+  for (int i = index; i < (count - 1); ++i)
+    basket_ids[i] = basket_ids[i + 1];
+  if (count > 0)
+  {
+    count--;
+    basket_ids[count] = 0;
+  }
+}
+
+void CleanupCompletedBasketSide(SymbolState &state, ENUM_POSITION_TYPE type)
+{
+  if (type == POSITION_TYPE_BUY)
+  {
+    int i = 0;
+    while (i < state.buy_completed_basket_count)
+    {
+      int basket_id = state.buy_completed_basket_ids[i];
+      if (basket_id <= 0 || !HasBasketPosition(state, type, basket_id))
+      {
+        RemoveCompletedBasketAt(state.buy_completed_basket_ids, state.buy_completed_basket_count, i);
+        continue;
+      }
+      i++;
+    }
+  }
+  else if (type == POSITION_TYPE_SELL)
+  {
+    int i = 0;
+    while (i < state.sell_completed_basket_count)
+    {
+      int basket_id = state.sell_completed_basket_ids[i];
+      if (basket_id <= 0 || !HasBasketPosition(state, type, basket_id))
+      {
+        RemoveCompletedBasketAt(state.sell_completed_basket_ids, state.sell_completed_basket_count, i);
+        continue;
+      }
+      i++;
+    }
+  }
+}
+
+void CleanupCompletedBaskets(SymbolState &state)
+{
+  CleanupCompletedBasketSide(state, POSITION_TYPE_BUY);
+  CleanupCompletedBasketSide(state, POSITION_TYPE_SELL);
+}
+
+void AddCompletedBasket(SymbolState &state, ENUM_POSITION_TYPE type, int basket_id)
+{
+  if (basket_id <= 0)
+    return;
+  if (IsCompletedBasket(state, type, basket_id))
+    return;
+  if (type == POSITION_TYPE_BUY)
+  {
+    if (state.buy_completed_basket_count >= NM2::kMaxTrackedBaskets)
+      return;
+    state.buy_completed_basket_ids[state.buy_completed_basket_count] = basket_id;
+    state.buy_completed_basket_count++;
+  }
+  else if (type == POSITION_TYPE_SELL)
+  {
+    if (state.sell_completed_basket_count >= NM2::kMaxTrackedBaskets)
+      return;
+    state.sell_completed_basket_ids[state.sell_completed_basket_count] = basket_id;
+    state.sell_completed_basket_count++;
+  }
+}
+
+void CommitBasketId(SymbolState &state, ENUM_POSITION_TYPE type, int basket_id)
+{
+  if (basket_id <= 0)
+    basket_id = 1;
+  if (type == POSITION_TYPE_BUY)
+    state.buy_active_basket_id = basket_id;
+  else if (type == POSITION_TYPE_SELL)
+    state.sell_active_basket_id = basket_id;
+  if (state.next_basket_id <= basket_id)
+    state.next_basket_id = basket_id + 1;
+}
+
+void RefreshBasketSequenceState(SymbolState &state)
+{
+  CleanupCompletedBaskets(state);
+  const string symbol = state.broker_symbol;
+  const int magic = state.params.magic_number;
+  int prev_buy_active_basket_id = state.buy_active_basket_id;
+  int prev_sell_active_basket_id = state.sell_active_basket_id;
+  int max_basket_id = 0;
+  int buy_active_basket_id = 0;
+  int sell_active_basket_id = 0;
+  for (int i = PositionsTotal() - 1; i >= 0; --i)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if (!PositionSelectByTicket(ticket))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != magic)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != symbol)
+      continue;
+    string comment = PositionGetString(POSITION_COMMENT);
+    int basket_id = BasketIdFromComment(comment);
+    int level = ExtractLevelFromComment(comment);
+    if (level <= 0)
+      level = 1;
+    if (basket_id > max_basket_id)
+      max_basket_id = basket_id;
+    int type = (int)PositionGetInteger(POSITION_TYPE);
+    if (level == 1)
+    {
+      if (type == POSITION_TYPE_BUY && !IsCompletedBasket(state, POSITION_TYPE_BUY, basket_id) && basket_id > buy_active_basket_id)
+        buy_active_basket_id = basket_id;
+      else if (type == POSITION_TYPE_SELL && !IsCompletedBasket(state, POSITION_TYPE_SELL, basket_id) && basket_id > sell_active_basket_id)
+        sell_active_basket_id = basket_id;
+    }
+  }
+  if (buy_active_basket_id == 0 && prev_buy_active_basket_id > 0)
+  {
+    if (!IsCompletedBasket(state, POSITION_TYPE_BUY, prev_buy_active_basket_id)
+        && HasBasketPosition(state, POSITION_TYPE_BUY, prev_buy_active_basket_id))
+      buy_active_basket_id = prev_buy_active_basket_id;
+  }
+  if (sell_active_basket_id == 0 && prev_sell_active_basket_id > 0)
+  {
+    if (!IsCompletedBasket(state, POSITION_TYPE_SELL, prev_sell_active_basket_id)
+        && HasBasketPosition(state, POSITION_TYPE_SELL, prev_sell_active_basket_id))
+      sell_active_basket_id = prev_sell_active_basket_id;
+  }
+  state.buy_active_basket_id = buy_active_basket_id;
+  state.sell_active_basket_id = sell_active_basket_id;
+  if (state.next_basket_id <= max_basket_id)
+    state.next_basket_id = max_basket_id + 1;
+}
+
+string MakeLevelComment(const string base, int basket_id, int level)
+{
+  if (basket_id <= 0)
+    basket_id = 1;
   if (level <= 0)
-    return base;
-  return StringFormat("%s_L%d", base, level);
+    return StringFormat("%s_B%d", base, basket_id);
+  return StringFormat("%s_B%d_L%d", base, basket_id, level);
 }
 
 int OnInit()
@@ -1259,23 +1652,29 @@ int SelectSingleEntryDirection(const SymbolState &state,
   return 0;
 }
 
-void CollectBasketInfo(const SymbolState &state, BasketInfo &buy, BasketInfo &sell)
+void ResetBasketInfo(BasketInfo &basket, int basket_id)
+{
+  basket.basket_id = basket_id;
+  basket.count = 0;
+  basket.level_count = 0;
+  basket.deepest_level = 0;
+  basket.deepest_ticket = 0;
+  basket.volume = 0.0;
+  basket.avg_price = 0.0;
+  basket.min_price = 0.0;
+  basket.max_price = 0.0;
+  basket.profit = 0.0;
+}
+
+void CollectBasketInfo(const SymbolState &state,
+                       int buy_basket_id,
+                       int sell_basket_id,
+                       BasketInfo &buy,
+                       BasketInfo &sell)
 {
   const string symbol = state.broker_symbol;
-  buy.count = 0;
-  buy.level_count = 0;
-  buy.volume = 0.0;
-  buy.avg_price = 0.0;
-  buy.min_price = 0.0;
-  buy.max_price = 0.0;
-  buy.profit = 0.0;
-  sell.count = 0;
-  sell.level_count = 0;
-  sell.volume = 0.0;
-  sell.avg_price = 0.0;
-  sell.min_price = 0.0;
-  sell.max_price = 0.0;
-  sell.profit = 0.0;
+  ResetBasketInfo(buy, buy_basket_id);
+  ResetBasketInfo(sell, sell_basket_id);
 
   double buy_value = 0.0;
   double sell_value = 0.0;
@@ -1291,9 +1690,14 @@ void CollectBasketInfo(const SymbolState &state, BasketInfo &buy, BasketInfo &se
       continue;
 
     int type = (int)PositionGetInteger(POSITION_TYPE);
+    string comment = PositionGetString(POSITION_COMMENT);
+    int basket_id = BasketIdFromComment(comment);
+    int level = ExtractLevelFromComment(comment);
+    if (level <= 0)
+      level = 1;
     double volume = PositionGetDouble(POSITION_VOLUME);
     double price = PositionGetDouble(POSITION_PRICE_OPEN);
-    if (type == POSITION_TYPE_BUY)
+    if (type == POSITION_TYPE_BUY && buy_basket_id > 0 && basket_id == buy_basket_id)
     {
       if (buy.count == 0)
       {
@@ -1306,12 +1710,18 @@ void CollectBasketInfo(const SymbolState &state, BasketInfo &buy, BasketInfo &se
         buy.max_price = MathMax(buy.max_price, price);
       }
       buy.count++;
-      buy.level_count++;
+      if (level > buy.level_count)
+        buy.level_count = level;
+      if (level > buy.deepest_level)
+      {
+        buy.deepest_level = level;
+        buy.deepest_ticket = ticket;
+      }
       buy.volume += volume;
       buy_value += volume * price;
       buy.profit += PositionGetDouble(POSITION_PROFIT);
     }
-    else if (type == POSITION_TYPE_SELL)
+    else if (type == POSITION_TYPE_SELL && sell_basket_id > 0 && basket_id == sell_basket_id)
     {
       if (sell.count == 0)
       {
@@ -1324,7 +1734,13 @@ void CollectBasketInfo(const SymbolState &state, BasketInfo &buy, BasketInfo &se
         sell.max_price = MathMax(sell.max_price, price);
       }
       sell.count++;
-      sell.level_count++;
+      if (level > sell.level_count)
+        sell.level_count = level;
+      if (level > sell.deepest_level)
+      {
+        sell.deepest_level = level;
+        sell.deepest_ticket = ticket;
+      }
       sell.volume += volume;
       sell_value += volume * price;
       sell.profit += PositionGetDouble(POSITION_PROFIT);
@@ -1739,6 +2155,281 @@ void CloseBasket(const SymbolState &state, ENUM_POSITION_TYPE type)
     {
       PrintFormat("Close failed after retries: ticket=%I64u retcode=%d %s",
                   tickets[i], close_trade.ResultRetcode(), close_trade.ResultRetcodeDescription());
+    }
+  }
+}
+
+bool CloseBasketPositionsExceptTicket(const SymbolState &state,
+                                      ENUM_POSITION_TYPE type,
+                                      int basket_id,
+                                      ulong keep_ticket,
+                                      const string context)
+{
+  if (basket_id <= 0)
+    return false;
+  const string symbol = state.broker_symbol;
+  close_trade.SetExpertMagicNumber(state.params.magic_number);
+  close_trade.SetDeviationInPoints(state.params.slippage_points);
+  close_trade.SetAsyncMode(true);
+  int filling = state.filling_mode;
+  if (filling == ORDER_FILLING_FOK || filling == ORDER_FILLING_IOC || filling == ORDER_FILLING_RETURN)
+    close_trade.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
+
+  ulong tickets[];
+  int count = 0;
+  int total = PositionsTotal();
+  if (total > 0)
+    ArrayResize(tickets, total);
+  for (int i = total - 1; i >= 0; --i)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if (!PositionSelectByTicket(ticket))
+      continue;
+    if (ticket == keep_ticket)
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != state.params.magic_number)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != symbol)
+      continue;
+    if ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != type)
+      continue;
+    string comment = PositionGetString(POSITION_COMMENT);
+    if (BasketIdFromComment(comment) != basket_id)
+      continue;
+    tickets[count++] = ticket;
+  }
+  if (count > 0)
+    ArrayResize(tickets, count);
+
+  bool all_closed = true;
+  for (int i = 0; i < count; ++i)
+  {
+    bool closed = false;
+    int attempts = 0;
+    while (attempts <= state.params.close_retry_count)
+    {
+      if (ClosePositionWithLog(tickets[i], context))
+      {
+        closed = true;
+        break;
+      }
+      attempts++;
+      if (attempts <= state.params.close_retry_count && state.params.close_retry_delay_ms > 0)
+        Sleep(state.params.close_retry_delay_ms);
+    }
+    if (!closed)
+    {
+      all_closed = false;
+      PrintFormat("Close failed after retries: ticket=%I64u retcode=%d %s",
+                  tickets[i], close_trade.ResultRetcode(), close_trade.ResultRetcodeDescription());
+    }
+  }
+  return all_closed;
+}
+
+bool CloseBasketById(const SymbolState &state, ENUM_POSITION_TYPE type, int basket_id)
+{
+  return CloseBasketPositionsExceptTicket(state, type, basket_id, 0, "basket_by_id");
+}
+
+bool UpdatePositionTrailSL(const SymbolState &state,
+                           ulong ticket,
+                           ENUM_POSITION_TYPE type,
+                           double requested_sl)
+{
+  if (!PositionSelectByTicket(ticket))
+    return false;
+  const string symbol = PositionGetString(POSITION_SYMBOL);
+  if (PositionGetInteger(POSITION_MAGIC) != state.params.magic_number)
+    return false;
+  if (symbol != state.broker_symbol)
+    return false;
+  if ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != type)
+    return false;
+
+  int stops_level = (int)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
+  if (stops_level < 0)
+    stops_level = 0;
+  double broker_point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+  if (broker_point <= 0.0)
+    broker_point = state.point;
+  if (broker_point <= 0.0)
+    broker_point = 0.00001;
+  double stops_dist = stops_level * broker_point;
+  double min_dist = stops_dist + (2.0 * broker_point);
+
+  double price_step = state.tick_size;
+  if (price_step <= 0.0)
+    price_step = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+  if (price_step <= 0.0)
+    price_step = broker_point;
+  if (price_step <= 0.0)
+    price_step = 0.00001;
+
+  int price_digits = state.digits;
+  if (price_digits < 0)
+    price_digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+  if (price_digits < 0)
+    price_digits = 5;
+
+  MqlTick tick;
+  if (!SymbolInfoTick(symbol, tick))
+    return false;
+
+  if (type == POSITION_TYPE_BUY)
+  {
+    double max_sl = tick.bid - min_dist;
+    if (requested_sl > max_sl)
+      requested_sl = max_sl;
+    requested_sl = MathFloor(requested_sl / price_step) * price_step;
+  }
+  else
+  {
+    double min_sl = tick.ask + min_dist;
+    if (requested_sl < min_sl)
+      requested_sl = min_sl;
+    requested_sl = MathCeil(requested_sl / price_step) * price_step;
+  }
+  requested_sl = NormalizeDouble(requested_sl, price_digits);
+
+  double cur_sl = PositionGetDouble(POSITION_SL);
+  double tol = price_step * 0.5;
+  if (cur_sl > 0.0)
+  {
+    double cur_sl_cmp = NormalizeDouble(MathRound(cur_sl / price_step) * price_step, price_digits);
+    if (type == POSITION_TYPE_BUY && requested_sl <= cur_sl_cmp + tol)
+      return true;
+    if (type == POSITION_TYPE_SELL && requested_sl >= cur_sl_cmp - tol)
+      return true;
+  }
+
+  double tp = PositionGetDouble(POSITION_TP);
+  if (tp > 0.0)
+    tp = NormalizeDouble(MathRound(tp / price_step) * price_step, price_digits);
+  CTrade tr;
+  tr.SetExpertMagicNumber(state.params.magic_number);
+  tr.SetDeviationInPoints(state.params.slippage_points);
+  int filling = state.filling_mode;
+  if (filling == ORDER_FILLING_FOK || filling == ORDER_FILLING_IOC || filling == ORDER_FILLING_RETURN)
+    tr.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
+  bool ok = tr.PositionModify(ticket, requested_sl, tp);
+  if (!ok)
+  {
+    PrintFormat("Runner SL update failed: %s ticket=%I64u type=%d sl=%.5f retcode=%d %s",
+                symbol, ticket, (int)type, requested_sl, tr.ResultRetcode(), tr.ResultRetcodeDescription());
+  }
+  return ok;
+}
+
+int FindTrackedBasketIndex(const int &basket_ids[], int count, int basket_id)
+{
+  for (int i = 0; i < count; ++i)
+  {
+    if (basket_ids[i] == basket_id)
+      return i;
+  }
+  return -1;
+}
+
+void ManageRunnerTrailing(SymbolState &state,
+                          ENUM_POSITION_TYPE type,
+                          int active_basket_id,
+                          double market_price,
+                          double take_profit_distance)
+{
+  if (!state.params.trailing_take_profit)
+    return;
+  if (take_profit_distance <= 0.0)
+    return;
+  double trail_distance = TakeProfitTrailDistanceCapped(state, take_profit_distance);
+  if (trail_distance <= 0.0)
+    return;
+  const string symbol = state.broker_symbol;
+  const int magic = state.params.magic_number;
+  int basket_ids[NM2::kMaxTrackedBaskets];
+  int deepest_levels[NM2::kMaxTrackedBaskets];
+  ulong deepest_tickets[NM2::kMaxTrackedBaskets];
+  int basket_count = 0;
+  for (int i = 0; i < NM2::kMaxTrackedBaskets; ++i)
+  {
+    basket_ids[i] = 0;
+    deepest_levels[i] = 0;
+    deepest_tickets[i] = 0;
+  }
+
+  for (int i = PositionsTotal() - 1; i >= 0; --i)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if (!PositionSelectByTicket(ticket))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != magic)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != symbol)
+      continue;
+    if ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != type)
+      continue;
+    string comment = PositionGetString(POSITION_COMMENT);
+    int basket_id = BasketIdFromComment(comment);
+    if (active_basket_id > 0 && basket_id == active_basket_id)
+      continue;
+    if (!IsCompletedBasket(state, type, basket_id))
+      continue;
+    int level = ExtractLevelFromComment(comment);
+    if (level <= 0)
+      level = 1;
+    int idx = FindTrackedBasketIndex(basket_ids, basket_count, basket_id);
+    if (idx < 0)
+    {
+      if (basket_count >= NM2::kMaxTrackedBaskets)
+        continue;
+      idx = basket_count;
+      basket_ids[idx] = basket_id;
+      deepest_levels[idx] = level;
+      deepest_tickets[idx] = ticket;
+      basket_count++;
+    }
+    else if (level > deepest_levels[idx])
+    {
+      deepest_levels[idx] = level;
+      deepest_tickets[idx] = ticket;
+    }
+  }
+
+  double point = state.point;
+  if (point <= 0.0)
+    point = 0.00001;
+  double tol = point * 0.5;
+  for (int i = 0; i < basket_count; ++i)
+  {
+    int basket_id = basket_ids[i];
+    int deepest_level = deepest_levels[i];
+    ulong keep_ticket = deepest_tickets[i];
+    if (basket_id <= 0 || keep_ticket == 0 || deepest_level <= 0)
+      continue;
+
+    // If non-deep orders remain unexpectedly, keep enforcing deepest-only runner state.
+    CloseBasketPositionsExceptTicket(state, type, basket_id, keep_ticket, "runner_cleanup");
+
+    if (!PositionSelectByTicket(keep_ticket))
+      continue;
+    double requested_sl = market_price;
+    if (type == POSITION_TYPE_BUY)
+      requested_sl = market_price - trail_distance;
+    else
+      requested_sl = market_price + trail_distance;
+    UpdatePositionTrailSL(state, keep_ticket, type, requested_sl);
+
+    // Fallback manual close when SL trailing is disabled and price crossed local stop.
+    if (!state.params.use_take_profit_trail_sl)
+    {
+      double cur_sl = PositionGetDouble(POSITION_SL);
+      if (cur_sl > 0.0)
+      {
+        if (type == POSITION_TYPE_BUY && market_price <= cur_sl + tol)
+          ClosePositionWithLog(keep_ticket, "runner_trail");
+        else if (type == POSITION_TYPE_SELL && market_price >= cur_sl - tol)
+          ClosePositionWithLog(keep_ticket, "runner_trail");
+      }
     }
   }
 }
@@ -2424,142 +3115,80 @@ bool ShouldCloseSellTakeProfit(const SymbolState &state, const BasketInfo &sell,
 
 bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, double take_profit_distance)
 {
+  if (buy.count <= 0 || buy.basket_id <= 0 || buy.avg_price <= 0.0)
+    return false;
   bool tp_reached = ShouldCloseBuyTakeProfit(state, buy, bid, take_profit_distance);
-  int combined_profit_close_level = EffectiveCombinedProfitCloseLevel(state);
-  bool deep_profit_reached = DeepLevelProfitTrailStartReached(buy, combined_profit_close_level);
-  if (!state.params.trailing_take_profit)
+  if (!tp_reached)
+    return false;
+
+  if (!state.params.trailing_take_profit || buy.deepest_ticket == 0)
   {
+    PrintFormat("Basket TP close: %s BUY basket=%d deepest_level=%d",
+                state.broker_symbol, buy.basket_id, buy.deepest_level);
+    bool closed_all = CloseBasketById(state, POSITION_TYPE_BUY, buy.basket_id);
+    if (!closed_all)
+      return false;
+    state.buy_active_basket_id = 0;
+    state.buy_close_as_completed = true;
     ResetBuyTakeProfitTrail(state);
-    if (tp_reached)
-    {
-      CloseBasket(state, POSITION_TYPE_BUY);
-      return true;
-    }
-    return false;
+    return true;
   }
 
-  if (!state.buy_take_profit_trailing_active)
-  {
-    bool fixed_reached = FixedTrailStartReachedBuy(state, buy, bid);
-    bool arm_signal = tp_reached || fixed_reached || deep_profit_reached;
-    if (arm_signal)
-    {
-      state.buy_take_profit_trailing_active = true;
-      state.buy_take_profit_peak_price = bid;
-      PrintFormat("Take-profit trail armed: %s BUY start=%.5f (tp=%d fixed=%d deep_pl=%d)",
-                  state.broker_symbol, bid, (int)tp_reached, (int)fixed_reached, (int)deep_profit_reached);
-    }
+  bool closed_non_deep = CloseBasketPositionsExceptTicket(state, POSITION_TYPE_BUY, buy.basket_id, buy.deepest_ticket, "basket_target");
+  if (!closed_non_deep)
     return false;
-  }
-
-  if (bid > state.buy_take_profit_peak_price)
-    state.buy_take_profit_peak_price = bid;
-
   double trail_distance = TakeProfitTrailDistanceCapped(state, take_profit_distance);
-  double stop_price = state.buy_take_profit_peak_price - trail_distance;
-  double point = state.point;
-  if (point <= 0.0)
-    point = 0.00001;
-  if (buy.level_count >= combined_profit_close_level)
+  if (trail_distance > 0.0 && PositionSelectByTicket(buy.deepest_ticket))
   {
-    double lock_price = buy.avg_price + DeepLevelTrailLockDistancePrice(state);
-    if (stop_price < lock_price)
-      stop_price = lock_price;
+    double requested_sl = bid - trail_distance;
+    UpdatePositionTrailSL(state, buy.deepest_ticket, POSITION_TYPE_BUY, requested_sl);
   }
-  double applied_sl = stop_price;
-  bool use_trail_sl = state.params.use_take_profit_trail_sl;
-  bool sl_update_ok = true;
-  if (use_trail_sl)
-    sl_update_ok = UpdateBasketSL(state, POSITION_TYPE_BUY, stop_price, applied_sl);
-  double tol = point * 0.5;
-  if (bid <= stop_price + tol)
-  {
-    if (!use_trail_sl)
-    {
-      PrintFormat("Take-profit trail close: %s BUY bid=%.5f stop=%.5f peak=%.5f",
-                  state.broker_symbol, bid, stop_price, state.buy_take_profit_peak_price);
-      CloseBasket(state, POSITION_TYPE_BUY);
-      return true;
-    }
-    if (!sl_update_ok)
-    {
-      PrintFormat("Take-profit trail fallback close: %s BUY bid=%.5f stop=%.5f applied_sl=%.5f peak=%.5f",
-                  state.broker_symbol, bid, stop_price, applied_sl, state.buy_take_profit_peak_price);
-      CloseBasket(state, POSITION_TYPE_BUY);
-      return true;
-    }
-  }
-  return false;
+  PrintFormat("Basket TP split close: %s BUY basket=%d keep_ticket=%I64u deepest_level=%d",
+              state.broker_symbol, buy.basket_id, buy.deepest_ticket, buy.deepest_level);
+  AddCompletedBasket(state, POSITION_TYPE_BUY, buy.basket_id);
+  state.buy_active_basket_id = 0;
+  state.buy_close_as_completed = true;
+  ResetBuyTakeProfitTrail(state);
+  return true;
 }
 
 bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask, double take_profit_distance)
 {
+  if (sell.count <= 0 || sell.basket_id <= 0 || sell.avg_price <= 0.0)
+    return false;
   bool tp_reached = ShouldCloseSellTakeProfit(state, sell, ask, take_profit_distance);
-  int combined_profit_close_level = EffectiveCombinedProfitCloseLevel(state);
-  bool deep_profit_reached = DeepLevelProfitTrailStartReached(sell, combined_profit_close_level);
-  if (!state.params.trailing_take_profit)
+  if (!tp_reached)
+    return false;
+
+  if (!state.params.trailing_take_profit || sell.deepest_ticket == 0)
   {
+    PrintFormat("Basket TP close: %s SELL basket=%d deepest_level=%d",
+                state.broker_symbol, sell.basket_id, sell.deepest_level);
+    bool closed_all = CloseBasketById(state, POSITION_TYPE_SELL, sell.basket_id);
+    if (!closed_all)
+      return false;
+    state.sell_active_basket_id = 0;
+    state.sell_close_as_completed = true;
     ResetSellTakeProfitTrail(state);
-    if (tp_reached)
-    {
-      CloseBasket(state, POSITION_TYPE_SELL);
-      return true;
-    }
-    return false;
+    return true;
   }
 
-  if (!state.sell_take_profit_trailing_active)
-  {
-    bool fixed_reached = FixedTrailStartReachedSell(state, sell, ask);
-    bool arm_signal = tp_reached || fixed_reached || deep_profit_reached;
-    if (arm_signal)
-    {
-      state.sell_take_profit_trailing_active = true;
-      state.sell_take_profit_bottom_price = ask;
-      PrintFormat("Take-profit trail armed: %s SELL start=%.5f (tp=%d fixed=%d deep_pl=%d)",
-                  state.broker_symbol, ask, (int)tp_reached, (int)fixed_reached, (int)deep_profit_reached);
-    }
+  bool closed_non_deep = CloseBasketPositionsExceptTicket(state, POSITION_TYPE_SELL, sell.basket_id, sell.deepest_ticket, "basket_target");
+  if (!closed_non_deep)
     return false;
-  }
-
-  if (ask < state.sell_take_profit_bottom_price)
-    state.sell_take_profit_bottom_price = ask;
-
   double trail_distance = TakeProfitTrailDistanceCapped(state, take_profit_distance);
-  double stop_price = state.sell_take_profit_bottom_price + trail_distance;
-  double point = state.point;
-  if (point <= 0.0)
-    point = 0.00001;
-  if (sell.level_count >= combined_profit_close_level)
+  if (trail_distance > 0.0 && PositionSelectByTicket(sell.deepest_ticket))
   {
-    double lock_price = sell.avg_price - DeepLevelTrailLockDistancePrice(state);
-    if (stop_price > lock_price)
-      stop_price = lock_price;
+    double requested_sl = ask + trail_distance;
+    UpdatePositionTrailSL(state, sell.deepest_ticket, POSITION_TYPE_SELL, requested_sl);
   }
-  double applied_sl = stop_price;
-  bool use_trail_sl = state.params.use_take_profit_trail_sl;
-  bool sl_update_ok = true;
-  if (use_trail_sl)
-    sl_update_ok = UpdateBasketSL(state, POSITION_TYPE_SELL, stop_price, applied_sl);
-  double tol = point * 0.5;
-  if (ask >= stop_price - tol)
-  {
-    if (!use_trail_sl)
-    {
-      PrintFormat("Take-profit trail close: %s SELL ask=%.5f stop=%.5f bottom=%.5f",
-                  state.broker_symbol, ask, stop_price, state.sell_take_profit_bottom_price);
-      CloseBasket(state, POSITION_TYPE_SELL);
-      return true;
-    }
-    if (!sl_update_ok)
-    {
-      PrintFormat("Take-profit trail fallback close: %s SELL ask=%.5f stop=%.5f applied_sl=%.5f bottom=%.5f",
-                  state.broker_symbol, ask, stop_price, applied_sl, state.sell_take_profit_bottom_price);
-      CloseBasket(state, POSITION_TYPE_SELL);
-      return true;
-    }
-  }
-  return false;
+  PrintFormat("Basket TP split close: %s SELL basket=%d keep_ticket=%I64u deepest_level=%d",
+              state.broker_symbol, sell.basket_id, sell.deepest_ticket, sell.deepest_level);
+  AddCompletedBasket(state, POSITION_TYPE_SELL, sell.basket_id);
+  state.sell_active_basket_id = 0;
+  state.sell_close_as_completed = true;
+  ResetSellTakeProfitTrail(state);
+  return true;
 }
 
 void ProcessSymbolTick(SymbolState &state)
@@ -2569,7 +3198,8 @@ void ProcessSymbolTick(SymbolState &state)
   string symbol = state.broker_symbol;
   NM2Params params = state.params;
   BasketInfo buy, sell;
-  CollectBasketInfo(state, buy, sell);
+  RefreshBasketSequenceState(state);
+  CollectBasketInfo(state, state.buy_active_basket_id, state.sell_active_basket_id, buy, sell);
   int levels = EffectiveMaxLevelsRuntime(state);
   MqlTick t;
   if (!SymbolInfoTick(symbol, t))
@@ -2658,9 +3288,9 @@ void ProcessSymbolTick(SymbolState &state)
   }
   if (low_balance && params.close_positions_on_low_balance)
   {
-    if (buy.count > 0)
+    if (HasOpenPositionByType(state, POSITION_TYPE_BUY))
       CloseBasket(state, POSITION_TYPE_BUY);
-    if (sell.count > 0)
+    if (HasOpenPositionByType(state, POSITION_TYPE_SELL))
       CloseBasket(state, POSITION_TYPE_SELL);
   }
   int combined_profit_close_level = EffectiveCombinedProfitCloseLevel(state);
@@ -2719,7 +3349,8 @@ void ProcessSymbolTick(SymbolState &state)
                         symbol, buy.level_count, bid, buy.avg_price, stop_price, stop_distance, avg_width,
                         params.basket_loss_stop_nanpin_width_multiplier_level2_plus);
           }
-          CloseBasket(state, POSITION_TYPE_BUY);
+          if (buy.basket_id > 0)
+            CloseBasketById(state, POSITION_TYPE_BUY, buy.basket_id);
           basket_loss_closed = true;
         }
       }
@@ -2747,7 +3378,8 @@ void ProcessSymbolTick(SymbolState &state)
                         symbol, sell.level_count, ask, sell.avg_price, stop_price, stop_distance, avg_width,
                         params.basket_loss_stop_nanpin_width_multiplier_level2_plus);
           }
-          CloseBasket(state, POSITION_TYPE_SELL);
+          if (sell.basket_id > 0)
+            CloseBasketById(state, POSITION_TYPE_SELL, sell.basket_id);
           basket_loss_closed = true;
         }
       }
@@ -2775,7 +3407,10 @@ void ProcessSymbolTick(SymbolState &state)
         should_close = (bid - buy.avg_price) >= threshold_distance;
       }
       if (should_close)
-        CloseBasket(state, POSITION_TYPE_BUY);
+      {
+        if (buy.basket_id > 0)
+          CloseBasketById(state, POSITION_TYPE_BUY, buy.basket_id);
+      }
     }
     if (sell.count > 0)
     {
@@ -2790,13 +3425,20 @@ void ProcessSymbolTick(SymbolState &state)
         should_close = (sell.avg_price - ask) >= threshold_distance;
       }
       if (should_close)
-        CloseBasket(state, POSITION_TYPE_SELL);
+      {
+        if (sell.basket_id > 0)
+          CloseBasketById(state, POSITION_TYPE_SELL, sell.basket_id);
+      }
     }
   }
 
   if (state.prev_buy_count > 0 && buy.count == 0)
   {
-    state.last_buy_close_time = TimeCurrent();
+    if (state.buy_close_as_completed)
+      state.last_buy_close_time = 0;
+    else
+      state.last_buy_close_time = TimeCurrent();
+    state.buy_close_as_completed = false;
     state.last_buy_nanpin_time = 0;
     ResetBuyTakeProfitTrail(state);
     state.buy_stop_active = false;
@@ -2810,7 +3452,11 @@ void ProcessSymbolTick(SymbolState &state)
   }
   if (state.prev_sell_count > 0 && sell.count == 0)
   {
-    state.last_sell_close_time = TimeCurrent();
+    if (state.sell_close_as_completed)
+      state.last_sell_close_time = 0;
+    else
+      state.last_sell_close_time = TimeCurrent();
+    state.sell_close_as_completed = false;
     state.last_sell_nanpin_time = 0;
     ResetSellTakeProfitTrail(state);
     state.sell_stop_active = false;
@@ -2823,12 +3469,18 @@ void ProcessSymbolTick(SymbolState &state)
     state.sell_deepest_entry_time = 0;
   }
   if (state.prev_buy_count == 0 && buy.count > 0)
+  {
     state.buy_open_time = TimeCurrent();
+    state.buy_close_as_completed = false;
+  }
   if (state.prev_sell_count == 0 && sell.count > 0)
+  {
     state.sell_open_time = TimeCurrent();
+    state.sell_close_as_completed = false;
+  }
 
   if (buy.count > 0 || sell.count > 0)
-    SyncLevelPricesFromPositions(state);
+    SyncLevelPricesFromPositions(state, buy.basket_id, sell.basket_id);
 
   int timed_exit_level = levels;
   if (buy.level_count >= timed_exit_level)
@@ -2865,7 +3517,8 @@ void ProcessSymbolTick(SymbolState &state)
     PrintFormat("Timed exit triggered: %s BUY reached level %d for %d minutes (base=%d regime=%s factors=%.2f/%.2f/%.2f atr_now=%.5f atr_base=%.5f)",
                 symbol, timed_exit_level, timed_exit_minutes, params.deepest_timed_exit_minutes, RegimeName(state.regime),
                 timed_exit_regime_factor, timed_exit_safety_factor, timed_exit_atr_factor, atr_now, atr_base);
-    CloseBasket(state, POSITION_TYPE_BUY);
+    if (buy.basket_id > 0)
+      CloseBasketById(state, POSITION_TYPE_BUY, buy.basket_id);
     timed_exit_closed = true;
   }
   if (sell.count > 0 && state.sell_deepest_entry_time > 0
@@ -2874,7 +3527,8 @@ void ProcessSymbolTick(SymbolState &state)
     PrintFormat("Timed exit triggered: %s SELL reached level %d for %d minutes (base=%d regime=%s factors=%.2f/%.2f/%.2f atr_now=%.5f atr_base=%.5f)",
                 symbol, timed_exit_level, timed_exit_minutes, params.deepest_timed_exit_minutes, RegimeName(state.regime),
                 timed_exit_regime_factor, timed_exit_safety_factor, timed_exit_atr_factor, atr_now, atr_base);
-    CloseBasket(state, POSITION_TYPE_SELL);
+    if (sell.basket_id > 0)
+      CloseBasketById(state, POSITION_TYPE_SELL, sell.basket_id);
     timed_exit_closed = true;
   }
   if (timed_exit_closed)
@@ -2897,9 +3551,11 @@ void ProcessSymbolTick(SymbolState &state)
       {
         if (!state.buy_order_pending && allow_entry_buy)
         {
-          opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, 1), 1);
+          int basket_id = (state.buy_active_basket_id > 0) ? state.buy_active_basket_id : NextBasketId(state);
+          opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
           if (opened_buy)
           {
+            CommitBasketId(state, POSITION_TYPE_BUY, basket_id);
             state.buy_order_pending = true;
             state.buy_order_pending_time = now;
             if (state.buy_level_price[0] <= 0.0)
@@ -2908,9 +3564,11 @@ void ProcessSymbolTick(SymbolState &state)
         }
         if (!state.sell_order_pending && allow_entry_sell)
         {
-          opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, 1), 1);
+          int basket_id = (state.sell_active_basket_id > 0) ? state.sell_active_basket_id : NextBasketId(state);
+          opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
           if (opened_sell)
           {
+            CommitBasketId(state, POSITION_TYPE_SELL, basket_id);
             state.sell_order_pending = true;
             state.sell_order_pending_time = now;
             if (state.sell_level_price[0] <= 0.0)
@@ -2923,9 +3581,11 @@ void ProcessSymbolTick(SymbolState &state)
         int dir = SelectSingleEntryDirection(state, allow_entry_buy, allow_entry_sell, has_adx, di_plus_now, di_minus_now);
         if (dir > 0 && !state.buy_order_pending)
         {
-          opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, 1), 1);
+          int basket_id = (state.buy_active_basket_id > 0) ? state.buy_active_basket_id : NextBasketId(state);
+          opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
           if (opened_buy)
           {
+            CommitBasketId(state, POSITION_TYPE_BUY, basket_id);
             state.buy_order_pending = true;
             state.buy_order_pending_time = now;
             if (state.buy_level_price[0] <= 0.0)
@@ -2934,9 +3594,11 @@ void ProcessSymbolTick(SymbolState &state)
         }
         else if (dir < 0 && !state.sell_order_pending)
         {
-          opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, 1), 1);
+          int basket_id = (state.sell_active_basket_id > 0) ? state.sell_active_basket_id : NextBasketId(state);
+          opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
           if (opened_sell)
           {
+            CommitBasketId(state, POSITION_TYPE_SELL, basket_id);
             state.sell_order_pending = true;
             state.sell_order_pending_time = now;
             if (state.sell_level_price[0] <= 0.0)
@@ -3019,8 +3681,10 @@ void ProcessSymbolTick(SymbolState &state)
     double total_profit = buy.profit + sell.profit;
     if (max_level >= levels && total_profit > 0.0)
     {
-      CloseBasket(state, POSITION_TYPE_BUY);
-      CloseBasket(state, POSITION_TYPE_SELL);
+      if (buy.basket_id > 0)
+        CloseBasketById(state, POSITION_TYPE_BUY, buy.basket_id);
+      if (sell.basket_id > 0)
+        CloseBasketById(state, POSITION_TYPE_SELL, sell.basket_id);
       state.prev_buy_count = buy.count;
       state.prev_sell_count = sell.count;
       return;
@@ -3049,7 +3713,8 @@ void ProcessSymbolTick(SymbolState &state)
       {
         PrintFormat("Final level stop-loss triggered: %s BUY level=%d max_levels=%d nanpin_levels=%d is_trading_time=%s ask=%.5f stop=%.5f",
                     symbol, buy.level_count, levels, nanpin_levels, is_trading_time ? "true" : "false", ask, stop_price);
-        CloseBasket(state, POSITION_TYPE_BUY);
+        if (buy.basket_id > 0)
+          CloseBasketById(state, POSITION_TYPE_BUY, buy.basket_id);
         final_level_sl_closed = true;
       }
     }
@@ -3075,7 +3740,8 @@ void ProcessSymbolTick(SymbolState &state)
       {
         PrintFormat("Final level stop-loss triggered: %s SELL level=%d max_levels=%d nanpin_levels=%d is_trading_time=%s bid=%.5f stop=%.5f",
                     symbol, sell.level_count, levels, nanpin_levels, is_trading_time ? "true" : "false", bid, stop_price);
-        CloseBasket(state, POSITION_TYPE_SELL);
+        if (sell.basket_id > 0)
+          CloseBasketById(state, POSITION_TYPE_SELL, sell.basket_id);
         final_level_sl_closed = true;
       }
     }
@@ -3115,6 +3781,9 @@ void ProcessSymbolTick(SymbolState &state)
     return;
   }
 
+  ManageRunnerTrailing(state, POSITION_TYPE_BUY, state.buy_active_basket_id, bid, take_profit_distance);
+  ManageRunnerTrailing(state, POSITION_TYPE_SELL, state.sell_active_basket_id, ask, take_profit_distance);
+
   if (is_trading_time && state.initial_started && !safety_triggered && !low_balance)
   {
     if (params.enable_hedged_entry)
@@ -3122,9 +3791,11 @@ void ProcessSymbolTick(SymbolState &state)
       if (buy.count == 0 && !state.buy_order_pending && allow_entry_buy && spread_ok
           && CanRestart(state.last_buy_close_time, restart_delay_dynamic_seconds))
       {
-        bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, 1), 1);
+        int basket_id = (state.buy_active_basket_id > 0) ? state.buy_active_basket_id : NextBasketId(state);
+        bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
         if (opened_buy)
         {
+          CommitBasketId(state, POSITION_TYPE_BUY, basket_id);
           state.buy_order_pending = true;
           state.buy_order_pending_time = now;
           if (state.buy_level_price[0] <= 0.0)
@@ -3134,9 +3805,11 @@ void ProcessSymbolTick(SymbolState &state)
       if (sell.count == 0 && !state.sell_order_pending && allow_entry_sell && spread_ok
           && CanRestart(state.last_sell_close_time, restart_delay_dynamic_seconds))
       {
-        bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, 1), 1);
+        int basket_id = (state.sell_active_basket_id > 0) ? state.sell_active_basket_id : NextBasketId(state);
+        bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
         if (opened_sell)
         {
+          CommitBasketId(state, POSITION_TYPE_SELL, basket_id);
           state.sell_order_pending = true;
           state.sell_order_pending_time = now;
           if (state.sell_level_price[0] <= 0.0)
@@ -3151,9 +3824,11 @@ void ProcessSymbolTick(SymbolState &state)
       int dir = SelectSingleEntryDirection(state, can_restart_buy, can_restart_sell, has_adx, di_plus_now, di_minus_now);
       if (dir > 0 && spread_ok)
       {
-        bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, 1), 1);
+        int basket_id = (state.buy_active_basket_id > 0) ? state.buy_active_basket_id : NextBasketId(state);
+        bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
         if (opened_buy)
         {
+          CommitBasketId(state, POSITION_TYPE_BUY, basket_id);
           state.buy_order_pending = true;
           state.buy_order_pending_time = now;
           if (state.buy_level_price[0] <= 0.0)
@@ -3162,9 +3837,11 @@ void ProcessSymbolTick(SymbolState &state)
       }
       else if (dir < 0 && spread_ok)
       {
-        bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, 1), 1);
+        int basket_id = (state.sell_active_basket_id > 0) ? state.sell_active_basket_id : NextBasketId(state);
+        bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
         if (opened_sell)
         {
+          CommitBasketId(state, POSITION_TYPE_SELL, basket_id);
           state.sell_order_pending = true;
           state.sell_order_pending_time = now;
           if (state.sell_level_price[0] <= 0.0)
@@ -3273,7 +3950,10 @@ void ProcessSymbolTick(SymbolState &state)
       {
         double lot = state.lot_seq[level_index];
         int next_level = level_index + 1;
-        if (TryOpen(state, symbol, ORDER_TYPE_BUY, lot, MakeLevelComment(NM2::kCoreComment, next_level), next_level))
+        int basket_id = (buy.basket_id > 0) ? buy.basket_id : state.buy_active_basket_id;
+        if (basket_id <= 0)
+          basket_id = 1;
+        if (TryOpen(state, symbol, ORDER_TYPE_BUY, lot, MakeLevelComment(NM2::kCoreComment, basket_id, next_level), next_level))
         {
           state.buy_order_pending = true;
           state.buy_order_pending_time = now;
@@ -3303,7 +3983,10 @@ void ProcessSymbolTick(SymbolState &state)
       {
         double lot = state.lot_seq[level_index];
         int next_level = level_index + 1;
-        if (TryOpen(state, symbol, ORDER_TYPE_SELL, lot, MakeLevelComment(NM2::kCoreComment, next_level), next_level))
+        int basket_id = (sell.basket_id > 0) ? sell.basket_id : state.sell_active_basket_id;
+        if (basket_id <= 0)
+          basket_id = 1;
+        if (TryOpen(state, symbol, ORDER_TYPE_SELL, lot, MakeLevelComment(NM2::kCoreComment, basket_id, next_level), next_level))
         {
           state.sell_order_pending = true;
           state.sell_order_pending_time = now;
