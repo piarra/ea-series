@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.65"
+#property version   "1.66"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -43,6 +43,7 @@
 // v1.63 最深レベルのみトレール継続し、COMMENTへバスケット連番(Bxx)を付与
 // v1.64 L1単独でも利確後トレールを継続できるようにし、完了済みバスケットを分離管理
 // v1.65 非同期クローズ時の同一ticket重複ログ/lot集計を抑止
+// v1.66 ランナートレールでUseTakeProfitTrailSL=false時はSL未使用(内部トレール成行)に統一
 
 #include <Trade/Trade.mqh>
 
@@ -60,6 +61,7 @@ const int kLevelCap = 8;
 const int kRecentCloseRequestCap = 256;
 const ulong kRecentCloseRequestTtlMs = 3000;
 const int kClosedTicketCountCap = 4096;
+const int kRunnerTrailStateCap = 512;
 const double kLotMultiplierFromLevel3 = 1.5;
 const double kDeepLevelTrailLockPoints = 2.0;
 }
@@ -332,6 +334,9 @@ datetime cumulative_lot_start_time = 0;
 ulong recent_close_request_tickets[];
 ulong recent_close_request_times_ms[];
 ulong counted_closed_tickets[];
+ulong runner_trail_tickets[];
+int runner_trail_types[];
+double runner_trail_stops[];
 
 struct SymbolState
 {
@@ -422,6 +427,13 @@ bool IsManagedMagic(const int magic)
   if (magic == MagicNumber)
     return true;
   return false;
+}
+
+void ClearRunnerTrailTracking()
+{
+  ArrayResize(runner_trail_tickets, 0);
+  ArrayResize(runner_trail_types, 0);
+  ArrayResize(runner_trail_stops, 0);
 }
 
 void ClearCloseTracking()
@@ -531,6 +543,7 @@ void InitCumulativeLotTracking()
   cumulative_trade_lots = 0.0;
   cumulative_lot_start_time = TimeCurrent();
   ClearCloseTracking();
+  ClearRunnerTrailTracking();
 }
 
 bool ClosePositionWithLog(const ulong ticket, const string context)
@@ -2321,6 +2334,52 @@ bool UpdatePositionTrailSL(const SymbolState &state,
   return ok;
 }
 
+bool ClearPositionSL(const SymbolState &state,
+                     ulong ticket,
+                     ENUM_POSITION_TYPE type)
+{
+  if (!PositionSelectByTicket(ticket))
+    return false;
+  const string symbol = PositionGetString(POSITION_SYMBOL);
+  if (PositionGetInteger(POSITION_MAGIC) != state.params.magic_number)
+    return false;
+  if (symbol != state.broker_symbol)
+    return false;
+  if ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != type)
+    return false;
+  double cur_sl = PositionGetDouble(POSITION_SL);
+  if (cur_sl <= 0.0)
+    return true;
+  double tp = PositionGetDouble(POSITION_TP);
+  double price_step = state.tick_size;
+  if (price_step <= 0.0)
+    price_step = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+  if (price_step <= 0.0)
+    price_step = SymbolInfoDouble(symbol, SYMBOL_POINT);
+  if (price_step > 0.0 && tp > 0.0)
+  {
+    int price_digits = state.digits;
+    if (price_digits < 0)
+      price_digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+    if (price_digits < 0)
+      price_digits = 5;
+    tp = NormalizeDouble(MathRound(tp / price_step) * price_step, price_digits);
+  }
+  CTrade tr;
+  tr.SetExpertMagicNumber(state.params.magic_number);
+  tr.SetDeviationInPoints(state.params.slippage_points);
+  int filling = state.filling_mode;
+  if (filling == ORDER_FILLING_FOK || filling == ORDER_FILLING_IOC || filling == ORDER_FILLING_RETURN)
+    tr.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
+  bool ok = tr.PositionModify(ticket, 0.0, tp);
+  if (!ok)
+  {
+    PrintFormat("Runner SL clear failed: %s ticket=%I64u type=%d retcode=%d %s",
+                symbol, ticket, (int)type, tr.ResultRetcode(), tr.ResultRetcodeDescription());
+  }
+  return ok;
+}
+
 int FindTrackedBasketIndex(const int &basket_ids[], int count, int basket_id)
 {
   for (int i = 0; i < count; ++i)
@@ -2329,6 +2388,96 @@ int FindTrackedBasketIndex(const int &basket_ids[], int count, int basket_id)
       return i;
   }
   return -1;
+}
+
+int FindRunnerTrailIndex(const ulong ticket)
+{
+  int count = ArraySize(runner_trail_tickets);
+  for (int i = 0; i < count; ++i)
+  {
+    if (runner_trail_tickets[i] == ticket)
+      return i;
+  }
+  return -1;
+}
+
+void RemoveRunnerTrailAt(const int index)
+{
+  int count = ArraySize(runner_trail_tickets);
+  if (index < 0 || index >= count)
+    return;
+  for (int i = index; i < (count - 1); ++i)
+  {
+    runner_trail_tickets[i] = runner_trail_tickets[i + 1];
+    runner_trail_types[i] = runner_trail_types[i + 1];
+    runner_trail_stops[i] = runner_trail_stops[i + 1];
+  }
+  count--;
+  ArrayResize(runner_trail_tickets, count);
+  ArrayResize(runner_trail_types, count);
+  ArrayResize(runner_trail_stops, count);
+}
+
+void RemoveRunnerTrailTicket(const ulong ticket)
+{
+  int idx = FindRunnerTrailIndex(ticket);
+  if (idx >= 0)
+    RemoveRunnerTrailAt(idx);
+}
+
+void CleanupRunnerTrailState()
+{
+  int i = 0;
+  int count = ArraySize(runner_trail_tickets);
+  while (i < count)
+  {
+    ulong ticket = runner_trail_tickets[i];
+    if (!PositionSelectByTicket(ticket))
+    {
+      RemoveRunnerTrailAt(i);
+      count = ArraySize(runner_trail_tickets);
+      continue;
+    }
+    i++;
+  }
+}
+
+double UpsertRunnerTrailStop(const ulong ticket,
+                             ENUM_POSITION_TYPE type,
+                             double candidate_stop)
+{
+  int idx = FindRunnerTrailIndex(ticket);
+  if (idx < 0)
+  {
+    int count = ArraySize(runner_trail_tickets);
+    if (count >= NM2::kRunnerTrailStateCap)
+    {
+      RemoveRunnerTrailAt(0);
+      count = ArraySize(runner_trail_tickets);
+    }
+    ArrayResize(runner_trail_tickets, count + 1);
+    ArrayResize(runner_trail_types, count + 1);
+    ArrayResize(runner_trail_stops, count + 1);
+    runner_trail_tickets[count] = ticket;
+    runner_trail_types[count] = (int)type;
+    runner_trail_stops[count] = candidate_stop;
+    return candidate_stop;
+  }
+
+  double stop = runner_trail_stops[idx];
+  if (type == POSITION_TYPE_BUY)
+  {
+    if (candidate_stop > stop)
+      stop = candidate_stop;
+  }
+  else
+  {
+    if (candidate_stop < stop)
+      stop = candidate_stop;
+  }
+  runner_trail_types[idx] = (int)type;
+  runner_trail_stops[idx] = stop;
+  return stop;
 }
 
 void ManageRunnerTrailing(SymbolState &state,
@@ -2341,9 +2490,11 @@ void ManageRunnerTrailing(SymbolState &state,
     return;
   if (take_profit_distance <= 0.0)
     return;
+  CleanupRunnerTrailState();
   double trail_distance = TakeProfitTrailDistanceCapped(state, take_profit_distance);
   if (trail_distance <= 0.0)
     return;
+  bool use_trail_sl = state.params.use_take_profit_trail_sl;
   const string symbol = state.broker_symbol;
   const int magic = state.params.magic_number;
   int basket_ids[NM2::kMaxTrackedBaskets];
@@ -2412,24 +2563,30 @@ void ManageRunnerTrailing(SymbolState &state,
 
     if (!PositionSelectByTicket(keep_ticket))
       continue;
-    double requested_sl = market_price;
+    double requested_stop = market_price;
     if (type == POSITION_TYPE_BUY)
-      requested_sl = market_price - trail_distance;
+      requested_stop = market_price - trail_distance;
     else
-      requested_sl = market_price + trail_distance;
-    UpdatePositionTrailSL(state, keep_ticket, type, requested_sl);
+      requested_stop = market_price + trail_distance;
 
-    // Fallback manual close when SL trailing is disabled and price crossed local stop.
-    if (!state.params.use_take_profit_trail_sl)
+    if (use_trail_sl)
     {
-      double cur_sl = PositionGetDouble(POSITION_SL);
-      if (cur_sl > 0.0)
-      {
-        if (type == POSITION_TYPE_BUY && market_price <= cur_sl + tol)
-          ClosePositionWithLog(keep_ticket, "runner_trail");
-        else if (type == POSITION_TYPE_SELL && market_price >= cur_sl - tol)
-          ClosePositionWithLog(keep_ticket, "runner_trail");
-      }
+      RemoveRunnerTrailTicket(keep_ticket);
+      UpdatePositionTrailSL(state, keep_ticket, type, requested_stop);
+      continue;
+    }
+
+    ClearPositionSL(state, keep_ticket, type);
+    double stop_price = UpsertRunnerTrailStop(keep_ticket, type, requested_stop);
+    if (type == POSITION_TYPE_BUY)
+    {
+      if (market_price <= stop_price + tol)
+        ClosePositionWithLog(keep_ticket, "runner_trail");
+    }
+    else
+    {
+      if (market_price >= stop_price - tol)
+        ClosePositionWithLog(keep_ticket, "runner_trail");
     }
   }
 }
@@ -3140,8 +3297,17 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
   double trail_distance = TakeProfitTrailDistanceCapped(state, take_profit_distance);
   if (trail_distance > 0.0 && PositionSelectByTicket(buy.deepest_ticket))
   {
-    double requested_sl = bid - trail_distance;
-    UpdatePositionTrailSL(state, buy.deepest_ticket, POSITION_TYPE_BUY, requested_sl);
+    double requested_stop = bid - trail_distance;
+    if (state.params.use_take_profit_trail_sl)
+    {
+      RemoveRunnerTrailTicket(buy.deepest_ticket);
+      UpdatePositionTrailSL(state, buy.deepest_ticket, POSITION_TYPE_BUY, requested_stop);
+    }
+    else
+    {
+      ClearPositionSL(state, buy.deepest_ticket, POSITION_TYPE_BUY);
+      UpsertRunnerTrailStop(buy.deepest_ticket, POSITION_TYPE_BUY, requested_stop);
+    }
   }
   PrintFormat("Basket TP split close: %s BUY basket=%d keep_ticket=%I64u deepest_level=%d",
               state.broker_symbol, buy.basket_id, buy.deepest_ticket, buy.deepest_level);
@@ -3179,8 +3345,17 @@ bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask
   double trail_distance = TakeProfitTrailDistanceCapped(state, take_profit_distance);
   if (trail_distance > 0.0 && PositionSelectByTicket(sell.deepest_ticket))
   {
-    double requested_sl = ask + trail_distance;
-    UpdatePositionTrailSL(state, sell.deepest_ticket, POSITION_TYPE_SELL, requested_sl);
+    double requested_stop = ask + trail_distance;
+    if (state.params.use_take_profit_trail_sl)
+    {
+      RemoveRunnerTrailTicket(sell.deepest_ticket);
+      UpdatePositionTrailSL(state, sell.deepest_ticket, POSITION_TYPE_SELL, requested_stop);
+    }
+    else
+    {
+      ClearPositionSL(state, sell.deepest_ticket, POSITION_TYPE_SELL);
+      UpsertRunnerTrailStop(sell.deepest_ticket, POSITION_TYPE_SELL, requested_stop);
+    }
   }
   PrintFormat("Basket TP split close: %s SELL basket=%d keep_ticket=%I64u deepest_level=%d",
               state.broker_symbol, sell.basket_id, sell.deepest_ticket, sell.deepest_level);
