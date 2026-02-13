@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.61"
+#property version   "1.62"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -39,6 +39,7 @@
 // v1.59 SL更新の停止条件をブローカーpoint基準へ修正し、invalid stops時の再クランプ再試行を追加
 // v1.60 ATR連動利確距離に最小points下限を追加 (XAUUSD: 120pt)
 // v1.61 利確距離のATR連動を廃止し、通貨別points指定へ変更
+// v1.62 利確トレールをSL更新方式/一括Close方式で切替可能化 (デフォルト: 一括Close)
 
 #include <Trade/Trade.mqh>
 
@@ -95,6 +96,7 @@ input double AdxMaxForNanpin = 20.0;
 input double DiGapMin = 2.0;
 
 input group "TAKE PROFIT"
+input bool UseTakeProfitTrailSL = false;
 input bool EnableFixedTrailStart = true;
 input double FixedTrailStartPointsXAUUSD = 2500.0;
 input double FixedTrailStartPointsEURUSD = 120.0;
@@ -256,6 +258,7 @@ struct NM2Params
   double base_lot;
   double take_profit_points;
   bool trailing_take_profit;
+  bool use_take_profit_trail_sl;
   double trailing_take_profit_distance_ratio;
   int adx_period;
   double adx_max_for_nanpin;
@@ -658,6 +661,7 @@ void ApplyCommonParams(NM2Params &params)
   params.timed_exit_atr_factor_min = TimedExitAtrFactorMin;
   params.timed_exit_atr_factor_max = TimedExitAtrFactorMax;
   params.trailing_take_profit = EnableTrailingTakeProfit;
+  params.use_take_profit_trail_sl = UseTakeProfitTrailSL;
   params.take_profit_points = 120.0;
   params.trailing_take_profit_distance_ratio = 0.55;
   params.close_retry_count = CloseRetryCount;
@@ -2463,10 +2467,20 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
       stop_price = lock_price;
   }
   double applied_sl = stop_price;
-  bool sl_update_ok = UpdateBasketSL(state, POSITION_TYPE_BUY, stop_price, applied_sl);
+  bool use_trail_sl = state.params.use_take_profit_trail_sl;
+  bool sl_update_ok = true;
+  if (use_trail_sl)
+    sl_update_ok = UpdateBasketSL(state, POSITION_TYPE_BUY, stop_price, applied_sl);
   double tol = point * 0.5;
   if (bid <= stop_price + tol)
   {
+    if (!use_trail_sl)
+    {
+      PrintFormat("Take-profit trail close: %s BUY bid=%.5f stop=%.5f peak=%.5f",
+                  state.broker_symbol, bid, stop_price, state.buy_take_profit_peak_price);
+      CloseBasket(state, POSITION_TYPE_BUY);
+      return true;
+    }
     if (!sl_update_ok)
     {
       PrintFormat("Take-profit trail fallback close: %s BUY bid=%.5f stop=%.5f applied_sl=%.5f peak=%.5f",
@@ -2523,10 +2537,20 @@ bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask
       stop_price = lock_price;
   }
   double applied_sl = stop_price;
-  bool sl_update_ok = UpdateBasketSL(state, POSITION_TYPE_SELL, stop_price, applied_sl);
+  bool use_trail_sl = state.params.use_take_profit_trail_sl;
+  bool sl_update_ok = true;
+  if (use_trail_sl)
+    sl_update_ok = UpdateBasketSL(state, POSITION_TYPE_SELL, stop_price, applied_sl);
   double tol = point * 0.5;
   if (ask >= stop_price - tol)
   {
+    if (!use_trail_sl)
+    {
+      PrintFormat("Take-profit trail close: %s SELL ask=%.5f stop=%.5f bottom=%.5f",
+                  state.broker_symbol, ask, stop_price, state.sell_take_profit_bottom_price);
+      CloseBasket(state, POSITION_TYPE_SELL);
+      return true;
+    }
     if (!sl_update_ok)
     {
       PrintFormat("Take-profit trail fallback close: %s SELL ask=%.5f stop=%.5f applied_sl=%.5f bottom=%.5f",
