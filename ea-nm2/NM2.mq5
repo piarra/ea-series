@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.66"
+#property version   "1.67"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -44,6 +44,7 @@
 // v1.64 L1単独でも利確後トレールを継続できるようにし、完了済みバスケットを分離管理
 // v1.65 非同期クローズ時の同一ticket重複ログ/lot集計を抑止
 // v1.66 ランナートレールでUseTakeProfitTrailSL=false時はSL未使用(内部トレール成行)に統一
+// v1.67 M1以外のチャートにアタッチされた場合はOnInitで停止
 
 #include <Trade/Trade.mqh>
 
@@ -1420,6 +1421,11 @@ string MakeLevelComment(const string base, int basket_id, int level)
 
 int OnInit()
 {
+  if (_Period != PERIOD_M1)
+  {
+    PrintFormat("NM2 requires M1 chart timeframe. current=%s", EnumToString((ENUM_TIMEFRAMES)_Period));
+    return INIT_FAILED;
+  }
   Print("Broker=", AccountInfoString(ACCOUNT_COMPANY));
   BuildSymbols();
   if (symbols_count == 0)
