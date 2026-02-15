@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.67"
+#property version   "1.69"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -45,6 +45,8 @@
 // v1.65 非同期クローズ時の同一ticket重複ログ/lot集計を抑止
 // v1.66 ランナートレールでUseTakeProfitTrailSL=false時はSL未使用(内部トレール成行)に統一
 // v1.67 M1以外のチャートにアタッチされた場合はOnInitで停止
+// v1.68 MT5経済カレンダーのニュースフィルタを追加 (全通貨イベント対象)
+// v1.69 バックテスト時のニュースフィルタをCSV(economic_calendar_2025_2030.csv)参照へ変更
 
 #include <Trade/Trade.mqh>
 
@@ -104,6 +106,13 @@ input double TimedExitAtrFactorMax = 1.50;
 input bool EnableTrailingTakeProfit = true;
 input double AdxMaxForNanpin = 20.0;
 input double DiGapMin = 2.0;
+
+input group "NEWS FILTER"
+input bool EnableNewsFilter = true;
+input int NewsMinutesBefore = 5;
+input int NewsMinutesAfter = 30;
+input bool NewsOnlyHighImpact = true;
+input string NewsBacktestCalendarFile = "economic_calendar_2025_2030.csv"; // MQL_TESTER時はFILE_COMMONから参照
 
 input group "TAKE PROFIT"
 input bool UseTakeProfitTrailSL = false;
@@ -338,6 +347,17 @@ ulong counted_closed_tickets[];
 ulong runner_trail_tickets[];
 int runner_trail_types[];
 double runner_trail_stops[];
+datetime news_last_checked_server_time = 0;
+bool news_last_check_blocked = false;
+ulong news_last_event_id = 0;
+datetime news_last_event_time = 0;
+ulong news_last_logged_event_id = 0;
+datetime news_last_logged_event_time = 0;
+int news_last_calendar_error = 0;
+datetime news_backtest_all_event_times[];
+datetime news_backtest_high_event_times[];
+bool news_backtest_calendar_loaded = false;
+bool news_backtest_calendar_ready = false;
 
 struct SymbolState
 {
@@ -996,6 +1016,260 @@ void BuildSymbols()
     Print("No enabled symbols available. Check Enable*/Symbol* inputs.");
 }
 
+void ResetNewsFilterCache()
+{
+  news_last_checked_server_time = 0;
+  news_last_check_blocked = false;
+  news_last_event_id = 0;
+  news_last_event_time = 0;
+  news_last_logged_event_id = 0;
+  news_last_logged_event_time = 0;
+  news_last_calendar_error = 0;
+  ArrayResize(news_backtest_all_event_times, 0);
+  ArrayResize(news_backtest_high_event_times, 0);
+  news_backtest_calendar_loaded = false;
+  news_backtest_calendar_ready = false;
+}
+
+int LowerBoundEventTime(const datetime &events[], datetime target)
+{
+  int left = 0;
+  int right = ArraySize(events);
+  while (left < right)
+  {
+    int mid = left + (right - left) / 2;
+    if (events[mid] < target)
+      left = mid + 1;
+    else
+      right = mid;
+  }
+  return left;
+}
+
+bool HasBacktestNewsEventInWindow(const datetime &events[], datetime from, datetime to, datetime &hit_time)
+{
+  int count = ArraySize(events);
+  if (count <= 0 || to < from)
+    return false;
+  int idx = LowerBoundEventTime(events, from);
+  if (idx >= 0 && idx < count && events[idx] <= to)
+  {
+    hit_time = events[idx];
+    return true;
+  }
+  return false;
+}
+
+bool LoadBacktestNewsCalendarCsv()
+{
+  news_backtest_calendar_loaded = true;
+  news_backtest_calendar_ready = false;
+  ArrayResize(news_backtest_all_event_times, 0);
+  ArrayResize(news_backtest_high_event_times, 0);
+
+  if (StringLen(NewsBacktestCalendarFile) == 0)
+  {
+    Print("News filter backtest CSV file name is empty.");
+    return false;
+  }
+
+  ResetLastError();
+  int fh = FileOpen(NewsBacktestCalendarFile, FILE_READ | FILE_CSV | FILE_ANSI | FILE_COMMON);
+  if (fh == INVALID_HANDLE)
+  {
+    PrintFormat("News filter backtest CSV open failed: file=%s err=%d",
+                NewsBacktestCalendarFile,
+                GetLastError());
+    return false;
+  }
+
+  const int kCsvColumns = 14;
+  for (int c = 0; c < kCsvColumns && !FileIsEnding(fh); ++c)
+    FileReadString(fh); // header
+
+  int all_capacity = 0;
+  int high_capacity = 0;
+  int all_count = 0;
+  int high_count = 0;
+
+  while (!FileIsEnding(fh))
+  {
+    string server_time = FileReadString(fh);
+    if (FileIsEnding(fh) && StringLen(server_time) == 0)
+      break;
+
+    FileReadString(fh); // gmt_time
+    FileReadString(fh); // currency
+    FileReadString(fh); // event_id
+    FileReadString(fh); // value_id
+    string importance = FileReadString(fh);
+    FileReadString(fh); // impact
+    FileReadString(fh); // event_name
+    FileReadString(fh); // period
+    FileReadString(fh); // revision
+    FileReadString(fh); // actual
+    FileReadString(fh); // forecast
+    FileReadString(fh); // previous
+    FileReadString(fh); // revised_previous
+
+    datetime event_time = StringToTime(server_time);
+    if (event_time <= 0)
+      continue;
+
+    if (all_count >= all_capacity)
+    {
+      all_capacity = (all_capacity <= 0) ? 512 : (all_capacity * 2);
+      ArrayResize(news_backtest_all_event_times, all_capacity);
+    }
+    news_backtest_all_event_times[all_count] = event_time;
+    all_count++;
+
+    StringToUpper(importance);
+    if (importance == "HIGH")
+    {
+      if (high_count >= high_capacity)
+      {
+        high_capacity = (high_capacity <= 0) ? 256 : (high_capacity * 2);
+        ArrayResize(news_backtest_high_event_times, high_capacity);
+      }
+      news_backtest_high_event_times[high_count] = event_time;
+      high_count++;
+    }
+  }
+
+  FileClose(fh);
+
+  ArrayResize(news_backtest_all_event_times, all_count);
+  ArrayResize(news_backtest_high_event_times, high_count);
+  if (all_count > 1)
+    ArraySort(news_backtest_all_event_times);
+  if (high_count > 1)
+    ArraySort(news_backtest_high_event_times);
+
+  news_backtest_calendar_ready = (all_count > 0);
+  if (!news_backtest_calendar_ready)
+  {
+    PrintFormat("News filter backtest CSV is empty: file=%s", NewsBacktestCalendarFile);
+    return false;
+  }
+
+  PrintFormat("News filter backtest CSV loaded: file=%s rows=%d high=%d",
+              NewsBacktestCalendarFile,
+              all_count,
+              high_count);
+  return true;
+}
+
+bool IsNewsTimeNowBacktest(datetime from, datetime to)
+{
+  if (!news_backtest_calendar_loaded)
+    LoadBacktestNewsCalendarCsv();
+  if (!news_backtest_calendar_ready)
+    return false;
+
+  datetime hit_time = 0;
+  bool blocked = false;
+  if (NewsOnlyHighImpact)
+    blocked = HasBacktestNewsEventInWindow(news_backtest_high_event_times, from, to, hit_time);
+  else
+    blocked = HasBacktestNewsEventInWindow(news_backtest_all_event_times, from, to, hit_time);
+  if (!blocked)
+    return false;
+
+  news_last_check_blocked = true;
+  news_last_event_id = 0;
+  news_last_event_time = hit_time;
+
+  if (news_last_logged_event_time != news_last_event_time || news_last_logged_event_id != 0)
+  {
+    PrintFormat("News filter block(backtest CSV): importance=%s server=%s",
+                NewsOnlyHighImpact ? "HIGH" : "ALL",
+                TimeToString(news_last_event_time, TIME_DATE | TIME_MINUTES));
+    news_last_logged_event_id = 0;
+    news_last_logged_event_time = news_last_event_time;
+  }
+  return true;
+}
+
+bool IsNewsTimeNow()
+{
+  if (!EnableNewsFilter)
+    return false;
+
+  datetime now_server = TimeTradeServer();
+  if (now_server <= 0)
+    now_server = TimeCurrent();
+  if (now_server <= 0)
+    return false;
+
+  if (news_last_checked_server_time == now_server)
+    return news_last_check_blocked;
+
+  news_last_checked_server_time = now_server;
+  news_last_check_blocked = false;
+  news_last_event_id = 0;
+  news_last_event_time = 0;
+
+  int minutes_before = NewsMinutesBefore;
+  if (minutes_before < 0)
+    minutes_before = 0;
+  int minutes_after = NewsMinutesAfter;
+  if (minutes_after < 0)
+    minutes_after = 0;
+
+  datetime from = now_server - minutes_before * 60;
+  datetime to = now_server + minutes_after * 60;
+
+  if (MQLInfoInteger(MQL_TESTER))
+    return IsNewsTimeNowBacktest(from, to);
+
+  MqlCalendarValue values[];
+  ResetLastError();
+  int n = CalendarValueHistory(values, from, to);
+  if (n < 0)
+  {
+    int err = GetLastError();
+    if (err != 0 && err != news_last_calendar_error)
+    {
+      PrintFormat("News filter query failed: err=%d", err);
+      news_last_calendar_error = err;
+    }
+    return false;
+  }
+  news_last_calendar_error = 0;
+  if (n == 0)
+    return false;
+
+  for (int i = 0; i < n; ++i)
+  {
+    ulong event_id = values[i].event_id;
+    MqlCalendarEvent event;
+    if (!CalendarEventById(event_id, event))
+      continue;
+    if (NewsOnlyHighImpact && event.importance != CALENDAR_IMPORTANCE_HIGH)
+      continue;
+
+    news_last_check_blocked = true;
+    news_last_event_id = event_id;
+    news_last_event_time = values[i].time;
+
+    if (news_last_logged_event_id != news_last_event_id
+        || news_last_logged_event_time != news_last_event_time)
+    {
+      PrintFormat("News filter block: id=%I64u event=%s importance=%d server=%s",
+                  news_last_event_id,
+                  event.name,
+                  (int)event.importance,
+                  TimeToString(news_last_event_time, TIME_DATE | TIME_MINUTES));
+      news_last_logged_event_id = news_last_event_id;
+      news_last_logged_event_time = news_last_event_time;
+    }
+    return true;
+  }
+
+  return false;
+}
+
 bool IsTradingTime()
 {
   datetime now_gmt = TimeGMT();
@@ -1430,6 +1704,9 @@ int OnInit()
   BuildSymbols();
   if (symbols_count == 0)
     return INIT_FAILED;
+  ResetNewsFilterCache();
+  if (EnableNewsFilter && MQLInfoInteger(MQL_TESTER))
+    LoadBacktestNewsCalendarCsv();
 
   int active = 0;
   for (int i = 0; i < symbols_count; ++i)
@@ -3429,7 +3706,8 @@ void ProcessSymbolTick(SymbolState &state)
   double atr_slope = 0.0;
   GetAtrSnapshot(state, atr_base, atr_now, atr_slope);
   double take_profit_distance = TakeProfitDistanceFromPoints(state);
-  bool is_trading_time = IsTradingTime() || IgnoreTradingTimeForSymbol(state);
+  bool news_blocked = IsNewsTimeNow();
+  bool is_trading_time = (IsTradingTime() || IgnoreTradingTimeForSymbol(state)) && !news_blocked;
   int nanpin_levels = EffectiveNanpinLevelsRuntime(state, is_trading_time);
   double value_per_unit = PriceValuePerUnitCached(state);
   datetime confirmed_bar_time = iTime(state.broker_symbol, _Period, 1);
@@ -3813,7 +4091,7 @@ void ProcessSymbolTick(SymbolState &state)
   if (sell.count > 0)
     state.sell_grid_step = MathMax(state.sell_grid_step, grid_step);
 
-  bool allow_nanpin = !safety_triggered && !low_balance;
+  bool allow_nanpin = !safety_triggered && !low_balance && !news_blocked;
   if (params.safety_mode)
   {
     bool prev = state.safety_active;
