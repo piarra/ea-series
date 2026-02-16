@@ -15,8 +15,8 @@ CTrade trade;
 input string InpSymbolGold        = "XAUUSD-m";
 input string InpSymbolSilver      = "XAGUSD-m";
 
-input ENUM_TIMEFRAMES InpSMT_TF   = PERIOD_M15; // SMT + PVT confirmation timeframe
-input ENUM_TIMEFRAMES InpEntry_TF = PERIOD_M5;  // Entry timeframe (structure break)
+input ENUM_TIMEFRAMES InpSMT_TF   = PERIOD_M5; // SMT + PVT confirmation timeframe
+input ENUM_TIMEFRAMES InpEntry_TF = PERIOD_M1;  // Entry timeframe (structure break)
 
 input int    InpPivotLeft         = 2;   // Pivot detection left bars
 input int    InpPivotRight        = 2;   // Pivot detection right bars
@@ -25,14 +25,14 @@ input int    InpLookbackBars      = 400; // History scan bars per TF
 input int    InpSetupExpiryBars   = 12;  // Setup validity in Entry TF bars after SMT+PVT align
 
 input double InpFixedLot          = 0.10;
-input double InpMinRR             = 2.0; // RR >= 2
-input int    InpSL_BufferPoints   = 50;  // buffer in points beyond swing
+input double InpMinRR             = 2.1; // RR >= 2
+input int    InpSL_BufferPoints   = 40;  // buffer in points beyond swing
 
 input long   InpMagic             = 26021401;
-input bool   InpOnePositionOnly   = true;
+input bool   InpOnePositionOnly   = false;
 input bool   InpEnableNewsFilter  = true; // block entry around calendar news
-input int    InpNewsMinutesBefore = 5;    // minutes before news
-input int    InpNewsMinutesAfter  = 30;   // minutes after news
+input int    InpNewsMinutesBefore = 4;    // minutes before news
+input int    InpNewsMinutesAfter  = 18;   // minutes after news
 input string InpNewsBacktestCalendarFile = "economic_calendar_2025_2030.csv"; // MQL_TESTER uses FILE_COMMON
 
 //-------------------- Internal State --------------------
