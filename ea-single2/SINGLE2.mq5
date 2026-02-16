@@ -33,12 +33,21 @@ input bool   InpOnePositionOnly   = true;
 input bool   InpEnableNewsFilter  = true; // block entry around calendar news
 input int    InpNewsMinutesBefore = 5;    // minutes before news
 input int    InpNewsMinutesAfter  = 30;   // minutes after news
+input string InpNewsBacktestCalendarFile = "economic_calendar_2025_2030.csv"; // MQL_TESTER uses FILE_COMMON
 
 //-------------------- Internal State --------------------
 enum SetupDir { SETUP_NONE=0, SETUP_BUY=1, SETUP_SELL=-1 };
 
 SetupDir setup_dir = SETUP_NONE;
 datetime setup_time = 0;   // time when setup was armed (Entry TF bar time)
+datetime news_last_checked_server_time = 0;
+bool news_last_check_blocked = false;
+datetime news_last_event_time = 0;
+datetime news_last_logged_event_time = 0;
+int news_last_calendar_error = 0;
+datetime news_backtest_event_times[];
+bool news_backtest_calendar_loaded = false;
+bool news_backtest_calendar_ready = false;
 
 //-------------------- Utilities --------------------
 bool IsNewBar(const string sym, ENUM_TIMEFRAMES tf, datetime &last_bar_time)
@@ -71,47 +80,200 @@ bool EnsureSymbols()
    return true;
 }
 
+void ResetNewsFilterCache()
+{
+   news_last_checked_server_time = 0;
+   news_last_check_blocked = false;
+   news_last_event_time = 0;
+   news_last_logged_event_time = 0;
+   news_last_calendar_error = 0;
+   ArrayResize(news_backtest_event_times, 0);
+   news_backtest_calendar_loaded = false;
+   news_backtest_calendar_ready = false;
+}
+
+int LowerBoundEventTime(const datetime &events[], datetime target)
+{
+   int left = 0;
+   int right = ArraySize(events);
+   while(left < right)
+   {
+      int mid = left + (right - left) / 2;
+      if(events[mid] < target)
+         left = mid + 1;
+      else
+         right = mid;
+   }
+   return left;
+}
+
+bool HasBacktestNewsEventInWindow(const datetime &events[], datetime from, datetime to, datetime &hit_time)
+{
+   int count = ArraySize(events);
+   if(count <= 0 || to < from)
+      return false;
+   int idx = LowerBoundEventTime(events, from);
+   if(idx >= 0 && idx < count && events[idx] <= to)
+   {
+      hit_time = events[idx];
+      return true;
+   }
+   return false;
+}
+
+bool LoadBacktestNewsCalendarCsv()
+{
+   news_backtest_calendar_loaded = true;
+   news_backtest_calendar_ready = false;
+   ArrayResize(news_backtest_event_times, 0);
+
+   if(StringLen(InpNewsBacktestCalendarFile) == 0)
+   {
+      Print("News filter backtest CSV file name is empty.");
+      return false;
+   }
+
+   ResetLastError();
+   int fh = FileOpen(InpNewsBacktestCalendarFile, FILE_READ | FILE_CSV | FILE_ANSI | FILE_COMMON);
+   if(fh == INVALID_HANDLE)
+   {
+      PrintFormat("News filter backtest CSV open failed: file=%s err=%d",
+                  InpNewsBacktestCalendarFile,
+                  GetLastError());
+      return false;
+   }
+
+   const int kCsvColumns = 14;
+   for(int c=0; c<kCsvColumns && !FileIsEnding(fh); c++)
+      FileReadString(fh); // header
+
+   int capacity = 0;
+   int count = 0;
+
+   while(!FileIsEnding(fh))
+   {
+      string server_time = FileReadString(fh);
+      if(FileIsEnding(fh) && StringLen(server_time) == 0)
+         break;
+
+      FileReadString(fh); // gmt_time
+      FileReadString(fh); // currency
+      FileReadString(fh); // event_id
+      FileReadString(fh); // value_id
+      FileReadString(fh); // importance
+      FileReadString(fh); // impact
+      FileReadString(fh); // event_name
+      FileReadString(fh); // period
+      FileReadString(fh); // revision
+      FileReadString(fh); // actual
+      FileReadString(fh); // forecast
+      FileReadString(fh); // previous
+      FileReadString(fh); // revised_previous
+
+      datetime event_time = StringToTime(server_time);
+      if(event_time <= 0)
+         continue;
+
+      if(count >= capacity)
+      {
+         capacity = (capacity <= 0) ? 512 : (capacity * 2);
+         ArrayResize(news_backtest_event_times, capacity);
+      }
+      news_backtest_event_times[count] = event_time;
+      count++;
+   }
+
+   FileClose(fh);
+
+   ArrayResize(news_backtest_event_times, count);
+   if(count > 1)
+      ArraySort(news_backtest_event_times);
+
+   news_backtest_calendar_ready = (count > 0);
+   if(!news_backtest_calendar_ready)
+   {
+      PrintFormat("News filter backtest CSV is empty: file=%s", InpNewsBacktestCalendarFile);
+      return false;
+   }
+
+   PrintFormat("News filter backtest CSV loaded: file=%s rows=%d",
+               InpNewsBacktestCalendarFile,
+               count);
+   return true;
+}
+
+bool IsNewsTimeNowBacktest(datetime from, datetime to, datetime &hit_time)
+{
+   if(!news_backtest_calendar_loaded)
+      LoadBacktestNewsCalendarCsv();
+   if(!news_backtest_calendar_ready)
+      return false;
+   return HasBacktestNewsEventInWindow(news_backtest_event_times, from, to, hit_time);
+}
+
 bool IsNewsTimeNow()
 {
    if(!InpEnableNewsFilter) return false;
 
    datetime now_server = TimeTradeServer();
    if(now_server <= 0) now_server = TimeCurrent();
+   if(now_server <= 0) return false;
+
+   if(news_last_checked_server_time == now_server)
+      return news_last_check_blocked;
+
+   news_last_checked_server_time = now_server;
+   news_last_check_blocked = false;
+   news_last_event_time = 0;
 
    int before_min = MathMax(0, InpNewsMinutesBefore);
    int after_min  = MathMax(0, InpNewsMinutesAfter);
    datetime from  = now_server - (datetime)(before_min * 60);
    datetime to    = now_server + (datetime)(after_min * 60);
 
+   if(MQLInfoInteger(MQL_TESTER))
+   {
+      datetime hit_time = 0;
+      if(!IsNewsTimeNowBacktest(from, to, hit_time))
+         return false;
+
+      news_last_check_blocked = true;
+      news_last_event_time = hit_time;
+      if(news_last_logged_event_time != news_last_event_time)
+      {
+         PrintFormat("Entry blocked by news filter(backtest CSV): server=%s",
+                     TimeToString(news_last_event_time, TIME_DATE|TIME_MINUTES));
+         news_last_logged_event_time = news_last_event_time;
+      }
+      return true;
+   }
+
    MqlCalendarValue values[];
    ResetLastError();
    int n = CalendarValueHistory(values, from, to); // no currency filter: all calendar news
    if(n < 0)
    {
-      static datetime last_err_log = 0;
-      datetime cur_min = now_server - (now_server % 60);
-      if(cur_min != last_err_log)
+      int err = GetLastError();
+      if(err != 0 && err != news_last_calendar_error)
       {
-         Print("News filter query failed. err=", GetLastError());
-         last_err_log = cur_min;
+         PrintFormat("News filter query failed. err=%d", err);
+         news_last_calendar_error = err;
       }
       return false; // fail-open
    }
 
-   if(n > 0)
-   {
-      static datetime last_block_log = 0;
-      datetime cur_min = now_server - (now_server % 60);
-      if(cur_min != last_block_log)
-      {
-         Print("Entry blocked by news filter. events=", n,
-               " window=", before_min, "m/", after_min, "m");
-         last_block_log = cur_min;
-      }
-      return true;
-   }
+   news_last_calendar_error = 0;
+   if(n <= 0) return false;
 
-   return false;
+   news_last_check_blocked = true;
+   news_last_event_time = values[0].time;
+   if(news_last_logged_event_time != news_last_event_time)
+   {
+      Print("Entry blocked by news filter. events=", n,
+            " window=", before_min, "m/", after_min, "m");
+      news_last_logged_event_time = news_last_event_time;
+   }
+   return true;
 }
 
 int CountMyPositions()
@@ -447,6 +609,11 @@ int OnInit()
       Print("Symbol select failed. Check symbol names: ", InpSymbolGold, " / ", InpSymbolSilver);
       return INIT_FAILED;
    }
+
+   ResetNewsFilterCache();
+   if(InpEnableNewsFilter && MQLInfoInteger(MQL_TESTER))
+      LoadBacktestNewsCalendarCsv();
+
    Print("EA init OK: Gold=", InpSymbolGold, ", Silver=", InpSymbolSilver);
    return INIT_SUCCEEDED;
 }
