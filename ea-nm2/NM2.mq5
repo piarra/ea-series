@@ -3739,6 +3739,13 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
     {
       PrintFormat("Basket TP split close fallback close: %s BUY basket=%d keep_ticket=%I64u reason=trail_sl_update_failed",
                   state.broker_symbol, buy.basket_id, buy.deepest_ticket);
+      bool is_single_l1 = (buy.count <= 1 && buy.level_count <= 1);
+      if (is_single_l1)
+      {
+        PrintFormat("Basket TP split keep alive: %s BUY basket=%d keep_ticket=%I64u reason=trail_sl_update_failed_l1_single",
+                    state.broker_symbol, buy.basket_id, buy.deepest_ticket);
+        return false;
+      }
       bool fallback_closed = CloseBasketById(state, POSITION_TYPE_BUY, buy.basket_id);
       if (!fallback_closed)
       {
@@ -3815,6 +3822,13 @@ bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask
     {
       PrintFormat("Basket TP split close fallback close: %s SELL basket=%d keep_ticket=%I64u reason=trail_sl_update_failed",
                   state.broker_symbol, sell.basket_id, sell.deepest_ticket);
+      bool is_single_l1 = (sell.count <= 1 && sell.level_count <= 1);
+      if (is_single_l1)
+      {
+        PrintFormat("Basket TP split keep alive: %s SELL basket=%d keep_ticket=%I64u reason=trail_sl_update_failed_l1_single",
+                    state.broker_symbol, sell.basket_id, sell.deepest_ticket);
+        return false;
+      }
       bool fallback_closed = CloseBasketById(state, POSITION_TYPE_SELL, sell.basket_id);
       if (!fallback_closed)
       {
