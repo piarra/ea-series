@@ -402,6 +402,8 @@ struct SymbolState
   bool sell_order_pending;
   datetime buy_order_pending_time;
   datetime sell_order_pending_time;
+  datetime buy_basket_add_blocked_log_time;
+  datetime sell_basket_add_blocked_log_time;
   int last_debug_regime;
   int prev_buy_count;
   int prev_sell_count;
@@ -758,6 +760,8 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.sell_order_pending = false;
   state.buy_order_pending_time = 0;
   state.sell_order_pending_time = 0;
+  state.buy_basket_add_blocked_log_time = 0;
+  state.sell_basket_add_blocked_log_time = 0;
   state.last_debug_regime = -1;
   state.prev_buy_count = 0;
   state.prev_sell_count = 0;
@@ -2047,6 +2051,143 @@ void CollectBasketInfo(const SymbolState &state,
     buy.avg_price = buy_value / buy.volume;
   if (sell.volume > 0.0)
     sell.avg_price = sell_value / sell.volume;
+}
+
+bool CanAddBasketBySafetyGuard(const SymbolState &state,
+                               ENUM_POSITION_TYPE type,
+                               double bid,
+                               double ask,
+                               double take_profit_distance,
+                               string &reason)
+{
+  reason = "";
+  const string symbol = state.broker_symbol;
+  const int magic = state.params.magic_number;
+
+  int basket_ids[NM2::kMaxTrackedBaskets];
+  int basket_counts[NM2::kMaxTrackedBaskets];
+  bool basket_missing_sl[NM2::kMaxTrackedBaskets];
+  double basket_volumes[NM2::kMaxTrackedBaskets];
+  double basket_values[NM2::kMaxTrackedBaskets];
+  int basket_count = 0;
+  for (int i = 0; i < NM2::kMaxTrackedBaskets; ++i)
+  {
+    basket_ids[i] = 0;
+    basket_counts[i] = 0;
+    basket_missing_sl[i] = false;
+    basket_volumes[i] = 0.0;
+    basket_values[i] = 0.0;
+  }
+
+  for (int i = PositionsTotal() - 1; i >= 0; --i)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if (!PositionSelectByTicket(ticket))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != magic)
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != symbol)
+      continue;
+    if ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != type)
+      continue;
+
+    string comment = PositionGetString(POSITION_COMMENT);
+    int basket_id = BasketIdFromComment(comment);
+    int idx = FindTrackedBasketIndex(basket_ids, basket_count, basket_id);
+    if (idx < 0)
+    {
+      if (basket_count >= NM2::kMaxTrackedBaskets)
+      {
+        reason = "tracked_basket_limit_exceeded";
+        return false;
+      }
+      idx = basket_count;
+      basket_ids[idx] = basket_id;
+      basket_count++;
+    }
+
+    basket_counts[idx]++;
+    double volume = PositionGetDouble(POSITION_VOLUME);
+    double price = PositionGetDouble(POSITION_PRICE_OPEN);
+    basket_volumes[idx] += volume;
+    basket_values[idx] += volume * price;
+    if (PositionGetDouble(POSITION_SL) <= 0.0)
+      basket_missing_sl[idx] = true;
+  }
+
+  if (basket_count <= 0)
+    return true;
+
+  bool require_tp_check = (take_profit_distance > 0.0);
+  for (int i = 0; i < basket_count; ++i)
+  {
+    if (basket_counts[i] <= 0 || basket_volumes[i] <= 0.0)
+      continue;
+    double avg_price = basket_values[i] / basket_volumes[i];
+    bool tp_reached = true;
+    if (require_tp_check)
+    {
+      if (type == POSITION_TYPE_BUY)
+        tp_reached = bid >= (avg_price + take_profit_distance);
+      else
+        tp_reached = ask <= (avg_price - take_profit_distance);
+    }
+    if (basket_missing_sl[i] || !tp_reached)
+    {
+      reason = StringFormat("basket=%d count=%d missing_sl=%s tp_reached=%s avg=%.5f",
+                            basket_ids[i], basket_counts[i],
+                            basket_missing_sl[i] ? "true" : "false",
+                            tp_reached ? "true" : "false",
+                            avg_price);
+      return false;
+    }
+  }
+  return true;
+}
+
+void LogBasketAddBlocked(SymbolState &state,
+                         ENUM_POSITION_TYPE type,
+                         datetime now,
+                         const string reason)
+{
+  datetime last_logged = 0;
+  if (type == POSITION_TYPE_BUY)
+    last_logged = state.buy_basket_add_blocked_log_time;
+  else
+    last_logged = state.sell_basket_add_blocked_log_time;
+
+  if (last_logged > 0 && (now - last_logged) < 5)
+    return;
+
+  PrintFormat("Basket add blocked: %s type=%d reason=%s",
+              state.broker_symbol, (int)type, reason);
+  if (type == POSITION_TYPE_BUY)
+    state.buy_basket_add_blocked_log_time = now;
+  else
+    state.sell_basket_add_blocked_log_time = now;
+}
+
+bool CanStartNewBasket(SymbolState &state,
+                       ENUM_ORDER_TYPE order_type,
+                       double bid,
+                       double ask,
+                       double take_profit_distance,
+                       datetime now)
+{
+  ENUM_POSITION_TYPE type = POSITION_TYPE_BUY;
+  if (order_type == ORDER_TYPE_BUY)
+    type = POSITION_TYPE_BUY;
+  else if (order_type == ORDER_TYPE_SELL)
+    type = POSITION_TYPE_SELL;
+  else
+    return false;
+
+  string reason = "";
+  if (CanAddBasketBySafetyGuard(state, type, bid, ask, take_profit_distance, reason))
+    return true;
+  LogBasketAddBlocked(state, type, now,
+                      StringFormat("request_type=%d %s", (int)order_type, reason));
+  return false;
 }
 
 double EnsureBuyTarget(SymbolState &state, const BasketInfo &buy, double step, int level_index)
@@ -3578,16 +3719,44 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
   if (!closed_non_deep)
     return false;
   double trail_distance = TakeProfitTrailDistanceCapped(state, take_profit_distance);
-  if (trail_distance > 0.0 && PositionSelectByTicket(buy.deepest_ticket))
+  if (state.params.use_take_profit_trail_sl)
   {
-    double requested_stop = bid - trail_distance;
-    if (state.params.use_take_profit_trail_sl)
+    if (trail_distance <= 0.0)
     {
-      RemoveRunnerTrailTicket(buy.deepest_ticket);
-      UpdatePositionTrailSL(state, buy.deepest_ticket, POSITION_TYPE_BUY, requested_stop);
+      PrintFormat("Basket TP split close deferred: %s BUY basket=%d keep_ticket=%I64u reason=invalid_trail_distance",
+                  state.broker_symbol, buy.basket_id, buy.deepest_ticket);
+      return false;
     }
-    else
+    if (!PositionSelectByTicket(buy.deepest_ticket))
     {
+      PrintFormat("Basket TP split close deferred: %s BUY basket=%d keep_ticket=%I64u reason=keep_ticket_not_found",
+                  state.broker_symbol, buy.basket_id, buy.deepest_ticket);
+      return false;
+    }
+    double requested_stop = bid - trail_distance;
+    RemoveRunnerTrailTicket(buy.deepest_ticket);
+    if (!UpdatePositionTrailSL(state, buy.deepest_ticket, POSITION_TYPE_BUY, requested_stop))
+    {
+      PrintFormat("Basket TP split close fallback close: %s BUY basket=%d keep_ticket=%I64u reason=trail_sl_update_failed",
+                  state.broker_symbol, buy.basket_id, buy.deepest_ticket);
+      bool fallback_closed = CloseBasketById(state, POSITION_TYPE_BUY, buy.basket_id);
+      if (!fallback_closed)
+      {
+        PrintFormat("Basket TP split fallback close failed: %s BUY basket=%d keep_ticket=%I64u",
+                    state.broker_symbol, buy.basket_id, buy.deepest_ticket);
+        return false;
+      }
+      state.buy_close_as_completed = false;
+      state.buy_active_basket_id = 0;
+      ResetBuyTakeProfitTrail(state);
+      return true;
+    }
+  }
+  else
+  {
+    if (trail_distance > 0.0 && PositionSelectByTicket(buy.deepest_ticket))
+    {
+      double requested_stop = bid - trail_distance;
       ClearPositionSL(state, buy.deepest_ticket, POSITION_TYPE_BUY);
       UpsertRunnerTrailStop(buy.deepest_ticket, POSITION_TYPE_BUY, requested_stop);
     }
@@ -3626,16 +3795,44 @@ bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask
   if (!closed_non_deep)
     return false;
   double trail_distance = TakeProfitTrailDistanceCapped(state, take_profit_distance);
-  if (trail_distance > 0.0 && PositionSelectByTicket(sell.deepest_ticket))
+  if (state.params.use_take_profit_trail_sl)
   {
-    double requested_stop = ask + trail_distance;
-    if (state.params.use_take_profit_trail_sl)
+    if (trail_distance <= 0.0)
     {
-      RemoveRunnerTrailTicket(sell.deepest_ticket);
-      UpdatePositionTrailSL(state, sell.deepest_ticket, POSITION_TYPE_SELL, requested_stop);
+      PrintFormat("Basket TP split close deferred: %s SELL basket=%d keep_ticket=%I64u reason=invalid_trail_distance",
+                  state.broker_symbol, sell.basket_id, sell.deepest_ticket);
+      return false;
     }
-    else
+    if (!PositionSelectByTicket(sell.deepest_ticket))
     {
+      PrintFormat("Basket TP split close deferred: %s SELL basket=%d keep_ticket=%I64u reason=keep_ticket_not_found",
+                  state.broker_symbol, sell.basket_id, sell.deepest_ticket);
+      return false;
+    }
+    double requested_stop = ask + trail_distance;
+    RemoveRunnerTrailTicket(sell.deepest_ticket);
+    if (!UpdatePositionTrailSL(state, sell.deepest_ticket, POSITION_TYPE_SELL, requested_stop))
+    {
+      PrintFormat("Basket TP split close fallback close: %s SELL basket=%d keep_ticket=%I64u reason=trail_sl_update_failed",
+                  state.broker_symbol, sell.basket_id, sell.deepest_ticket);
+      bool fallback_closed = CloseBasketById(state, POSITION_TYPE_SELL, sell.basket_id);
+      if (!fallback_closed)
+      {
+        PrintFormat("Basket TP split fallback close failed: %s SELL basket=%d keep_ticket=%I64u",
+                    state.broker_symbol, sell.basket_id, sell.deepest_ticket);
+        return false;
+      }
+      state.sell_close_as_completed = false;
+      state.sell_active_basket_id = 0;
+      ResetSellTakeProfitTrail(state);
+      return true;
+    }
+  }
+  else
+  {
+    if (trail_distance > 0.0 && PositionSelectByTicket(sell.deepest_ticket))
+    {
+      double requested_stop = ask + trail_distance;
       ClearPositionSL(state, sell.deepest_ticket, POSITION_TYPE_SELL);
       UpsertRunnerTrailStop(sell.deepest_ticket, POSITION_TYPE_SELL, requested_stop);
     }
@@ -4010,28 +4207,34 @@ void ProcessSymbolTick(SymbolState &state)
       {
         if (!state.buy_order_pending && allow_entry_buy)
         {
-          int basket_id = (state.buy_active_basket_id > 0) ? state.buy_active_basket_id : NextBasketId(state);
-          opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
-          if (opened_buy)
+          if (CanStartNewBasket(state, ORDER_TYPE_BUY, bid, ask, take_profit_distance, now))
           {
-            CommitBasketId(state, POSITION_TYPE_BUY, basket_id);
-            state.buy_order_pending = true;
-            state.buy_order_pending_time = now;
-            if (state.buy_level_price[0] <= 0.0)
-              state.buy_level_price[0] = ask;
+            int basket_id = (state.buy_active_basket_id > 0) ? state.buy_active_basket_id : NextBasketId(state);
+            opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
+            if (opened_buy)
+            {
+              CommitBasketId(state, POSITION_TYPE_BUY, basket_id);
+              state.buy_order_pending = true;
+              state.buy_order_pending_time = now;
+              if (state.buy_level_price[0] <= 0.0)
+                state.buy_level_price[0] = ask;
+            }
           }
         }
         if (!state.sell_order_pending && allow_entry_sell)
         {
-          int basket_id = (state.sell_active_basket_id > 0) ? state.sell_active_basket_id : NextBasketId(state);
-          opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
-          if (opened_sell)
+          if (CanStartNewBasket(state, ORDER_TYPE_SELL, bid, ask, take_profit_distance, now))
           {
-            CommitBasketId(state, POSITION_TYPE_SELL, basket_id);
-            state.sell_order_pending = true;
-            state.sell_order_pending_time = now;
-            if (state.sell_level_price[0] <= 0.0)
-              state.sell_level_price[0] = bid;
+            int basket_id = (state.sell_active_basket_id > 0) ? state.sell_active_basket_id : NextBasketId(state);
+            opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
+            if (opened_sell)
+            {
+              CommitBasketId(state, POSITION_TYPE_SELL, basket_id);
+              state.sell_order_pending = true;
+              state.sell_order_pending_time = now;
+              if (state.sell_level_price[0] <= 0.0)
+                state.sell_level_price[0] = bid;
+            }
           }
         }
       }
@@ -4040,28 +4243,34 @@ void ProcessSymbolTick(SymbolState &state)
         int dir = SelectSingleEntryDirection(state, allow_entry_buy, allow_entry_sell, has_adx, di_plus_now, di_minus_now);
         if (dir > 0 && !state.buy_order_pending)
         {
-          int basket_id = (state.buy_active_basket_id > 0) ? state.buy_active_basket_id : NextBasketId(state);
-          opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
-          if (opened_buy)
+          if (CanStartNewBasket(state, ORDER_TYPE_BUY, bid, ask, take_profit_distance, now))
           {
-            CommitBasketId(state, POSITION_TYPE_BUY, basket_id);
-            state.buy_order_pending = true;
-            state.buy_order_pending_time = now;
-            if (state.buy_level_price[0] <= 0.0)
-              state.buy_level_price[0] = ask;
+            int basket_id = (state.buy_active_basket_id > 0) ? state.buy_active_basket_id : NextBasketId(state);
+            opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
+            if (opened_buy)
+            {
+              CommitBasketId(state, POSITION_TYPE_BUY, basket_id);
+              state.buy_order_pending = true;
+              state.buy_order_pending_time = now;
+              if (state.buy_level_price[0] <= 0.0)
+                state.buy_level_price[0] = ask;
+            }
           }
         }
         else if (dir < 0 && !state.sell_order_pending)
         {
-          int basket_id = (state.sell_active_basket_id > 0) ? state.sell_active_basket_id : NextBasketId(state);
-          opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
-          if (opened_sell)
+          if (CanStartNewBasket(state, ORDER_TYPE_SELL, bid, ask, take_profit_distance, now))
           {
-            CommitBasketId(state, POSITION_TYPE_SELL, basket_id);
-            state.sell_order_pending = true;
-            state.sell_order_pending_time = now;
-            if (state.sell_level_price[0] <= 0.0)
-              state.sell_level_price[0] = bid;
+            int basket_id = (state.sell_active_basket_id > 0) ? state.sell_active_basket_id : NextBasketId(state);
+            opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
+            if (opened_sell)
+            {
+              CommitBasketId(state, POSITION_TYPE_SELL, basket_id);
+              state.sell_order_pending = true;
+              state.sell_order_pending_time = now;
+              if (state.sell_level_price[0] <= 0.0)
+                state.sell_level_price[0] = bid;
+            }
           }
         }
       }
@@ -4250,29 +4459,35 @@ void ProcessSymbolTick(SymbolState &state)
       if (buy.count == 0 && !state.buy_order_pending && allow_entry_buy && spread_ok
           && CanRestart(state.last_buy_close_time, restart_delay_dynamic_seconds))
       {
-        int basket_id = (state.buy_active_basket_id > 0) ? state.buy_active_basket_id : NextBasketId(state);
-        bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
-        if (opened_buy)
+        if (CanStartNewBasket(state, ORDER_TYPE_BUY, bid, ask, take_profit_distance, now))
         {
-          CommitBasketId(state, POSITION_TYPE_BUY, basket_id);
-          state.buy_order_pending = true;
-          state.buy_order_pending_time = now;
-          if (state.buy_level_price[0] <= 0.0)
-            state.buy_level_price[0] = ask;
+          int basket_id = (state.buy_active_basket_id > 0) ? state.buy_active_basket_id : NextBasketId(state);
+          bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
+          if (opened_buy)
+          {
+            CommitBasketId(state, POSITION_TYPE_BUY, basket_id);
+            state.buy_order_pending = true;
+            state.buy_order_pending_time = now;
+            if (state.buy_level_price[0] <= 0.0)
+              state.buy_level_price[0] = ask;
+          }
         }
       }
       if (sell.count == 0 && !state.sell_order_pending && allow_entry_sell && spread_ok
           && CanRestart(state.last_sell_close_time, restart_delay_dynamic_seconds))
       {
-        int basket_id = (state.sell_active_basket_id > 0) ? state.sell_active_basket_id : NextBasketId(state);
-        bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
-        if (opened_sell)
+        if (CanStartNewBasket(state, ORDER_TYPE_SELL, bid, ask, take_profit_distance, now))
         {
-          CommitBasketId(state, POSITION_TYPE_SELL, basket_id);
-          state.sell_order_pending = true;
-          state.sell_order_pending_time = now;
-          if (state.sell_level_price[0] <= 0.0)
-            state.sell_level_price[0] = bid;
+          int basket_id = (state.sell_active_basket_id > 0) ? state.sell_active_basket_id : NextBasketId(state);
+          bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
+          if (opened_sell)
+          {
+            CommitBasketId(state, POSITION_TYPE_SELL, basket_id);
+            state.sell_order_pending = true;
+            state.sell_order_pending_time = now;
+            if (state.sell_level_price[0] <= 0.0)
+              state.sell_level_price[0] = bid;
+          }
         }
       }
     }
@@ -4283,28 +4498,34 @@ void ProcessSymbolTick(SymbolState &state)
       int dir = SelectSingleEntryDirection(state, can_restart_buy, can_restart_sell, has_adx, di_plus_now, di_minus_now);
       if (dir > 0 && spread_ok)
       {
-        int basket_id = (state.buy_active_basket_id > 0) ? state.buy_active_basket_id : NextBasketId(state);
-        bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
-        if (opened_buy)
+        if (CanStartNewBasket(state, ORDER_TYPE_BUY, bid, ask, take_profit_distance, now))
         {
-          CommitBasketId(state, POSITION_TYPE_BUY, basket_id);
-          state.buy_order_pending = true;
-          state.buy_order_pending_time = now;
-          if (state.buy_level_price[0] <= 0.0)
-            state.buy_level_price[0] = ask;
+          int basket_id = (state.buy_active_basket_id > 0) ? state.buy_active_basket_id : NextBasketId(state);
+          bool opened_buy = TryOpen(state, symbol, ORDER_TYPE_BUY, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
+          if (opened_buy)
+          {
+            CommitBasketId(state, POSITION_TYPE_BUY, basket_id);
+            state.buy_order_pending = true;
+            state.buy_order_pending_time = now;
+            if (state.buy_level_price[0] <= 0.0)
+              state.buy_level_price[0] = ask;
+          }
         }
       }
       else if (dir < 0 && spread_ok)
       {
-        int basket_id = (state.sell_active_basket_id > 0) ? state.sell_active_basket_id : NextBasketId(state);
-        bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
-        if (opened_sell)
+        if (CanStartNewBasket(state, ORDER_TYPE_SELL, bid, ask, take_profit_distance, now))
         {
-          CommitBasketId(state, POSITION_TYPE_SELL, basket_id);
-          state.sell_order_pending = true;
-          state.sell_order_pending_time = now;
-          if (state.sell_level_price[0] <= 0.0)
-            state.sell_level_price[0] = bid;
+          int basket_id = (state.sell_active_basket_id > 0) ? state.sell_active_basket_id : NextBasketId(state);
+          bool opened_sell = TryOpen(state, symbol, ORDER_TYPE_SELL, state.lot_seq[0], MakeLevelComment(NM2::kCoreComment, basket_id, 1), 1);
+          if (opened_sell)
+          {
+            CommitBasketId(state, POSITION_TYPE_SELL, basket_id);
+            state.sell_order_pending = true;
+            state.sell_order_pending_time = now;
+            if (state.sell_level_price[0] <= 0.0)
+              state.sell_level_price[0] = bid;
+          }
         }
       }
     }
