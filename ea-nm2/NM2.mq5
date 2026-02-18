@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.69"
+#property version   "1.73"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -47,6 +47,10 @@
 // v1.67 M1以外のチャートにアタッチされた場合はOnInitで停止
 // v1.68 MT5経済カレンダーのニュースフィルタを追加 (全通貨イベント対象)
 // v1.69 バックテスト時のニュースフィルタをCSV(economic_calendar_2025_2030.csv)参照へ変更
+// v1.70 起動時にサーバー時刻/UTCオフセットをログ出力
+// v1.71 サーバー時刻オフセットログをテスター非対応化し、TimeTradeServer優先に修正
+// v1.72 取引禁止時間に入った瞬間に全クローズするオプションを追加
+// v1.73 3段目以降のナンピンロット倍率をinput化
 
 #include <Trade/Trade.mqh>
 
@@ -65,7 +69,6 @@ const int kRecentCloseRequestCap = 256;
 const ulong kRecentCloseRequestTtlMs = 3000;
 const int kClosedTicketCountCap = 4096;
 const int kRunnerTrailStateCap = 512;
-const double kLotMultiplierFromLevel3 = 1.5;
 const double kDeepLevelTrailLockPoints = 2.0;
 }
 
@@ -95,6 +98,8 @@ input double RestartDelayAtrFactorMax = 2.0;
 input int NanpinSleepSeconds = 10;
 input int OrderPendingTimeoutSeconds = 2;
 input bool EnableHedgedEntry = true;
+input bool CloseAllOnTradingStopStart = false;
+input double NanpinLotMultiplierFromLevel3 = 1.5;
 input int DeepestTimedExitMinutes = 30;
 input int DeepestTimedExitMinMinutes = 8;
 input int DeepestTimedExitMaxMinutes = 60;
@@ -298,6 +303,8 @@ struct NM2Params
   int nanpin_sleep_seconds;
   int order_pending_timeout_seconds;
   bool enable_hedged_entry;
+  bool close_all_on_trading_stop_start;
+  double nanpin_lot_multiplier_from_level3;
   int deepest_timed_exit_minutes;
   int deepest_timed_exit_min_minutes;
   int deepest_timed_exit_max_minutes;
@@ -358,6 +365,8 @@ datetime news_backtest_all_event_times[];
 datetime news_backtest_high_event_times[];
 bool news_backtest_calendar_loaded = false;
 bool news_backtest_calendar_ready = false;
+bool trading_time_state_initialized = false;
+bool trading_time_state_prev = true;
 
 struct SymbolState
 {
@@ -839,6 +848,8 @@ void ApplyCommonParams(NM2Params &params)
   params.nanpin_sleep_seconds = NanpinSleepSeconds;
   params.order_pending_timeout_seconds = OrderPendingTimeoutSeconds;
   params.enable_hedged_entry = EnableHedgedEntry;
+  params.close_all_on_trading_stop_start = CloseAllOnTradingStopStart;
+  params.nanpin_lot_multiplier_from_level3 = NanpinLotMultiplierFromLevel3;
   params.deepest_timed_exit_minutes = DeepestTimedExitMinutes;
   params.deepest_timed_exit_min_minutes = DeepestTimedExitMinMinutes;
   params.deepest_timed_exit_max_minutes = DeepestTimedExitMaxMinutes;
@@ -1288,6 +1299,41 @@ bool IsTradingTime()
   return !in_stop;
 }
 
+void HandleTradingStopStartCloseAll()
+{
+  bool now_trading_time = IsTradingTime();
+  if (!trading_time_state_initialized)
+  {
+    trading_time_state_initialized = true;
+    trading_time_state_prev = now_trading_time;
+    return;
+  }
+
+  bool entered_stop = (trading_time_state_prev && !now_trading_time);
+  trading_time_state_prev = now_trading_time;
+  if (!entered_stop || !CloseAllOnTradingStopStart)
+    return;
+
+  bool has_positions = false;
+  for (int i = PositionsTotal() - 1; i >= 0; --i)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if (!PositionSelectByTicket(ticket))
+      continue;
+    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      continue;
+    has_positions = true;
+    break;
+  }
+  if (!has_positions)
+    return;
+
+  PrintFormat("Trading stop started: close all positions. magic=%d time=%s",
+              MagicNumber,
+              TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS));
+  CloseAllPositionsByMagic(MagicNumber);
+}
+
 bool IgnoreTradingTimeForSymbol(const SymbolState &state)
 {
   return (state.logical_symbol == "BTCUSD" || state.logical_symbol == "ETHUSD");
@@ -1405,6 +1451,9 @@ void BuildLotSequence(SymbolState &state)
   }
   else
   {
+    double lot_multiplier = params.nanpin_lot_multiplier_from_level3;
+    if (lot_multiplier <= 0.0)
+      lot_multiplier = 1.0;
     if (levels > 1)
     {
       if (params.double_second_lot)
@@ -1413,7 +1462,7 @@ void BuildLotSequence(SymbolState &state)
         state.lot_seq[1] = params.base_lot;
     }
     for (int i = 2; i < levels; ++i)
-      state.lot_seq[i] = state.lot_seq[i - 1] * NM2::kLotMultiplierFromLevel3;
+      state.lot_seq[i] = state.lot_seq[i - 1] * lot_multiplier;
   }
   for (int i = 0; i < levels; ++i)
   {
@@ -1705,6 +1754,7 @@ int OnInit()
     return INIT_FAILED;
   }
   Print("Broker=", AccountInfoString(ACCOUNT_COMPANY));
+  LogServerUtcOffset();
   BuildSymbols();
   if (symbols_count == 0)
     return INIT_FAILED;
@@ -1759,6 +1809,8 @@ int OnInit()
       symbols[i].initial_started = true;
   }
   InitCumulativeLotTracking();
+  trading_time_state_initialized = false;
+  trading_time_state_prev = true;
   SendLog(BuildInitLogMessage(active));
   return INIT_SUCCEEDED;
 }
@@ -2349,6 +2401,40 @@ string BuildRegimeLogMessage(const SymbolState &state, const int prev_regime)
 string BuildInitLogMessage(const int active_symbols)
 {
   return StringFormat("OnInit succeeded: active_symbols=%d", active_symbols);
+}
+
+void LogServerUtcOffset()
+{
+  datetime server_current = TimeCurrent();
+  datetime server_trade = TimeTradeServer();
+  datetime utc_time = TimeGMT();
+  if (MQLInfoInteger(MQL_TESTER))
+  {
+    PrintFormat("ServerTimeOffset skipped in tester: SimServer=%s UTC(now)=%s",
+                TimeToString(server_current, TIME_DATE | TIME_SECONDS),
+                TimeToString(utc_time, TIME_DATE | TIME_SECONDS));
+    return;
+  }
+
+  datetime server_time = server_trade;
+  string source = "TimeTradeServer";
+  if (server_time <= 0)
+  {
+    server_time = server_current;
+    source = "TimeCurrent";
+  }
+  long offset_sec = (long)server_time - (long)utc_time;
+  long abs_sec = offset_sec;
+  if (abs_sec < 0)
+    abs_sec = -abs_sec;
+  int offset_h = (int)(abs_sec / 3600);
+  int offset_m = (int)((abs_sec % 3600) / 60);
+  string sign = (offset_sec >= 0) ? "+" : "-";
+  PrintFormat("ServerTimeOffset Broker=%s Server=%s UTC=%s Offset=%s%02d:%02d Source=%s",
+              AccountInfoString(ACCOUNT_COMPANY),
+              TimeToString(server_time, TIME_DATE | TIME_SECONDS),
+              TimeToString(utc_time, TIME_DATE | TIME_SECONDS),
+              sign, offset_h, offset_m, source);
 }
 
 void TryInitRegimeFromHistory(SymbolState &state)
@@ -4696,6 +4782,7 @@ void ProcessSymbolTick(SymbolState &state)
 
 void OnTick()
 {
+  HandleTradingStopStartCloseAll();
   for (int i = 0; i < symbols_count; ++i)
     ProcessSymbolTick(symbols[i]);
 }
