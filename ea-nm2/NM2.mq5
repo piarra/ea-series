@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.76"
+#property version   "1.77"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -54,6 +54,7 @@
 // v1.74 level別のバスケット絶対損失ポイント閾値を追加 (L1-L5)
 // v1.75 L3+最深ランナーにL2到達後のL3再接近利確条件を追加
 // v1.76 L3+最深ランナーの再接近利確をinputフラグでON/OFF可能化
+// v1.77 DeepRunnerRevisit対象split後バスケットをactive維持し、再ナンピンを許可
 
 #include <Trade/Trade.mqh>
 
@@ -3047,6 +3048,43 @@ void RemoveRunnerRevisitTicket(const ulong ticket)
     RemoveRunnerRevisitAt(idx);
 }
 
+void RemoveRunnerRevisitForBasket(const SymbolState &state,
+                                  ENUM_POSITION_TYPE type,
+                                  int basket_id)
+{
+  if (basket_id <= 0)
+    return;
+  const string symbol = state.broker_symbol;
+  const int magic = state.params.magic_number;
+  int i = 0;
+  int count = ArraySize(runner_revisit_tickets);
+  while (i < count)
+  {
+    ulong ticket = runner_revisit_tickets[i];
+    if (!PositionSelectByTicket(ticket))
+    {
+      RemoveRunnerRevisitAt(i);
+      count = ArraySize(runner_revisit_tickets);
+      continue;
+    }
+    if (PositionGetInteger(POSITION_MAGIC) != magic
+        || PositionGetString(POSITION_SYMBOL) != symbol
+        || (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != type)
+    {
+      i++;
+      continue;
+    }
+    string comment = PositionGetString(POSITION_COMMENT);
+    if (BasketIdFromComment(comment) == basket_id)
+    {
+      RemoveRunnerRevisitAt(i);
+      count = ArraySize(runner_revisit_tickets);
+      continue;
+    }
+    i++;
+  }
+}
+
 void RemoveRunnerTrailAt(const int index)
 {
   int count = ArraySize(runner_trail_tickets);
@@ -4199,12 +4237,19 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
   PrintFormat("Basket TP split close: %s BUY basket=%d keep_ticket=%I64u deepest_level=%d",
               state.broker_symbol, buy.basket_id, buy.deepest_ticket, buy.deepest_level);
   if (has_deep_revisit_rule)
+  {
     UpsertRunnerRevisitState(buy.deepest_ticket, POSITION_TYPE_BUY, revisit_rebound_price, revisit_deep_price);
+    // Keep this basket active so additional nanpin can continue from the remaining deep runner.
+    state.buy_active_basket_id = buy.basket_id;
+    state.buy_close_as_completed = false;
+  }
   else
+  {
     RemoveRunnerRevisitTicket(buy.deepest_ticket);
-  AddCompletedBasket(state, POSITION_TYPE_BUY, buy.basket_id);
-  state.buy_active_basket_id = 0;
-  state.buy_close_as_completed = true;
+    AddCompletedBasket(state, POSITION_TYPE_BUY, buy.basket_id);
+    state.buy_active_basket_id = 0;
+    state.buy_close_as_completed = true;
+  }
   ResetBuyTakeProfitTrail(state);
   return true;
 }
@@ -4294,12 +4339,19 @@ bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask
   PrintFormat("Basket TP split close: %s SELL basket=%d keep_ticket=%I64u deepest_level=%d",
               state.broker_symbol, sell.basket_id, sell.deepest_ticket, sell.deepest_level);
   if (has_deep_revisit_rule)
+  {
     UpsertRunnerRevisitState(sell.deepest_ticket, POSITION_TYPE_SELL, revisit_rebound_price, revisit_deep_price);
+    // Keep this basket active so additional nanpin can continue from the remaining deep runner.
+    state.sell_active_basket_id = sell.basket_id;
+    state.sell_close_as_completed = false;
+  }
   else
+  {
     RemoveRunnerRevisitTicket(sell.deepest_ticket);
-  AddCompletedBasket(state, POSITION_TYPE_SELL, sell.basket_id);
-  state.sell_active_basket_id = 0;
-  state.sell_close_as_completed = true;
+    AddCompletedBasket(state, POSITION_TYPE_SELL, sell.basket_id);
+    state.sell_active_basket_id = 0;
+    state.sell_close_as_completed = true;
+  }
   ResetSellTakeProfitTrail(state);
   return true;
 }
@@ -4934,6 +4986,38 @@ void ProcessSymbolTick(SymbolState &state)
   }
 
   if (tp_closed)
+  {
+    state.prev_buy_count = buy.count;
+    state.prev_sell_count = sell.count;
+    return;
+  }
+
+  bool deep_revisit_closed = false;
+  if (params.enable_deep_runner_revisit_take_profit)
+  {
+    if (buy.count == 1 && buy.basket_id > 0 && buy.deepest_ticket > 0
+        && state.buy_active_basket_id == buy.basket_id)
+    {
+      if (ShouldCloseRunnerByRevisit(state, buy.deepest_ticket, POSITION_TYPE_BUY, bid))
+        deep_revisit_closed = true;
+    }
+    else if (buy.count > 1 && buy.basket_id > 0)
+    {
+      RemoveRunnerRevisitForBasket(state, POSITION_TYPE_BUY, buy.basket_id);
+    }
+
+    if (sell.count == 1 && sell.basket_id > 0 && sell.deepest_ticket > 0
+        && state.sell_active_basket_id == sell.basket_id)
+    {
+      if (ShouldCloseRunnerByRevisit(state, sell.deepest_ticket, POSITION_TYPE_SELL, ask))
+        deep_revisit_closed = true;
+    }
+    else if (sell.count > 1 && sell.basket_id > 0)
+    {
+      RemoveRunnerRevisitForBasket(state, POSITION_TYPE_SELL, sell.basket_id);
+    }
+  }
+  if (deep_revisit_closed)
   {
     state.prev_buy_count = buy.count;
     state.prev_sell_count = sell.count;
