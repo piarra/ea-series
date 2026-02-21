@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.74"
+#property version   "1.76"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -52,6 +52,8 @@
 // v1.72 取引禁止時間に入った瞬間に全クローズするオプションを追加
 // v1.73 3段目以降のナンピンロット倍率をinput化
 // v1.74 level別のバスケット絶対損失ポイント閾値を追加 (L1-L5)
+// v1.75 L3+最深ランナーにL2到達後のL3再接近利確条件を追加
+// v1.76 L3+最深ランナーの再接近利確をinputフラグでON/OFF可能化
 
 #include <Trade/Trade.mqh>
 
@@ -71,6 +73,7 @@ const ulong kRecentCloseRequestTtlMs = 3000;
 const int kClosedTicketCountCap = 4096;
 const int kRunnerTrailStateCap = 512;
 const double kDeepLevelTrailLockPoints = 2.0;
+const double kDeepRunnerRevisitCloseBandRatio = 0.20;
 }
 
 enum RegimeState
@@ -122,6 +125,7 @@ input string NewsBacktestCalendarFile = "economic_calendar_2025_2030.csv"; // MQ
 
 input group "TAKE PROFIT"
 input bool UseTakeProfitTrailSL = false;
+input bool EnableDeepRunnerRevisitTakeProfit = true;
 input bool EnableFixedTrailStart = true;
 input double FixedTrailStartPointsXAUUSD = 2500.0;
 input double FixedTrailStartPointsEURUSD = 120.0;
@@ -290,6 +294,7 @@ struct NM2Params
   double take_profit_points;
   bool trailing_take_profit;
   bool use_take_profit_trail_sl;
+  bool enable_deep_runner_revisit_take_profit;
   double trailing_take_profit_distance_ratio;
   int adx_period;
   double adx_max_for_nanpin;
@@ -366,6 +371,11 @@ ulong counted_closed_tickets[];
 ulong runner_trail_tickets[];
 int runner_trail_types[];
 double runner_trail_stops[];
+ulong runner_revisit_tickets[];
+int runner_revisit_types[];
+double runner_revisit_rebound_prices[];
+double runner_revisit_deep_prices[];
+bool runner_revisit_rebound_touched[];
 datetime news_last_checked_server_time = 0;
 bool news_last_check_blocked = false;
 ulong news_last_event_id = 0;
@@ -478,6 +488,11 @@ void ClearRunnerTrailTracking()
   ArrayResize(runner_trail_tickets, 0);
   ArrayResize(runner_trail_types, 0);
   ArrayResize(runner_trail_stops, 0);
+  ArrayResize(runner_revisit_tickets, 0);
+  ArrayResize(runner_revisit_types, 0);
+  ArrayResize(runner_revisit_rebound_prices, 0);
+  ArrayResize(runner_revisit_deep_prices, 0);
+  ArrayResize(runner_revisit_rebound_touched, 0);
 }
 
 void ClearCloseTracking()
@@ -872,6 +887,7 @@ void ApplyCommonParams(NM2Params &params)
   params.timed_exit_atr_factor_max = TimedExitAtrFactorMax;
   params.trailing_take_profit = EnableTrailingTakeProfit;
   params.use_take_profit_trail_sl = UseTakeProfitTrailSL;
+  params.enable_deep_runner_revisit_take_profit = EnableDeepRunnerRevisitTakeProfit;
   params.take_profit_points = 120.0;
   params.trailing_take_profit_distance_ratio = 0.55;
   params.close_retry_count = CloseRetryCount;
@@ -2992,6 +3008,45 @@ int FindRunnerTrailIndex(const ulong ticket)
   return -1;
 }
 
+int FindRunnerRevisitIndex(const ulong ticket)
+{
+  int count = ArraySize(runner_revisit_tickets);
+  for (int i = 0; i < count; ++i)
+  {
+    if (runner_revisit_tickets[i] == ticket)
+      return i;
+  }
+  return -1;
+}
+
+void RemoveRunnerRevisitAt(const int index)
+{
+  int count = ArraySize(runner_revisit_tickets);
+  if (index < 0 || index >= count)
+    return;
+  for (int i = index; i < (count - 1); ++i)
+  {
+    runner_revisit_tickets[i] = runner_revisit_tickets[i + 1];
+    runner_revisit_types[i] = runner_revisit_types[i + 1];
+    runner_revisit_rebound_prices[i] = runner_revisit_rebound_prices[i + 1];
+    runner_revisit_deep_prices[i] = runner_revisit_deep_prices[i + 1];
+    runner_revisit_rebound_touched[i] = runner_revisit_rebound_touched[i + 1];
+  }
+  count--;
+  ArrayResize(runner_revisit_tickets, count);
+  ArrayResize(runner_revisit_types, count);
+  ArrayResize(runner_revisit_rebound_prices, count);
+  ArrayResize(runner_revisit_deep_prices, count);
+  ArrayResize(runner_revisit_rebound_touched, count);
+}
+
+void RemoveRunnerRevisitTicket(const ulong ticket)
+{
+  int idx = FindRunnerRevisitIndex(ticket);
+  if (idx >= 0)
+    RemoveRunnerRevisitAt(idx);
+}
+
 void RemoveRunnerTrailAt(const int index)
 {
   int count = ArraySize(runner_trail_tickets);
@@ -3014,6 +3069,7 @@ void RemoveRunnerTrailTicket(const ulong ticket)
   int idx = FindRunnerTrailIndex(ticket);
   if (idx >= 0)
     RemoveRunnerTrailAt(idx);
+  RemoveRunnerRevisitTicket(ticket);
 }
 
 void CleanupRunnerTrailState()
@@ -3027,6 +3083,23 @@ void CleanupRunnerTrailState()
     {
       RemoveRunnerTrailAt(i);
       count = ArraySize(runner_trail_tickets);
+      continue;
+    }
+    i++;
+  }
+}
+
+void CleanupRunnerRevisitState()
+{
+  int i = 0;
+  int count = ArraySize(runner_revisit_tickets);
+  while (i < count)
+  {
+    ulong ticket = runner_revisit_tickets[i];
+    if (!PositionSelectByTicket(ticket))
+    {
+      RemoveRunnerRevisitAt(i);
+      count = ArraySize(runner_revisit_tickets);
       continue;
     }
     i++;
@@ -3071,6 +3144,114 @@ double UpsertRunnerTrailStop(const ulong ticket,
   return stop;
 }
 
+void UpsertRunnerRevisitState(const ulong ticket,
+                              ENUM_POSITION_TYPE type,
+                              double rebound_price,
+                              double deep_price)
+{
+  if (ticket == 0 || rebound_price <= 0.0 || deep_price <= 0.0)
+    return;
+  if (MathAbs(rebound_price - deep_price) <= 0.0)
+    return;
+
+  int idx = FindRunnerRevisitIndex(ticket);
+  if (idx < 0)
+  {
+    int count = ArraySize(runner_revisit_tickets);
+    if (count >= NM2::kRunnerTrailStateCap)
+    {
+      RemoveRunnerRevisitAt(0);
+      count = ArraySize(runner_revisit_tickets);
+    }
+    ArrayResize(runner_revisit_tickets, count + 1);
+    ArrayResize(runner_revisit_types, count + 1);
+    ArrayResize(runner_revisit_rebound_prices, count + 1);
+    ArrayResize(runner_revisit_deep_prices, count + 1);
+    ArrayResize(runner_revisit_rebound_touched, count + 1);
+    idx = count;
+  }
+
+  runner_revisit_tickets[idx] = ticket;
+  runner_revisit_types[idx] = (int)type;
+  runner_revisit_rebound_prices[idx] = rebound_price;
+  runner_revisit_deep_prices[idx] = deep_price;
+  runner_revisit_rebound_touched[idx] = false;
+}
+
+double RunnerRevisitCloseBand(const SymbolState &state, double rebound_price, double deep_price)
+{
+  double band = MathAbs(rebound_price - deep_price) * NM2::kDeepRunnerRevisitCloseBandRatio;
+  double point = state.point;
+  if (point <= 0.0)
+    point = 0.00001;
+  double min_band = point * NM2::kDeepLevelTrailLockPoints;
+  if (band < min_band)
+    band = min_band;
+  return band;
+}
+
+bool ShouldCloseRunnerByRevisit(SymbolState &state,
+                                const ulong ticket,
+                                ENUM_POSITION_TYPE type,
+                                double market_price)
+{
+  int idx = FindRunnerRevisitIndex(ticket);
+  if (idx < 0)
+    return false;
+
+  if (runner_revisit_types[idx] != (int)type)
+  {
+    RemoveRunnerRevisitAt(idx);
+    return false;
+  }
+
+  double rebound_price = runner_revisit_rebound_prices[idx];
+  double deep_price = runner_revisit_deep_prices[idx];
+  if (rebound_price <= 0.0 || deep_price <= 0.0)
+    return false;
+
+  double point = state.point;
+  if (point <= 0.0)
+    point = 0.00001;
+  double tol = point * 0.5;
+
+  if (!runner_revisit_rebound_touched[idx])
+  {
+    bool touched = false;
+    if (type == POSITION_TYPE_BUY)
+      touched = (market_price >= (rebound_price - tol));
+    else
+      touched = (market_price <= (rebound_price + tol));
+    if (touched)
+    {
+      runner_revisit_rebound_touched[idx] = true;
+      PrintFormat("Deep runner revisit armed: %s ticket=%I64u type=%d rebound=%.5f deep=%.5f",
+                  state.broker_symbol, ticket, (int)type, rebound_price, deep_price);
+    }
+    return false;
+  }
+
+  double close_band = RunnerRevisitCloseBand(state, rebound_price, deep_price);
+  bool close_signal = false;
+  if (type == POSITION_TYPE_BUY)
+    close_signal = (market_price <= (deep_price + close_band));
+  else
+    close_signal = (market_price >= (deep_price - close_band));
+  if (!close_signal)
+    return false;
+
+  if (!ClosePositionWithLog(ticket, "runner_deep_revisit"))
+    return false;
+
+  if (!PositionSelectByTicket(ticket))
+  {
+    RemoveRunnerTrailTicket(ticket);
+    PrintFormat("Deep runner revisit TP: %s ticket=%I64u type=%d price=%.5f rebound=%.5f deep=%.5f band=%.5f",
+                state.broker_symbol, ticket, (int)type, market_price, rebound_price, deep_price, close_band);
+  }
+  return true;
+}
+
 void ManageRunnerTrailing(SymbolState &state,
                           ENUM_POSITION_TYPE type,
                           int active_basket_id,
@@ -3082,6 +3263,7 @@ void ManageRunnerTrailing(SymbolState &state,
   if (take_profit_distance <= 0.0)
     return;
   CleanupRunnerTrailState();
+  CleanupRunnerRevisitState();
   double trail_distance = TakeProfitTrailDistanceCapped(state, take_profit_distance);
   if (trail_distance <= 0.0)
     return;
@@ -3154,6 +3336,19 @@ void ManageRunnerTrailing(SymbolState &state,
 
     if (!PositionSelectByTicket(keep_ticket))
       continue;
+    if (state.params.enable_deep_runner_revisit_take_profit)
+    {
+      if (ShouldCloseRunnerByRevisit(state, keep_ticket, type, market_price))
+        continue;
+      // L3+ runner waits for revisit condition; skip generic trail close while armed.
+      if (FindRunnerRevisitIndex(keep_ticket) >= 0)
+        continue;
+    }
+    else
+    {
+      if (FindRunnerRevisitIndex(keep_ticket) >= 0)
+        RemoveRunnerRevisitTicket(keep_ticket);
+    }
     double requested_stop = market_price;
     if (type == POSITION_TYPE_BUY)
       requested_stop = market_price - trail_distance;
@@ -3861,6 +4056,64 @@ bool ShouldCloseSellTakeProfit(const SymbolState &state, const BasketInfo &sell,
   return ask <= target;
 }
 
+bool ResolveDeepRunnerRevisitPrices(const SymbolState &state,
+                                    ENUM_POSITION_TYPE type,
+                                    int deepest_level,
+                                    ulong deepest_ticket,
+                                    double &rebound_price,
+                                    double &deep_price)
+{
+  rebound_price = 0.0;
+  deep_price = 0.0;
+  if (deepest_level < 3 || deepest_level > NM2::kMaxLevels)
+    return false;
+
+  int deep_index = deepest_level - 1;
+  int rebound_index = deep_index - 1;
+  if (type == POSITION_TYPE_BUY)
+  {
+    rebound_price = state.buy_level_price[rebound_index];
+    deep_price = state.buy_level_price[deep_index];
+  }
+  else if (type == POSITION_TYPE_SELL)
+  {
+    rebound_price = state.sell_level_price[rebound_index];
+    deep_price = state.sell_level_price[deep_index];
+  }
+  else
+  {
+    return false;
+  }
+
+  if (deep_price <= 0.0 && deepest_ticket > 0 && PositionSelectByTicket(deepest_ticket))
+    deep_price = PositionGetDouble(POSITION_PRICE_OPEN);
+
+  if (rebound_price <= 0.0 && deep_price > 0.0)
+  {
+    double fallback_step = 0.0;
+    if (type == POSITION_TYPE_BUY)
+      fallback_step = state.buy_grid_step;
+    else
+      fallback_step = state.sell_grid_step;
+    if (fallback_step > 0.0)
+    {
+      if (type == POSITION_TYPE_BUY)
+        rebound_price = deep_price + fallback_step;
+      else
+        rebound_price = deep_price - fallback_step;
+    }
+  }
+
+  if (rebound_price <= 0.0 || deep_price <= 0.0)
+    return false;
+  double point = state.point;
+  if (point <= 0.0)
+    point = 0.00001;
+  if (MathAbs(rebound_price - deep_price) <= (point * 0.5))
+    return false;
+  return true;
+}
+
 bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, double take_profit_distance)
 {
   if (buy.count <= 0 || buy.basket_id <= 0 || buy.avg_price <= 0.0)
@@ -3885,6 +4138,14 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
   bool closed_non_deep = CloseBasketPositionsExceptTicket(state, POSITION_TYPE_BUY, buy.basket_id, buy.deepest_ticket, "basket_target");
   if (!closed_non_deep)
     return false;
+  double revisit_rebound_price = 0.0;
+  double revisit_deep_price = 0.0;
+  bool has_deep_revisit_rule = false;
+  if (state.params.enable_deep_runner_revisit_take_profit)
+  {
+    has_deep_revisit_rule = ResolveDeepRunnerRevisitPrices(state, POSITION_TYPE_BUY, buy.deepest_level,
+                                                           buy.deepest_ticket, revisit_rebound_price, revisit_deep_price);
+  }
   double trail_distance = TakeProfitTrailDistanceCapped(state, take_profit_distance);
   if (state.params.use_take_profit_trail_sl)
   {
@@ -3937,6 +4198,10 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
   }
   PrintFormat("Basket TP split close: %s BUY basket=%d keep_ticket=%I64u deepest_level=%d",
               state.broker_symbol, buy.basket_id, buy.deepest_ticket, buy.deepest_level);
+  if (has_deep_revisit_rule)
+    UpsertRunnerRevisitState(buy.deepest_ticket, POSITION_TYPE_BUY, revisit_rebound_price, revisit_deep_price);
+  else
+    RemoveRunnerRevisitTicket(buy.deepest_ticket);
   AddCompletedBasket(state, POSITION_TYPE_BUY, buy.basket_id);
   state.buy_active_basket_id = 0;
   state.buy_close_as_completed = true;
@@ -3968,6 +4233,14 @@ bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask
   bool closed_non_deep = CloseBasketPositionsExceptTicket(state, POSITION_TYPE_SELL, sell.basket_id, sell.deepest_ticket, "basket_target");
   if (!closed_non_deep)
     return false;
+  double revisit_rebound_price = 0.0;
+  double revisit_deep_price = 0.0;
+  bool has_deep_revisit_rule = false;
+  if (state.params.enable_deep_runner_revisit_take_profit)
+  {
+    has_deep_revisit_rule = ResolveDeepRunnerRevisitPrices(state, POSITION_TYPE_SELL, sell.deepest_level,
+                                                           sell.deepest_ticket, revisit_rebound_price, revisit_deep_price);
+  }
   double trail_distance = TakeProfitTrailDistanceCapped(state, take_profit_distance);
   if (state.params.use_take_profit_trail_sl)
   {
@@ -4020,6 +4293,10 @@ bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask
   }
   PrintFormat("Basket TP split close: %s SELL basket=%d keep_ticket=%I64u deepest_level=%d",
               state.broker_symbol, sell.basket_id, sell.deepest_ticket, sell.deepest_level);
+  if (has_deep_revisit_rule)
+    UpsertRunnerRevisitState(sell.deepest_ticket, POSITION_TYPE_SELL, revisit_rebound_price, revisit_deep_price);
+  else
+    RemoveRunnerRevisitTicket(sell.deepest_ticket);
   AddCompletedBasket(state, POSITION_TYPE_SELL, sell.basket_id);
   state.sell_active_basket_id = 0;
   state.sell_close_as_completed = true;
