@@ -10,6 +10,7 @@ namespace NM3
 enum { kMaxLevels = 20 };
 enum { kMaxSymbols = 1 };
 enum { kMaxTrackedBaskets = 64 };
+const double kAdxH1HardStopThreshold = 24.0;
 const int kLotDigits = 2;
 const double kMinLot = 0.01;
 const double kMaxLot = 100.0;
@@ -41,7 +42,7 @@ enum MartingaleMode
 input group "COMMON"
 input string SymbolSuffix = "c";
 input int MagicNumber = 202602;
-input int SlippagePoints = 4;
+input int SlippagePoints = 10;
 input int StartDelaySeconds = 5;
 input int CloseRetryCount = 3;
 input int CloseRetryDelayMs = 200;
@@ -53,6 +54,8 @@ input int OrderPendingTimeoutSeconds = 2;
 input bool EnableHedgedEntry = true;
 input bool CloseAllOnTradingStopStart = false;
 input bool EnableTrailingTakeProfit = true;
+input bool EnableAdxH1HardStop = true;
+input bool EnableAdxH1RisingHardStop = true;
 input double AdxMaxForNanpin = 20.0;
 input double DiGapMin = 2.0;
 
@@ -130,6 +133,8 @@ struct NM3Params
   bool trailing_take_profit;
   bool use_take_profit_trail_sl;
   bool enable_deep_runner_revisit_take_profit;
+  bool enable_adx_h1_hard_stop;
+  bool enable_adx_h1_rising_hard_stop;
   double trailing_take_profit_distance_ratio;
   int adx_period;
   double adx_max_for_nanpin;
@@ -267,6 +272,7 @@ struct SymbolState
   int adx_m15_handle;
   int adx_h1_handle;
   int adx_h4_handle;
+  bool adx_h1_hard_stop_active;
   bool low_balance_active;
   bool buy_take_profit_trailing_active;
   bool sell_take_profit_trailing_active;
@@ -634,6 +640,7 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.adx_m15_handle = INVALID_HANDLE;
   state.adx_h1_handle = INVALID_HANDLE;
   state.adx_h4_handle = INVALID_HANDLE;
+  state.adx_h1_hard_stop_active = false;
   state.low_balance_active = false;
   state.buy_take_profit_trailing_active = false;
   state.sell_take_profit_trailing_active = false;
@@ -701,6 +708,8 @@ void ApplyCommonParams(NM3Params &params)
   params.trailing_take_profit = EnableTrailingTakeProfit;
   params.use_take_profit_trail_sl = UseTakeProfitTrailSL;
   params.enable_deep_runner_revisit_take_profit = EnableDeepRunnerRevisitTakeProfit;
+  params.enable_adx_h1_hard_stop = EnableAdxH1HardStop;
+  params.enable_adx_h1_rising_hard_stop = EnableAdxH1RisingHardStop;
   params.base_lot = 0.01;
   params.fixed_nanpin_width_points = 2500.0;
   params.take_profit_points = 120.0;
@@ -1630,6 +1639,20 @@ bool GetAdxSnapshot(SymbolState &state,
   di_plus_prev = plus_buf[1];
   di_minus_now = minus_buf[0];
   di_minus_prev = minus_buf[1];
+  return true;
+}
+
+bool GetAdxH1Snapshot(SymbolState &state, double &adx_h1_current, double &adx_h1_previous)
+{
+  if (state.adx_h1_handle == INVALID_HANDLE)
+    return false;
+  double adx_buf[2];
+  const int kStartPos = 1;
+  const int kCount = 2;
+  if (CopyBuffer(state.adx_h1_handle, 0, kStartPos, kCount, adx_buf) < kCount)
+    return false;
+  adx_h1_current = adx_buf[0];
+  adx_h1_previous = adx_buf[1];
   return true;
 }
 
@@ -3962,6 +3985,55 @@ void ProcessSymbolTick(SymbolState &state)
     ResetBuyTakeProfitTrail(state);
   if (sell.count != state.prev_sell_count)
     ResetSellTakeProfitTrail(state);
+  bool adx_h1_stop_enabled = (params.enable_adx_h1_hard_stop || params.enable_adx_h1_rising_hard_stop);
+  if (adx_h1_stop_enabled)
+  {
+    double adx_h1_current = 0.0;
+    double adx_h1_previous = 0.0;
+    bool has_adx_h1 = GetAdxH1Snapshot(state, adx_h1_current, adx_h1_previous);
+    bool threshold_stop = (params.enable_adx_h1_hard_stop
+                           && has_adx_h1
+                           && adx_h1_current >= NM3::kAdxH1HardStopThreshold);
+    bool rising_stop = (params.enable_adx_h1_rising_hard_stop
+                        && has_adx_h1
+                        && adx_h1_current > adx_h1_previous);
+    bool hard_stop = (threshold_stop || rising_stop);
+    if (hard_stop)
+    {
+      if (!state.adx_h1_hard_stop_active)
+      {
+        state.adx_h1_hard_stop_active = true;
+        PrintFormat("ADX H1 hard stop ON: %s current=%.2f previous=%.2f threshold_stop=%s rising_stop=%s threshold=%.2f",
+                    symbol, adx_h1_current, adx_h1_previous,
+                    threshold_stop ? "true" : "false",
+                    rising_stop ? "true" : "false",
+                    NM3::kAdxH1HardStopThreshold);
+      }
+      state.prev_buy_count = buy.count;
+      state.prev_sell_count = sell.count;
+      return;
+    }
+    if (state.adx_h1_hard_stop_active)
+    {
+      state.adx_h1_hard_stop_active = false;
+      if (has_adx_h1)
+      {
+        PrintFormat("ADX H1 hard stop OFF: %s current=%.2f previous=%.2f threshold=%.2f",
+                    symbol, adx_h1_current, adx_h1_previous, NM3::kAdxH1HardStopThreshold);
+      }
+      else
+      {
+        PrintFormat("ADX H1 hard stop OFF: %s adx_h1=n/a threshold=%.2f",
+                    symbol, NM3::kAdxH1HardStopThreshold);
+      }
+    }
+  }
+  else if (state.adx_h1_hard_stop_active)
+  {
+    state.adx_h1_hard_stop_active = false;
+    PrintFormat("ADX H1 hard stop OFF: %s disabled by parameters threshold=%.2f",
+                symbol, NM3::kAdxH1HardStopThreshold);
+  }
   if (DebugMode)
   {
     string regime_name = RegimeName(state.regime);
