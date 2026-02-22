@@ -10,6 +10,7 @@
 
 #include <Trade/Trade.mqh>
 CTrade trade;
+CTrade close_trade;
 
 //-------------------- Inputs --------------------
 input string InpSymbolGold        = "XAUUSD-m";
@@ -24,9 +25,10 @@ input int    InpLookbackBars      = 400; // History scan bars per TF
 
 input int    InpSetupExpiryBars   = 12;  // Setup validity in Entry TF bars after SMT+PVT align
 
-input double InpFixedLot          = 0.10;
+input double InpFixedLot          = 0.01;
 input double InpMinRR             = 2.1; // RR >= 2
 input int    InpSL_BufferPoints   = 40;  // buffer in points beyond swing
+input double InpSwingTrailDistanceRatio = 0.55; // NM2-style: trail distance = TP distance * ratio
 
 input long   InpMagic             = 26021401;
 input bool   InpOnePositionOnly   = false;
@@ -48,6 +50,10 @@ int news_last_calendar_error = 0;
 datetime news_backtest_event_times[];
 bool news_backtest_calendar_loaded = false;
 bool news_backtest_calendar_ready = false;
+long next_pair_seq = 1;
+ulong swing_trail_tickets[];
+double swing_trail_distances[];
+bool swing_trail_active[];
 
 //-------------------- Utilities --------------------
 bool IsNewBar(const string sym, ENUM_TIMEFRAMES tf, datetime &last_bar_time)
@@ -290,6 +296,364 @@ int CountMyPositions()
       }
    }
    return cnt;
+}
+
+long NextPairId()
+{
+   long now_sec = (long)TimeCurrent();
+   if(now_sec <= 0) now_sec = (long)TimeLocal();
+   long seq = next_pair_seq++;
+   if(next_pair_seq > 999) next_pair_seq = 1;
+   return now_sec * 1000 + seq;
+}
+
+string BuildPairComment(const string role, const long pair_id)
+{
+   return role + "#" + (string)pair_id;
+}
+
+bool ParsePositionRoleAndPairId(const string comment, string &role_out, long &pair_id_out)
+{
+   role_out = "";
+   pair_id_out = 0;
+
+   string tail = "";
+   if(StringFind(comment, "SCALP#") == 0)
+   {
+      role_out = "SCALP";
+      tail = StringSubstr(comment, 6);
+   }
+   else if(StringFind(comment, "SWING#") == 0)
+   {
+      role_out = "SWING";
+      tail = StringSubstr(comment, 6);
+   }
+   else
+   {
+      return false;
+   }
+
+   if(StringLen(tail) <= 0)
+      return false;
+
+   long pair_id = (long)StringToInteger(tail);
+   if(pair_id <= 0)
+      return false;
+
+   pair_id_out = pair_id;
+   return true;
+}
+
+bool ClosePositionTicketWithRetry(const ulong ticket)
+{
+   for(int attempt=0; attempt<3; attempt++)
+   {
+      if(!PositionSelectByTicket(ticket))
+         return true;
+
+      close_trade.SetExpertMagicNumber(InpMagic);
+      close_trade.SetDeviationInPoints(20);
+      if(close_trade.PositionClose(ticket))
+         return true;
+
+      Sleep(50);
+   }
+
+   return !PositionSelectByTicket(ticket);
+}
+
+bool ClosePairPositionsById(const long pair_id)
+{
+   ulong tickets[];
+   int count = 0;
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+
+      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != InpSymbolGold)
+         continue;
+
+      string role = "";
+      long pos_pair_id = 0;
+      string comment = PositionGetString(POSITION_COMMENT);
+      if(!ParsePositionRoleAndPairId(comment, role, pos_pair_id))
+         continue;
+      if(pos_pair_id != pair_id)
+         continue;
+
+      ArrayResize(tickets, count + 1);
+      tickets[count] = ticket;
+      count++;
+   }
+
+   bool all_closed = true;
+   for(int i=0; i<count; i++)
+   {
+      if(!ClosePositionTicketWithRetry(tickets[i]))
+         all_closed = false;
+   }
+
+   return all_closed;
+}
+
+bool HasOpenPairRole(const long pair_id, const string role, const ENUM_POSITION_TYPE type)
+{
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+
+      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != InpSymbolGold)
+         continue;
+      if((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != type)
+         continue;
+
+      string pos_role = "";
+      long pos_pair_id = 0;
+      string comment = PositionGetString(POSITION_COMMENT);
+      if(!ParsePositionRoleAndPairId(comment, pos_role, pos_pair_id))
+         continue;
+      if(pos_pair_id == pair_id && pos_role == role)
+         return true;
+   }
+   return false;
+}
+
+int FindSwingTrailIndex(const ulong ticket)
+{
+   int count = ArraySize(swing_trail_tickets);
+   for(int i=0; i<count; i++)
+   {
+      if(swing_trail_tickets[i] == ticket)
+         return i;
+   }
+   return -1;
+}
+
+void RemoveSwingTrailAt(const int idx)
+{
+   int count = ArraySize(swing_trail_tickets);
+   if(idx < 0 || idx >= count)
+      return;
+
+   for(int i=idx; i<count-1; i++)
+   {
+      swing_trail_tickets[i] = swing_trail_tickets[i+1];
+      swing_trail_distances[i] = swing_trail_distances[i+1];
+      swing_trail_active[i] = swing_trail_active[i+1];
+   }
+
+   count--;
+   ArrayResize(swing_trail_tickets, count);
+   ArrayResize(swing_trail_distances, count);
+   ArrayResize(swing_trail_active, count);
+}
+
+void CleanupSwingTrailState()
+{
+   int i = 0;
+   int count = ArraySize(swing_trail_tickets);
+   while(i < count)
+   {
+      ulong ticket = swing_trail_tickets[i];
+      if(!PositionSelectByTicket(ticket))
+      {
+         RemoveSwingTrailAt(i);
+         count = ArraySize(swing_trail_tickets);
+         continue;
+      }
+
+      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic ||
+         PositionGetString(POSITION_SYMBOL) != InpSymbolGold)
+      {
+         RemoveSwingTrailAt(i);
+         count = ArraySize(swing_trail_tickets);
+         continue;
+      }
+
+      string role = "";
+      long pair_id = 0;
+      string comment = PositionGetString(POSITION_COMMENT);
+      if(!ParsePositionRoleAndPairId(comment, role, pair_id) || role != "SWING")
+      {
+         RemoveSwingTrailAt(i);
+         count = ArraySize(swing_trail_tickets);
+         continue;
+      }
+
+      i++;
+   }
+}
+
+int EnsureSwingTrailState(const ulong ticket, const double open_price, const double base_sl)
+{
+   int idx = FindSwingTrailIndex(ticket);
+   if(idx >= 0)
+      return idx;
+
+   if(open_price <= 0.0 || base_sl <= 0.0)
+      return -1;
+
+   double risk = MathAbs(open_price - base_sl);
+   if(risk <= 0.0)
+      return -1;
+
+   double trail_distance = risk * InpMinRR * InpSwingTrailDistanceRatio;
+   double min_distance = PointOf(InpSymbolGold);
+   if(min_distance <= 0.0) min_distance = 0.00001;
+   if(trail_distance < min_distance)
+      trail_distance = min_distance;
+
+   int count = ArraySize(swing_trail_tickets);
+   ArrayResize(swing_trail_tickets, count + 1);
+   ArrayResize(swing_trail_distances, count + 1);
+   ArrayResize(swing_trail_active, count + 1);
+   swing_trail_tickets[count] = ticket;
+   swing_trail_distances[count] = trail_distance;
+   swing_trail_active[count] = false;
+   return count;
+}
+
+bool UpdatePositionTrailSL(const ulong ticket, const ENUM_POSITION_TYPE type, double requested_sl)
+{
+   if(!PositionSelectByTicket(ticket))
+      return false;
+
+   string symbol = PositionGetString(POSITION_SYMBOL);
+   if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic)
+      return false;
+   if(symbol != InpSymbolGold)
+      return false;
+   if((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != type)
+      return false;
+
+   int stops_level = (int)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   if(stops_level < 0) stops_level = 0;
+
+   double broker_point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   if(broker_point <= 0.0) broker_point = PointOf(symbol);
+   if(broker_point <= 0.0) broker_point = 0.00001;
+
+   double price_step = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(price_step <= 0.0) price_step = broker_point;
+   if(price_step <= 0.0) price_step = 0.00001;
+
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   if(digits < 0) digits = 5;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(symbol, tick))
+      return false;
+
+   double stops_dist = stops_level * broker_point;
+   double min_dist = stops_dist + (2.0 * broker_point);
+
+   if(type == POSITION_TYPE_BUY)
+   {
+      double max_sl = tick.bid - min_dist;
+      if(requested_sl > max_sl)
+         requested_sl = max_sl;
+      requested_sl = MathFloor(requested_sl / price_step) * price_step;
+   }
+   else
+   {
+      double min_sl = tick.ask + min_dist;
+      if(requested_sl < min_sl)
+         requested_sl = min_sl;
+      requested_sl = MathCeil(requested_sl / price_step) * price_step;
+   }
+   requested_sl = NormalizeDouble(requested_sl, digits);
+
+   double current_sl = PositionGetDouble(POSITION_SL);
+   double tol = price_step * 0.5;
+   if(current_sl > 0.0)
+   {
+      double current_sl_cmp = NormalizeDouble(MathRound(current_sl / price_step) * price_step, digits);
+      if(type == POSITION_TYPE_BUY && requested_sl <= current_sl_cmp + tol)
+         return true;
+      if(type == POSITION_TYPE_SELL && requested_sl >= current_sl_cmp - tol)
+         return true;
+   }
+
+   double tp = PositionGetDouble(POSITION_TP);
+   if(tp > 0.0)
+      tp = NormalizeDouble(MathRound(tp / price_step) * price_step, digits);
+
+   CTrade tr;
+   tr.SetExpertMagicNumber(InpMagic);
+   tr.SetDeviationInPoints(20);
+   bool ok = tr.PositionModify(ticket, requested_sl, tp);
+   if(!ok)
+   {
+      PrintFormat("SWING trailing SL update failed: ticket=%I64u type=%d sl=%.5f retcode=%d %s",
+                  ticket,
+                  (int)type,
+                  requested_sl,
+                  tr.ResultRetcode(),
+                  tr.ResultRetcodeDescription());
+   }
+   return ok;
+}
+
+void ManageSwingTrailing()
+{
+   CleanupSwingTrailState();
+
+   MqlTick tick;
+   if(!SymbolInfoTick(InpSymbolGold, tick))
+      return;
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+
+      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != InpSymbolGold)
+         continue;
+
+      string role = "";
+      long pair_id = 0;
+      string comment = PositionGetString(POSITION_COMMENT);
+      if(!ParsePositionRoleAndPairId(comment, role, pair_id))
+         continue;
+      if(role != "SWING")
+         continue;
+
+      ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+      double current_sl = PositionGetDouble(POSITION_SL);
+      int idx = EnsureSwingTrailState(ticket, open_price, current_sl);
+      if(idx < 0)
+         continue;
+
+      if(!swing_trail_active[idx] && !HasOpenPairRole(pair_id, "SCALP", type))
+      {
+         swing_trail_active[idx] = true;
+         PrintFormat("SWING trailing armed: pair=%I64d ticket=%I64u", pair_id, ticket);
+      }
+      if(!swing_trail_active[idx])
+         continue;
+
+      double trail_distance = swing_trail_distances[idx];
+      if(trail_distance <= 0.0)
+         continue;
+
+      double requested_sl = (type == POSITION_TYPE_BUY)
+                          ? (tick.bid - trail_distance)
+                          : (tick.ask + trail_distance);
+      UpdatePositionTrailSL(ticket, type, requested_sl);
+   }
 }
 
 //-------------------- Pivot Detection --------------------
@@ -586,19 +950,41 @@ bool ExecuteTrade(SetupDir dir, double sl, double tp)
    trade.SetExpertMagicNumber(InpMagic);
    trade.SetDeviationInPoints(20);
 
-   bool ok=false;
-   if(dir == SETUP_SELL)
-      ok = trade.Sell(InpFixedLot, InpSymbolGold, 0.0, sl, tp, "SMT+PVT+MSB SELL");
-   else if(dir == SETUP_BUY)
-      ok = trade.Buy(InpFixedLot, InpSymbolGold, 0.0, sl, tp, "SMT+PVT+MSB BUY");
+   long pair_id = NextPairId();
+   string scalp_comment = BuildPairComment("SCALP", pair_id);
+   string swing_comment = BuildPairComment("SWING", pair_id);
 
-   if(ok)
+   bool scalp_ok = false;
+   bool swing_ok = false;
+
+   if(dir == SETUP_SELL)
    {
-      setup_dir = SETUP_NONE;
-      setup_time = 0;
-      return true;
+      scalp_ok = trade.Sell(InpFixedLot, InpSymbolGold, 0.0, sl, tp, scalp_comment);
+      if(scalp_ok)
+         swing_ok = trade.Sell(InpFixedLot, InpSymbolGold, 0.0, sl, 0.0, swing_comment);
    }
-   return false;
+   else if(dir == SETUP_BUY)
+   {
+      scalp_ok = trade.Buy(InpFixedLot, InpSymbolGold, 0.0, sl, tp, scalp_comment);
+      if(scalp_ok)
+         swing_ok = trade.Buy(InpFixedLot, InpSymbolGold, 0.0, sl, 0.0, swing_comment);
+   }
+
+   if(!scalp_ok || !swing_ok)
+   {
+      ClosePairPositionsById(pair_id);
+      PrintFormat("Dual entry failed: pair=%I64d scalp_ok=%d swing_ok=%d retcode=%d %s",
+                  pair_id,
+                  (int)scalp_ok,
+                  (int)swing_ok,
+                  trade.ResultRetcode(),
+                  trade.ResultRetcodeDescription());
+      return false;
+   }
+
+   setup_dir = SETUP_NONE;
+   setup_time = 0;
+   return true;
 }
 
 //-------------------- EA Lifecycle --------------------
@@ -624,6 +1010,7 @@ datetime last_entry_bar = 0;
 void OnTick()
 {
    if(!EnsureSymbols()) return;
+   ManageSwingTrailing();
 
    // 1) On new SMT TF bar: evaluate SMT + PVT and arm setup
    if(IsNewBar(InpSymbolGold, InpSMT_TF, last_smt_bar))
@@ -658,5 +1045,35 @@ void OnTick()
 
          ExecuteTrade(setup_dir, sl, tp);
       }
+   }
+}
+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD || trans.deal == 0)
+      return;
+   if(!HistoryDealSelect(trans.deal))
+      return;
+
+   if((long)HistoryDealGetInteger(trans.deal, DEAL_ENTRY) != DEAL_ENTRY_OUT)
+      return;
+   if((long)HistoryDealGetInteger(trans.deal, DEAL_REASON) != DEAL_REASON_SL)
+      return;
+   if((long)HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != InpMagic)
+      return;
+   if(HistoryDealGetString(trans.deal, DEAL_SYMBOL) != InpSymbolGold)
+      return;
+
+   string role = "";
+   long pair_id = 0;
+   string comment = HistoryDealGetString(trans.deal, DEAL_COMMENT);
+   if(!ParsePositionRoleAndPairId(comment, role, pair_id))
+      return;
+
+   if(!ClosePairPositionsById(pair_id))
+   {
+      PrintFormat("SL sync close failed: pair=%I64d deal=%I64u", pair_id, trans.deal);
    }
 }

@@ -5,8 +5,8 @@ backtest-kitをもちいてbacktestを行うツール群およびそれに関連
 - node.jsのコマンドでXAUUSDのバックテストを呼び出すことができる
 - バックテストに用いるデータはdukascopyのデータとする
   (すでにdukascopyのデータがcsv.gz形式でまとめているが、backtest-kitの標準的な方法がある場合にはそちらを採用しても良い)
-- NM3.mq5のアルゴリズムをbacktest-kitに移植したjsを作成して試験する
-- SIMPLE2.mq5のアルゴリズムをbacktest-kitに移植したjsを作成して試験する
+- example/NM3.mq5のアルゴリズムをbacktest-kitに移植したjsを作成して試験する
+- example/SIMPLE2.mq5のアルゴリズムをbacktest-kitに移植したjsを作成して試験する
 
 バックテストの結果をUIで確認することができる
 動作停止期間やREGIMEなど特定期間をUIで確認することができる
