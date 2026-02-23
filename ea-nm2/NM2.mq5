@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.77"
+#property version   "1.79"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -55,6 +55,8 @@
 // v1.75 L3+最深ランナーにL2到達後のL3再接近利確条件を追加
 // v1.76 L3+最深ランナーの再接近利確をinputフラグでON/OFF可能化
 // v1.77 DeepRunnerRevisit対象split後バスケットをactive維持し、再ナンピンを許可
+// v1.78 アジア/EU/USセッションを個別フラグでON/OFF可能化し、OFFセッション時間は取引停止
+// v1.79 取引停止開始から15分後に残ポジを全クローズするオプションを追加
 
 #include <Trade/Trade.mqh>
 
@@ -104,6 +106,7 @@ input int NanpinSleepSeconds = 10;
 input int OrderPendingTimeoutSeconds = 2;
 input bool EnableHedgedEntry = true;
 input bool CloseAllOnTradingStopStart = false;
+input bool CloseAllOnTradingStopAfter15Minutes = false; // 15分固定
 input double NanpinLotMultiplierFromLevel3 = 1.5;
 input int DeepestTimedExitMinutes = 30;
 input int DeepestTimedExitMinMinutes = 8;
@@ -116,6 +119,11 @@ input double TimedExitAtrFactorMax = 1.50;
 input bool EnableTrailingTakeProfit = true;
 input double AdxMaxForNanpin = 20.0;
 input double DiGapMin = 2.0;
+
+input group "TRADING SESSION FILTER (JST)"
+input bool EnableAsiaSession = true; // 08:00-16:00 JST
+input bool EnableEUSession = true;   // 16:00-22:00 JST
+input bool EnableUSSession = true;   // 22:00-08:00 JST
 
 input group "NEWS FILTER"
 input bool EnableNewsFilter = true;
@@ -390,6 +398,8 @@ bool news_backtest_calendar_loaded = false;
 bool news_backtest_calendar_ready = false;
 bool trading_time_state_initialized = false;
 bool trading_time_state_prev = true;
+datetime trading_stop_started_time = 0;
+bool trading_stop_delayed_close_executed = false;
 
 struct SymbolState
 {
@@ -1327,45 +1337,90 @@ bool IsTradingTime()
   MqlDateTime dt;
   TimeToStruct(now_gmt + 9 * 3600, dt);
   int minutes = dt.hour * 60 + dt.min;
-  int stop_start = 6 * 60 + 30;
-  int stop_end = 8 * 60 + 5;
-  bool in_stop = (minutes >= stop_start && minutes < stop_end);
-  return !in_stop;
+
+  bool in_asia = (minutes >= 8 * 60 && minutes < 16 * 60);
+  bool in_eu = (minutes >= 16 * 60 && minutes < 22 * 60);
+  bool in_us = (!in_asia && !in_eu); // 22:00-08:00 JST
+
+  if (in_asia)
+    return EnableAsiaSession;
+  if (in_eu)
+    return EnableEUSession;
+  if (in_us)
+    return EnableUSSession;
+  return true;
 }
 
-void HandleTradingStopStartCloseAll()
+bool HasOpenPositionsByMagic(const int magic)
 {
-  bool now_trading_time = IsTradingTime();
-  if (!trading_time_state_initialized)
-  {
-    trading_time_state_initialized = true;
-    trading_time_state_prev = now_trading_time;
-    return;
-  }
-
-  bool entered_stop = (trading_time_state_prev && !now_trading_time);
-  trading_time_state_prev = now_trading_time;
-  if (!entered_stop || !CloseAllOnTradingStopStart)
-    return;
-
-  bool has_positions = false;
   for (int i = PositionsTotal() - 1; i >= 0; --i)
   {
     ulong ticket = PositionGetTicket(i);
     if (!PositionSelectByTicket(ticket))
       continue;
-    if (PositionGetInteger(POSITION_MAGIC) != MagicNumber)
-      continue;
-    has_positions = true;
-    break;
+    if (PositionGetInteger(POSITION_MAGIC) == magic)
+      return true;
   }
-  if (!has_positions)
+  return false;
+}
+
+void HandleTradingStopStartCloseAll()
+{
+  bool now_trading_time = IsTradingTime();
+  datetime now = TimeCurrent();
+  if (!trading_time_state_initialized)
+  {
+    trading_time_state_initialized = true;
+    trading_time_state_prev = now_trading_time;
+    trading_stop_started_time = (now_trading_time ? 0 : now);
+    trading_stop_delayed_close_executed = false;
+    return;
+  }
+
+  bool entered_stop = (trading_time_state_prev && !now_trading_time);
+  bool exited_stop = (!trading_time_state_prev && now_trading_time);
+  trading_time_state_prev = now_trading_time;
+  if (entered_stop)
+  {
+    trading_stop_started_time = now;
+    trading_stop_delayed_close_executed = false;
+  }
+  else if (exited_stop)
+  {
+    trading_stop_started_time = 0;
+    trading_stop_delayed_close_executed = false;
+  }
+
+  bool should_close_on_start = (entered_stop && CloseAllOnTradingStopStart);
+  bool should_close_after_15m = (!now_trading_time
+                                 && CloseAllOnTradingStopAfter15Minutes
+                                 && !trading_stop_delayed_close_executed
+                                 && trading_stop_started_time > 0
+                                 && (now - trading_stop_started_time) >= 15 * 60);
+  if (!should_close_on_start && !should_close_after_15m)
     return;
 
-  PrintFormat("Trading stop started: close all positions. magic=%d time=%s",
-              MagicNumber,
-              TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS));
-  CloseAllPositionsByMagic(MagicNumber);
+  bool has_positions = HasOpenPositionsByMagic(MagicNumber);
+
+  if (should_close_on_start && has_positions)
+  {
+    PrintFormat("Trading stop started: close all positions. magic=%d time=%s",
+                MagicNumber,
+                TimeToString(now, TIME_DATE | TIME_SECONDS));
+    CloseAllPositionsByMagic(MagicNumber);
+  }
+
+  if (should_close_after_15m)
+  {
+    trading_stop_delayed_close_executed = true;
+    if (!has_positions)
+      return;
+    PrintFormat("Trading stop +15m: close all positions. magic=%d stop_start=%s now=%s",
+                MagicNumber,
+                TimeToString(trading_stop_started_time, TIME_DATE | TIME_SECONDS),
+                TimeToString(now, TIME_DATE | TIME_SECONDS));
+    CloseAllPositionsByMagic(MagicNumber);
+  }
 }
 
 bool IgnoreTradingTimeForSymbol(const SymbolState &state)
@@ -1868,6 +1923,8 @@ int OnInit()
   InitCumulativeLotTracking();
   trading_time_state_initialized = false;
   trading_time_state_prev = true;
+  trading_stop_started_time = 0;
+  trading_stop_delayed_close_executed = false;
   SendLog(BuildInitLogMessage(active));
   return INIT_SUCCEEDED;
 }
