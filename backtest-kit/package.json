@@ -1,0 +1,27 @@
+{
+  "name": "backtest-kit-xauusd-lab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "XAUUSD backtesting toolkit powered by backtest-kit",
+  "scripts": {
+    "start": "node ./src/index.mjs --backtest",
+    "backtest": "node ./src/index.mjs --backtest",
+    "backtest:nm3": "node ./src/index.mjs --backtest --strategy nm3_port_v1",
+    "backtest:single2": "node ./src/index.mjs --backtest --strategy single2_port_v1",
+    "ui": "node ./src/index.mjs --ui",
+    "cache:dukascopy": "node ./scripts/cache/cache_dukascopy.mjs",
+    "cache:validate": "node ./scripts/cache/validate_dukascopy_cache.mjs"
+  },
+  "dependencies": {
+    "@backtest-kit/ui": "^3.1.0",
+    "backtest-kit": "^3.1.0",
+    "dotenv": "^16.4.7",
+    "pinolog": "^1.0.5"
+  },
+  "keywords": [
+    "backtest",
+    "xauusd",
+    "dukascopy"
+  ]
+}
