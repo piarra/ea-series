@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.84"
+#property version   "1.85"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -62,6 +62,7 @@
 // v1.82 ナンピン距離計算にL2到達時ATR固定オプションを追加
 // v1.83 バスケット損切りATR倍率のinput参照を整理
 // v1.84 EnableBasketLossStopと関連ロジックを削除
+// v1.85 max未到達時の最終段損切りラインをN+2基準へ変更
 
 #include <Trade/Trade.mqh>
 
@@ -4903,7 +4904,15 @@ void ProcessSymbolTick(SymbolState &state)
   if (nanpin_levels >= 1 && buy.count > 0)
   {
     double base_step = state.buy_grid_step > 0.0 ? state.buy_grid_step : grid_step;
-    int stop_level_index = nanpin_levels;
+    int stop_level = 0;
+    if (buy.level_count >= nanpin_levels)
+      stop_level = nanpin_levels + 1;
+    else
+      stop_level = buy.level_count + 2;
+    int max_stop_level = nanpin_levels + 1;
+    if (stop_level > max_stop_level)
+      stop_level = max_stop_level;
+    int stop_level_index = stop_level - 1;
     double stop_price = EnsureProjectedBuyLevelPrice(state, buy, base_step, stop_level_index);
     double point = state.point;
     if (point <= 0.0)
@@ -4914,7 +4923,7 @@ void ProcessSymbolTick(SymbolState &state)
       if (ask <= stop_price + tol)
       {
         PrintFormat("Final level stop-loss triggered: %s BUY actual_level=%d stop_level=%d max_levels=%d nanpin_levels=%d is_trading_time=%s ask=%.5f stop=%.5f",
-                    symbol, buy.level_count, nanpin_levels + 1, levels, nanpin_levels, is_trading_time ? "true" : "false", ask, stop_price);
+                    symbol, buy.level_count, stop_level, levels, nanpin_levels, is_trading_time ? "true" : "false", ask, stop_price);
         if (buy.basket_id > 0)
           CloseBasketById(state, POSITION_TYPE_BUY, buy.basket_id);
         final_level_sl_closed = true;
@@ -4924,7 +4933,15 @@ void ProcessSymbolTick(SymbolState &state)
   if (nanpin_levels >= 1 && sell.count > 0)
   {
     double base_step = state.sell_grid_step > 0.0 ? state.sell_grid_step : grid_step;
-    int stop_level_index = nanpin_levels;
+    int stop_level = 0;
+    if (sell.level_count >= nanpin_levels)
+      stop_level = nanpin_levels + 1;
+    else
+      stop_level = sell.level_count + 2;
+    int max_stop_level = nanpin_levels + 1;
+    if (stop_level > max_stop_level)
+      stop_level = max_stop_level;
+    int stop_level_index = stop_level - 1;
     double stop_price = EnsureProjectedSellLevelPrice(state, sell, base_step, stop_level_index);
     double point = state.point;
     if (point <= 0.0)
@@ -4935,7 +4952,7 @@ void ProcessSymbolTick(SymbolState &state)
       if (bid >= stop_price - tol)
       {
         PrintFormat("Final level stop-loss triggered: %s SELL actual_level=%d stop_level=%d max_levels=%d nanpin_levels=%d is_trading_time=%s bid=%.5f stop=%.5f",
-                    symbol, sell.level_count, nanpin_levels + 1, levels, nanpin_levels, is_trading_time ? "true" : "false", bid, stop_price);
+                    symbol, sell.level_count, stop_level, levels, nanpin_levels, is_trading_time ? "true" : "false", bid, stop_price);
         if (sell.basket_id > 0)
           CloseBasketById(state, POSITION_TYPE_SELL, sell.basket_id);
         final_level_sl_closed = true;
