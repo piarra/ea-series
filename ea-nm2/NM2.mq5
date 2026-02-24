@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.82"
+#property version   "1.84"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -60,6 +60,8 @@
 // v1.80 メンテナンス停止時間(06:45-08:15 JST)を追加
 // v1.81 バスケット損切りをATRレベル定義へ統一し、max level+1到達で強制クローズを厳格化
 // v1.82 ナンピン距離計算にL2到達時ATR固定オプションを追加
+// v1.83 バスケット損切りATR倍率のinput参照を整理
+// v1.84 EnableBasketLossStopと関連ロジックを削除
 
 #include <Trade/Trade.mqh>
 
@@ -110,7 +112,7 @@ input bool EnableL2FixedAtrForNanpin = false;
 input int OrderPendingTimeoutSeconds = 2;
 input bool EnableHedgedEntry = true;
 input bool CloseAllOnTradingStopStart = false;
-input bool CloseAllOnTradingStopAfter15Minutes = false; // 15分固定
+input bool CloseAllOnTradingStopAfter15Minutes = true;
 input double NanpinLotMultiplierFromLevel3 = 1.5;
 input int DeepestTimedExitMinutes = 30;
 input int DeepestTimedExitMinMinutes = 8;
@@ -125,9 +127,9 @@ input double AdxMaxForNanpin = 20.0;
 input double DiGapMin = 2.0;
 
 input group "TRADING SESSION FILTER (JST)"
-input bool EnableAsiaSession = true; // 08:00-16:00 JST
-input bool EnableEUSession = true;   // 16:00-22:00 JST
-input bool EnableUSSession = true;   // 22:00-08:00 JST
+input bool EnableAsiaSession = true; // EnableAsiaSession 08:00-16:00 JST
+input bool EnableEUSession = true;   // EnableEUSession 16:00-22:00 JST
+input bool EnableUSSession = false; // EnableUSSession 22:00-08:00 JST
 
 input group "NEWS FILTER"
 input bool EnableNewsFilter = true;
@@ -137,7 +139,7 @@ input bool NewsOnlyHighImpact = true;
 input string NewsBacktestCalendarFile = "economic_calendar_2025_2030.csv"; // MQL_TESTER時はFILE_COMMONから参照
 
 input group "TAKE PROFIT"
-input bool UseTakeProfitTrailSL = false;
+input bool UseTakeProfitTrailSL = true;
 input bool EnableDeepRunnerRevisitTakeProfit = true;
 input bool EnableFixedTrailStart = true;
 input double FixedTrailStartPointsXAUUSD = 2500.0;
@@ -153,13 +155,6 @@ input group "RISK CONTROL"
 input bool EnableBalanceGuard = false;
 input double MinAccountBalance = 0.0;
 input bool ClosePositionsOnLowBalance = false;
-input bool EnableBasketLossStop = true;
-// level別ATR倍率を使用して、バスケット平均価格から絶対損切りを判定
-input double BasketLossStopAtrMultiplierLevel1 = 6.0;
-input double BasketLossStopAtrMultiplierLevel2 = 8.4;
-input double BasketLossStopAtrMultiplierLevel3 = 9.9;
-input double BasketLossStopAtrMultiplierLevel4 = 10.8;
-input double BasketLossStopAtrMultiplierLevel5 = 12.0;
 input int CombinedProfitCloseLevel = 3;
 input double CombinedProfitCloseAtrMultiplier = 3.80;
 
@@ -344,12 +339,6 @@ struct NM2Params
   bool enable_balance_guard;
   double min_account_balance;
   bool close_positions_on_low_balance;
-  bool enable_basket_loss_stop;
-  double basket_loss_stop_atr_multiplier_level1;
-  double basket_loss_stop_atr_multiplier_level2;
-  double basket_loss_stop_atr_multiplier_level3;
-  double basket_loss_stop_atr_multiplier_level4;
-  double basket_loss_stop_atr_multiplier_level5;
   int combined_profit_close_level;
   double combined_profit_close_atr_multiplier;
   bool no_martingale;
@@ -914,12 +903,6 @@ void ApplyCommonParams(NM2Params &params)
   params.enable_balance_guard = EnableBalanceGuard;
   params.min_account_balance = MinAccountBalance;
   params.close_positions_on_low_balance = ClosePositionsOnLowBalance;
-  params.enable_basket_loss_stop = EnableBasketLossStop;
-  params.basket_loss_stop_atr_multiplier_level1 = BasketLossStopAtrMultiplierLevel1;
-  params.basket_loss_stop_atr_multiplier_level2 = BasketLossStopAtrMultiplierLevel2;
-  params.basket_loss_stop_atr_multiplier_level3 = BasketLossStopAtrMultiplierLevel3;
-  params.basket_loss_stop_atr_multiplier_level4 = BasketLossStopAtrMultiplierLevel4;
-  params.basket_loss_stop_atr_multiplier_level5 = BasketLossStopAtrMultiplierLevel5;
   params.combined_profit_close_level = CombinedProfitCloseLevel;
   params.combined_profit_close_atr_multiplier = CombinedProfitCloseAtrMultiplier;
   params.double_second_lot = false;
@@ -1534,29 +1517,6 @@ int EffectiveCombinedProfitCloseLevel(const SymbolState &state)
   if (level < 1)
     level = 1;
   return level;
-}
-
-double BasketLossStopAtrMultiplierForLevel(const NM2Params &params, int level_count)
-{
-  if (level_count <= 0)
-    return 0.0;
-  int level = level_count;
-  if (level > 5)
-    level = 5;
-  double multiplier = 0.0;
-  if (level == 1)
-    multiplier = params.basket_loss_stop_atr_multiplier_level1;
-  else if (level == 2)
-    multiplier = params.basket_loss_stop_atr_multiplier_level2;
-  else if (level == 3)
-    multiplier = params.basket_loss_stop_atr_multiplier_level3;
-  else if (level == 4)
-    multiplier = params.basket_loss_stop_atr_multiplier_level4;
-  else
-    multiplier = params.basket_loss_stop_atr_multiplier_level5;
-  if (multiplier < 0.0)
-    multiplier = 0.0;
-  return multiplier;
 }
 
 void BuildLotSequence(SymbolState &state)
@@ -3983,24 +3943,6 @@ double AtrReferenceForStops(const SymbolState &state, double atr_base, double at
   return atr_ref;
 }
 
-double BasketLossStopDistanceFromAtr(const SymbolState &state,
-                                     int level_count,
-                                     double atr_ref)
-{
-  if (level_count <= 0 || atr_ref <= 0.0)
-    return 0.0;
-  double multiplier = BasketLossStopAtrMultiplierForLevel(state.params, level_count);
-  if (multiplier <= 0.0)
-    return 0.0;
-  double point = state.point;
-  if (point <= 0.0)
-    point = 0.00001;
-  double distance = atr_ref * multiplier;
-  if (distance < point)
-    distance = point;
-  return distance;
-}
-
 void ResetBuyTakeProfitTrail(SymbolState &state)
 {
   state.buy_take_profit_trailing_active = false;
@@ -4589,56 +4531,6 @@ void ProcessSymbolTick(SymbolState &state)
         return;
       }
     }
-  }
-  bool basket_loss_closed = false;
-  bool basket_loss_stop_enabled = params.enable_basket_loss_stop;
-  if (basket_loss_stop_enabled && !(low_balance && params.close_positions_on_low_balance))
-  {
-    double atr_ref = AtrReferenceForStops(state, atr_base, atr_now);
-    double point = state.point;
-    if (point <= 0.0)
-      point = 0.00001;
-    double tol = point * 0.5;
-    if (buy.count > 0 && buy.avg_price > 0.0)
-    {
-      double stop_distance = BasketLossStopDistanceFromAtr(state, buy.level_count, atr_ref);
-      if (stop_distance > 0.0)
-      {
-        double stop_price = buy.avg_price - stop_distance;
-        if (bid <= stop_price + tol)
-        {
-          double mult = BasketLossStopAtrMultiplierForLevel(params, buy.level_count);
-          PrintFormat("Absolute basket stop triggered (ATR): %s BUY level=%d basket=%d bid=%.5f avg=%.5f stop=%.5f atr=%.5f atr_mult=%.2f",
-                      symbol, buy.level_count, buy.basket_id, bid, buy.avg_price, stop_price, atr_ref, mult);
-          if (buy.basket_id > 0)
-            CloseBasketById(state, POSITION_TYPE_BUY, buy.basket_id);
-          basket_loss_closed = true;
-        }
-      }
-    }
-    if (sell.count > 0 && sell.avg_price > 0.0)
-    {
-      double stop_distance = BasketLossStopDistanceFromAtr(state, sell.level_count, atr_ref);
-      if (stop_distance > 0.0)
-      {
-        double stop_price = sell.avg_price + stop_distance;
-        if (ask >= stop_price - tol)
-        {
-          double mult = BasketLossStopAtrMultiplierForLevel(params, sell.level_count);
-          PrintFormat("Absolute basket stop triggered (ATR): %s SELL level=%d basket=%d ask=%.5f avg=%.5f stop=%.5f atr=%.5f atr_mult=%.2f",
-                      symbol, sell.level_count, sell.basket_id, ask, sell.avg_price, stop_price, atr_ref, mult);
-          if (sell.basket_id > 0)
-            CloseBasketById(state, POSITION_TYPE_SELL, sell.basket_id);
-          basket_loss_closed = true;
-        }
-      }
-    }
-  }
-  if (basket_loss_closed)
-  {
-    state.prev_buy_count = buy.count;
-    state.prev_sell_count = sell.count;
-    return;
   }
   if (!is_trading_time)
   {
