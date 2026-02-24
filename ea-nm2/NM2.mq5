@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.79"
+#property version   "1.82"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -57,6 +57,9 @@
 // v1.77 DeepRunnerRevisit対象split後バスケットをactive維持し、再ナンピンを許可
 // v1.78 アジア/EU/USセッションを個別フラグでON/OFF可能化し、OFFセッション時間は取引停止
 // v1.79 取引停止開始から15分後に残ポジを全クローズするオプションを追加
+// v1.80 メンテナンス停止時間(06:45-08:15 JST)を追加
+// v1.81 バスケット損切りをATRレベル定義へ統一し、max level+1到達で強制クローズを厳格化
+// v1.82 ナンピン距離計算にL2到達時ATR固定オプションを追加
 
 #include <Trade/Trade.mqh>
 
@@ -103,6 +106,7 @@ input int RestartDelaySeconds = 20;
 input double RestartDelayAtrFactorMin = 0.8;
 input double RestartDelayAtrFactorMax = 2.0;
 input int NanpinSleepSeconds = 10;
+input bool EnableL2FixedAtrForNanpin = false;
 input int OrderPendingTimeoutSeconds = 2;
 input bool EnableHedgedEntry = true;
 input bool CloseAllOnTradingStopStart = false;
@@ -150,14 +154,12 @@ input bool EnableBalanceGuard = false;
 input double MinAccountBalance = 0.0;
 input bool ClosePositionsOnLowBalance = false;
 input bool EnableBasketLossStop = true;
-// >0: level別損失ポイント閾値を使用, <=0: 既存のATR/幅ベース損切りを使用
-input double BasketLossStopPointsLevel1 = 20000.0;
-input double BasketLossStopPointsLevel2 = 28000.0;
-input double BasketLossStopPointsLevel3 = 33000.0; 
-input double BasketLossStopPointsLevel4 = 36000.0;
-input double BasketLossStopPointsLevel5 = 40000.0;
+// level別ATR倍率を使用して、バスケット平均価格から絶対損切りを判定
 input double BasketLossStopAtrMultiplierLevel1 = 6.0;
-input double BasketLossStopNanpinWidthMultiplierLevel2Plus = 6.0;
+input double BasketLossStopAtrMultiplierLevel2 = 8.4;
+input double BasketLossStopAtrMultiplierLevel3 = 9.9;
+input double BasketLossStopAtrMultiplierLevel4 = 10.8;
+input double BasketLossStopAtrMultiplierLevel5 = 12.0;
 input int CombinedProfitCloseLevel = 3;
 input double CombinedProfitCloseAtrMultiplier = 3.80;
 
@@ -322,6 +324,7 @@ struct NM2Params
   double restart_delay_atr_factor_min;
   double restart_delay_atr_factor_max;
   int nanpin_sleep_seconds;
+  bool enable_l2_fixed_atr_for_nanpin;
   int order_pending_timeout_seconds;
   bool enable_hedged_entry;
   bool close_all_on_trading_stop_start;
@@ -342,13 +345,11 @@ struct NM2Params
   double min_account_balance;
   bool close_positions_on_low_balance;
   bool enable_basket_loss_stop;
-  double basket_loss_stop_points_level1;
-  double basket_loss_stop_points_level2;
-  double basket_loss_stop_points_level3;
-  double basket_loss_stop_points_level4;
-  double basket_loss_stop_points_level5;
   double basket_loss_stop_atr_multiplier_level1;
-  double basket_loss_stop_nanpin_width_multiplier_level2_plus;
+  double basket_loss_stop_atr_multiplier_level2;
+  double basket_loss_stop_atr_multiplier_level3;
+  double basket_loss_stop_atr_multiplier_level4;
+  double basket_loss_stop_atr_multiplier_level5;
   int combined_profit_close_level;
   double combined_profit_close_atr_multiplier;
   bool no_martingale;
@@ -432,6 +433,8 @@ struct SymbolState
   double sell_level_price[NM2::kMaxLevels];
   double buy_grid_step;
   double sell_grid_step;
+  double buy_l2_fixed_nanpin_atr;
+  double sell_l2_fixed_nanpin_atr;
   datetime last_buy_close_time;
   datetime last_sell_close_time;
   datetime last_buy_nanpin_time;
@@ -846,6 +849,8 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   ClearLevelPrices(state.sell_level_price);
   state.buy_grid_step = 0.0;
   state.sell_grid_step = 0.0;
+  state.buy_l2_fixed_nanpin_atr = 0.0;
+  state.sell_l2_fixed_nanpin_atr = 0.0;
 }
 
 void RefreshSymbolInfo(SymbolState &state)
@@ -884,6 +889,7 @@ void ApplyCommonParams(NM2Params &params)
   params.restart_delay_atr_factor_min = RestartDelayAtrFactorMin;
   params.restart_delay_atr_factor_max = RestartDelayAtrFactorMax;
   params.nanpin_sleep_seconds = NanpinSleepSeconds;
+  params.enable_l2_fixed_atr_for_nanpin = EnableL2FixedAtrForNanpin;
   params.order_pending_timeout_seconds = OrderPendingTimeoutSeconds;
   params.enable_hedged_entry = EnableHedgedEntry;
   params.close_all_on_trading_stop_start = CloseAllOnTradingStopStart;
@@ -909,13 +915,11 @@ void ApplyCommonParams(NM2Params &params)
   params.min_account_balance = MinAccountBalance;
   params.close_positions_on_low_balance = ClosePositionsOnLowBalance;
   params.enable_basket_loss_stop = EnableBasketLossStop;
-  params.basket_loss_stop_points_level1 = BasketLossStopPointsLevel1;
-  params.basket_loss_stop_points_level2 = BasketLossStopPointsLevel2;
-  params.basket_loss_stop_points_level3 = BasketLossStopPointsLevel3;
-  params.basket_loss_stop_points_level4 = BasketLossStopPointsLevel4;
-  params.basket_loss_stop_points_level5 = BasketLossStopPointsLevel5;
   params.basket_loss_stop_atr_multiplier_level1 = BasketLossStopAtrMultiplierLevel1;
-  params.basket_loss_stop_nanpin_width_multiplier_level2_plus = BasketLossStopNanpinWidthMultiplierLevel2Plus;
+  params.basket_loss_stop_atr_multiplier_level2 = BasketLossStopAtrMultiplierLevel2;
+  params.basket_loss_stop_atr_multiplier_level3 = BasketLossStopAtrMultiplierLevel3;
+  params.basket_loss_stop_atr_multiplier_level4 = BasketLossStopAtrMultiplierLevel4;
+  params.basket_loss_stop_atr_multiplier_level5 = BasketLossStopAtrMultiplierLevel5;
   params.combined_profit_close_level = CombinedProfitCloseLevel;
   params.combined_profit_close_atr_multiplier = CombinedProfitCloseAtrMultiplier;
   params.double_second_lot = false;
@@ -1338,6 +1342,10 @@ bool IsTradingTime()
   TimeToStruct(now_gmt + 9 * 3600, dt);
   int minutes = dt.hour * 60 + dt.min;
 
+  bool in_maintenance = (minutes >= (6 * 60 + 45) && minutes < (8 * 60 + 15));
+  if (in_maintenance)
+    return false;
+
   bool in_asia = (minutes >= 8 * 60 && minutes < 16 * 60);
   bool in_eu = (minutes >= 16 * 60 && minutes < 22 * 60);
   bool in_us = (!in_asia && !in_eu); // 22:00-08:00 JST
@@ -1528,27 +1536,27 @@ int EffectiveCombinedProfitCloseLevel(const SymbolState &state)
   return level;
 }
 
-double BasketLossStopPointsThresholdForLevel(const NM2Params &params, int level_count)
+double BasketLossStopAtrMultiplierForLevel(const NM2Params &params, int level_count)
 {
   if (level_count <= 0)
     return 0.0;
   int level = level_count;
   if (level > 5)
     level = 5;
-  double threshold = 0.0;
+  double multiplier = 0.0;
   if (level == 1)
-    threshold = params.basket_loss_stop_points_level1;
+    multiplier = params.basket_loss_stop_atr_multiplier_level1;
   else if (level == 2)
-    threshold = params.basket_loss_stop_points_level2;
+    multiplier = params.basket_loss_stop_atr_multiplier_level2;
   else if (level == 3)
-    threshold = params.basket_loss_stop_points_level3;
+    multiplier = params.basket_loss_stop_atr_multiplier_level3;
   else if (level == 4)
-    threshold = params.basket_loss_stop_points_level4;
+    multiplier = params.basket_loss_stop_atr_multiplier_level4;
   else
-    threshold = params.basket_loss_stop_points_level5;
-  if (threshold < 0.0)
-    threshold = 0.0;
-  return threshold;
+    multiplier = params.basket_loss_stop_atr_multiplier_level5;
+  if (multiplier < 0.0)
+    multiplier = 0.0;
+  return multiplier;
 }
 
 void BuildLotSequence(SymbolState &state)
@@ -2454,6 +2462,74 @@ double AdjustNanpinStep(const double &level_prices[], int level_index, double st
   if (min_w <= 0.0)
     return step;
   return MathMax(step, min_w);
+}
+
+double EnsureProjectedBuyLevelPrice(SymbolState &state,
+                                    const BasketInfo &buy,
+                                    double base_step,
+                                    int level_index)
+{
+  if (level_index < 0 || base_step <= 0.0)
+    return 0.0;
+  if (level_index >= NM2::kMaxLevels)
+    level_index = NM2::kMaxLevels - 1;
+
+  for (int i = 0; i <= level_index; ++i)
+  {
+    if (state.buy_level_price[i] > 0.0)
+      continue;
+    if (i == 0)
+    {
+      if (buy.min_price <= 0.0)
+        return 0.0;
+      state.buy_level_price[0] = buy.min_price;
+      continue;
+    }
+    double base = state.buy_level_price[i - 1];
+    if (base <= 0.0)
+      return 0.0;
+    double step = base_step * LevelStepFactor(state.params, i + 1);
+    bool apply_min_width = !state.params.strict_nanpin_spacing;
+    step = AdjustNanpinStep(state.buy_level_price, i, step, apply_min_width);
+    if (step <= 0.0)
+      return 0.0;
+    state.buy_level_price[i] = base - step;
+  }
+  return state.buy_level_price[level_index];
+}
+
+double EnsureProjectedSellLevelPrice(SymbolState &state,
+                                     const BasketInfo &sell,
+                                     double base_step,
+                                     int level_index)
+{
+  if (level_index < 0 || base_step <= 0.0)
+    return 0.0;
+  if (level_index >= NM2::kMaxLevels)
+    level_index = NM2::kMaxLevels - 1;
+
+  for (int i = 0; i <= level_index; ++i)
+  {
+    if (state.sell_level_price[i] > 0.0)
+      continue;
+    if (i == 0)
+    {
+      if (sell.max_price <= 0.0)
+        return 0.0;
+      state.sell_level_price[0] = sell.max_price;
+      continue;
+    }
+    double base = state.sell_level_price[i - 1];
+    if (base <= 0.0)
+      return 0.0;
+    double step = base_step * LevelStepFactor(state.params, i + 1);
+    bool apply_min_width = !state.params.strict_nanpin_spacing;
+    step = AdjustNanpinStep(state.sell_level_price, i, step, apply_min_width);
+    if (step <= 0.0)
+      return 0.0;
+    state.sell_level_price[i] = base + step;
+  }
+  return state.sell_level_price[level_index];
 }
 
 string RegimeName(const int regime)
@@ -3907,46 +3983,19 @@ double AtrReferenceForStops(const SymbolState &state, double atr_base, double at
   return atr_ref;
 }
 
-double ConfirmedAverageNanpinWidth(const BasketInfo &basket)
+double BasketLossStopDistanceFromAtr(const SymbolState &state,
+                                     int level_count,
+                                     double atr_ref)
 {
-  if (basket.level_count < 2)
+  if (level_count <= 0 || atr_ref <= 0.0)
     return 0.0;
-  double width = MathAbs(basket.max_price - basket.min_price);
-  if (width <= 0.0)
-    return 0.0;
-  return width / (double)(basket.level_count - 1);
-}
-
-double BasketAbsoluteStopDistance(const SymbolState &state,
-                                  const BasketInfo &basket,
-                                  double atr_base,
-                                  double atr_now,
-                                  double fallback_step)
-{
-  if (basket.level_count <= 0)
+  double multiplier = BasketLossStopAtrMultiplierForLevel(state.params, level_count);
+  if (multiplier <= 0.0)
     return 0.0;
   double point = state.point;
   if (point <= 0.0)
     point = 0.00001;
-  if (basket.level_count <= 1)
-  {
-    double multiplier = state.params.basket_loss_stop_atr_multiplier_level1;
-    if (multiplier <= 0.0)
-      return 0.0;
-    double distance = AtrReferenceForStops(state, atr_base, atr_now) * multiplier;
-    if (distance < point)
-      distance = point;
-    return distance;
-  }
-  double avg_width = ConfirmedAverageNanpinWidth(basket);
-  if (avg_width <= 0.0)
-    avg_width = fallback_step;
-  if (avg_width <= 0.0)
-    return 0.0;
-  double multiplier = state.params.basket_loss_stop_nanpin_width_multiplier_level2_plus;
-  if (multiplier <= 0.0)
-    return 0.0;
-  double distance = avg_width * multiplier;
+  double distance = atr_ref * multiplier;
   if (distance < point)
     distance = point;
   return distance;
@@ -4545,98 +4594,42 @@ void ProcessSymbolTick(SymbolState &state)
   bool basket_loss_stop_enabled = params.enable_basket_loss_stop;
   if (basket_loss_stop_enabled && !(low_balance && params.close_positions_on_low_balance))
   {
+    double atr_ref = AtrReferenceForStops(state, atr_base, atr_now);
     double point = state.point;
     if (point <= 0.0)
       point = 0.00001;
     double tol = point * 0.5;
-    double loss_points_tol = 0.5;
-    if (buy.count > 0)
+    if (buy.count > 0 && buy.avg_price > 0.0)
     {
-      double loss_points_threshold = BasketLossStopPointsThresholdForLevel(params, buy.level_count);
-      if (loss_points_threshold > 0.0 && buy.basket_id > 0)
+      double stop_distance = BasketLossStopDistanceFromAtr(state, buy.level_count, atr_ref);
+      if (stop_distance > 0.0)
       {
-        double current_loss_points = BasketTotalLossPoints(state, POSITION_TYPE_BUY, buy.basket_id, bid, ask);
-        if (current_loss_points + loss_points_tol >= loss_points_threshold)
+        double stop_price = buy.avg_price - stop_distance;
+        if (bid <= stop_price + tol)
         {
-          PrintFormat("Absolute basket stop triggered (loss_points): %s BUY level=%d basket=%d loss_points=%.1f threshold=%.1f",
-                      symbol, buy.level_count, buy.basket_id, current_loss_points, loss_points_threshold);
+          double mult = BasketLossStopAtrMultiplierForLevel(params, buy.level_count);
+          PrintFormat("Absolute basket stop triggered (ATR): %s BUY level=%d basket=%d bid=%.5f avg=%.5f stop=%.5f atr=%.5f atr_mult=%.2f",
+                      symbol, buy.level_count, buy.basket_id, bid, buy.avg_price, stop_price, atr_ref, mult);
           if (buy.basket_id > 0)
             CloseBasketById(state, POSITION_TYPE_BUY, buy.basket_id);
           basket_loss_closed = true;
         }
       }
-      else if (buy.avg_price > 0.0)
-      {
-        double stop_distance = BasketAbsoluteStopDistance(state, buy, atr_base, atr_now, state.buy_grid_step);
-        if (stop_distance > 0.0)
-        {
-          double stop_price = buy.avg_price - stop_distance;
-          if (bid <= stop_price + tol)
-          {
-            if (buy.level_count <= 1)
-            {
-              PrintFormat("Absolute basket stop triggered: %s BUY level=%d bid=%.5f avg=%.5f stop=%.5f dist=%.5f rule=ATRx%.2f",
-                          symbol, buy.level_count, bid, buy.avg_price, stop_price, stop_distance,
-                          params.basket_loss_stop_atr_multiplier_level1);
-            }
-            else
-            {
-              double avg_width = ConfirmedAverageNanpinWidth(buy);
-              if (avg_width <= 0.0)
-                avg_width = state.buy_grid_step;
-              PrintFormat("Absolute basket stop triggered: %s BUY level=%d bid=%.5f avg=%.5f stop=%.5f dist=%.5f avg_width=%.5f rule=WIDTHx%.2f",
-                          symbol, buy.level_count, bid, buy.avg_price, stop_price, stop_distance, avg_width,
-                          params.basket_loss_stop_nanpin_width_multiplier_level2_plus);
-            }
-            if (buy.basket_id > 0)
-              CloseBasketById(state, POSITION_TYPE_BUY, buy.basket_id);
-            basket_loss_closed = true;
-          }
-        }
-      }
     }
-    if (sell.count > 0)
+    if (sell.count > 0 && sell.avg_price > 0.0)
     {
-      double loss_points_threshold = BasketLossStopPointsThresholdForLevel(params, sell.level_count);
-      if (loss_points_threshold > 0.0 && sell.basket_id > 0)
+      double stop_distance = BasketLossStopDistanceFromAtr(state, sell.level_count, atr_ref);
+      if (stop_distance > 0.0)
       {
-        double current_loss_points = BasketTotalLossPoints(state, POSITION_TYPE_SELL, sell.basket_id, bid, ask);
-        if (current_loss_points + loss_points_tol >= loss_points_threshold)
+        double stop_price = sell.avg_price + stop_distance;
+        if (ask >= stop_price - tol)
         {
-          PrintFormat("Absolute basket stop triggered (loss_points): %s SELL level=%d basket=%d loss_points=%.1f threshold=%.1f",
-                      symbol, sell.level_count, sell.basket_id, current_loss_points, loss_points_threshold);
+          double mult = BasketLossStopAtrMultiplierForLevel(params, sell.level_count);
+          PrintFormat("Absolute basket stop triggered (ATR): %s SELL level=%d basket=%d ask=%.5f avg=%.5f stop=%.5f atr=%.5f atr_mult=%.2f",
+                      symbol, sell.level_count, sell.basket_id, ask, sell.avg_price, stop_price, atr_ref, mult);
           if (sell.basket_id > 0)
             CloseBasketById(state, POSITION_TYPE_SELL, sell.basket_id);
           basket_loss_closed = true;
-        }
-      }
-      else if (sell.avg_price > 0.0)
-      {
-        double stop_distance = BasketAbsoluteStopDistance(state, sell, atr_base, atr_now, state.sell_grid_step);
-        if (stop_distance > 0.0)
-        {
-          double stop_price = sell.avg_price + stop_distance;
-          if (ask >= stop_price - tol)
-          {
-            if (sell.level_count <= 1)
-            {
-              PrintFormat("Absolute basket stop triggered: %s SELL level=%d ask=%.5f avg=%.5f stop=%.5f dist=%.5f rule=ATRx%.2f",
-                          symbol, sell.level_count, ask, sell.avg_price, stop_price, stop_distance,
-                          params.basket_loss_stop_atr_multiplier_level1);
-            }
-            else
-            {
-              double avg_width = ConfirmedAverageNanpinWidth(sell);
-              if (avg_width <= 0.0)
-                avg_width = state.sell_grid_step;
-              PrintFormat("Absolute basket stop triggered: %s SELL level=%d ask=%.5f avg=%.5f stop=%.5f dist=%.5f avg_width=%.5f rule=WIDTHx%.2f",
-                          symbol, sell.level_count, ask, sell.avg_price, stop_price, stop_distance, avg_width,
-                          params.basket_loss_stop_nanpin_width_multiplier_level2_plus);
-            }
-            if (sell.basket_id > 0)
-              CloseBasketById(state, POSITION_TYPE_SELL, sell.basket_id);
-            basket_loss_closed = true;
-          }
         }
       }
     }
@@ -4703,6 +4696,7 @@ void ProcessSymbolTick(SymbolState &state)
     state.buy_skip_price = 0.0;
     ClearLevelPrices(state.buy_level_price);
     state.buy_grid_step = 0.0;
+    state.buy_l2_fixed_nanpin_atr = 0.0;
     state.buy_open_time = 0;
     state.buy_deepest_entry_time = 0;
   }
@@ -4721,6 +4715,7 @@ void ProcessSymbolTick(SymbolState &state)
     state.sell_skip_price = 0.0;
     ClearLevelPrices(state.sell_level_price);
     state.sell_grid_step = 0.0;
+    state.sell_l2_fixed_nanpin_atr = 0.0;
     state.sell_open_time = 0;
     state.sell_deepest_entry_time = 0;
   }
@@ -4728,11 +4723,13 @@ void ProcessSymbolTick(SymbolState &state)
   {
     state.buy_open_time = TimeCurrent();
     state.buy_close_as_completed = false;
+    state.buy_l2_fixed_nanpin_atr = 0.0;
   }
   if (state.prev_sell_count == 0 && sell.count > 0)
   {
     state.sell_open_time = TimeCurrent();
     state.sell_close_as_completed = false;
+    state.sell_l2_fixed_nanpin_atr = 0.0;
   }
 
   if (buy.count > 0 || sell.count > 0)
@@ -4889,16 +4886,67 @@ void ProcessSymbolTick(SymbolState &state)
   }
 
   double grid_step = 0.0;
-  double atr_ref = atr_base;
-  if (params.min_atr > atr_ref)
-    atr_ref = params.min_atr;
-  if (atr_ref > 0.0)
-    grid_step = atr_ref * params.atr_multiplier;
+  double atr_for_grid_base = atr_base;
+  if (params.min_atr > atr_for_grid_base)
+    atr_for_grid_base = params.min_atr;
+  if (atr_for_grid_base > 0.0)
+    grid_step = atr_for_grid_base * params.atr_multiplier;
 
   if (buy.count > 0)
-    state.buy_grid_step = MathMax(state.buy_grid_step, grid_step);
+  {
+    if (params.enable_l2_fixed_atr_for_nanpin
+        && buy.level_count >= 2
+        && state.buy_l2_fixed_nanpin_atr <= 0.0
+        && atr_for_grid_base > 0.0)
+    {
+      state.buy_l2_fixed_nanpin_atr = atr_for_grid_base;
+      PrintFormat("Nanpin ATR fixed at L2: %s BUY basket=%d atr=%.5f",
+                  symbol, buy.basket_id, state.buy_l2_fixed_nanpin_atr);
+    }
+
+    double buy_atr_for_grid = atr_for_grid_base;
+    if (params.enable_l2_fixed_atr_for_nanpin && state.buy_l2_fixed_nanpin_atr > 0.0)
+      buy_atr_for_grid = state.buy_l2_fixed_nanpin_atr;
+
+    double buy_grid_step_now = 0.0;
+    if (buy_atr_for_grid > 0.0)
+      buy_grid_step_now = buy_atr_for_grid * params.atr_multiplier;
+    if (buy_grid_step_now > 0.0)
+    {
+      if (params.enable_l2_fixed_atr_for_nanpin && state.buy_l2_fixed_nanpin_atr > 0.0)
+        state.buy_grid_step = buy_grid_step_now;
+      else
+        state.buy_grid_step = MathMax(state.buy_grid_step, buy_grid_step_now);
+    }
+  }
+
   if (sell.count > 0)
-    state.sell_grid_step = MathMax(state.sell_grid_step, grid_step);
+  {
+    if (params.enable_l2_fixed_atr_for_nanpin
+        && sell.level_count >= 2
+        && state.sell_l2_fixed_nanpin_atr <= 0.0
+        && atr_for_grid_base > 0.0)
+    {
+      state.sell_l2_fixed_nanpin_atr = atr_for_grid_base;
+      PrintFormat("Nanpin ATR fixed at L2: %s SELL basket=%d atr=%.5f",
+                  symbol, sell.basket_id, state.sell_l2_fixed_nanpin_atr);
+    }
+
+    double sell_atr_for_grid = atr_for_grid_base;
+    if (params.enable_l2_fixed_atr_for_nanpin && state.sell_l2_fixed_nanpin_atr > 0.0)
+      sell_atr_for_grid = state.sell_l2_fixed_nanpin_atr;
+
+    double sell_grid_step_now = 0.0;
+    if (sell_atr_for_grid > 0.0)
+      sell_grid_step_now = sell_atr_for_grid * params.atr_multiplier;
+    if (sell_grid_step_now > 0.0)
+    {
+      if (params.enable_l2_fixed_atr_for_nanpin && state.sell_l2_fixed_nanpin_atr > 0.0)
+        state.sell_grid_step = sell_grid_step_now;
+      else
+        state.sell_grid_step = MathMax(state.sell_grid_step, sell_grid_step_now);
+    }
+  }
 
   bool allow_nanpin = !safety_triggered && !low_balance && !news_blocked;
   if (params.safety_mode)
@@ -4960,54 +5008,42 @@ void ProcessSymbolTick(SymbolState &state)
   }
 
   bool final_level_sl_closed = false;
-  if (nanpin_levels >= 2 && buy.count > 0 && buy.level_count >= nanpin_levels)
+  if (nanpin_levels >= 1 && buy.count > 0)
   {
     double base_step = state.buy_grid_step > 0.0 ? state.buy_grid_step : grid_step;
-    int next_level_index = nanpin_levels;
-    double stop_step = base_step * LevelStepFactor(params, next_level_index + 1);
-    bool apply_min_width = !params.strict_nanpin_spacing;
-    stop_step = AdjustNanpinStep(state.buy_level_price, next_level_index, stop_step, apply_min_width);
-    double base_price = state.buy_level_price[nanpin_levels - 1];
-    if (base_price <= 0.0)
-      base_price = buy.min_price;
+    int stop_level_index = nanpin_levels;
+    double stop_price = EnsureProjectedBuyLevelPrice(state, buy, base_step, stop_level_index);
     double point = state.point;
     if (point <= 0.0)
       point = 0.00001;
     double tol = point * 0.5;
-    if (stop_step > 0.0 && base_price > 0.0)
+    if (stop_price > 0.0)
     {
-      double stop_price = base_price - stop_step;
       if (ask <= stop_price + tol)
       {
-        PrintFormat("Final level stop-loss triggered: %s BUY level=%d max_levels=%d nanpin_levels=%d is_trading_time=%s ask=%.5f stop=%.5f",
-                    symbol, buy.level_count, levels, nanpin_levels, is_trading_time ? "true" : "false", ask, stop_price);
+        PrintFormat("Final level stop-loss triggered: %s BUY actual_level=%d stop_level=%d max_levels=%d nanpin_levels=%d is_trading_time=%s ask=%.5f stop=%.5f",
+                    symbol, buy.level_count, nanpin_levels + 1, levels, nanpin_levels, is_trading_time ? "true" : "false", ask, stop_price);
         if (buy.basket_id > 0)
           CloseBasketById(state, POSITION_TYPE_BUY, buy.basket_id);
         final_level_sl_closed = true;
       }
     }
   }
-  if (nanpin_levels >= 2 && sell.count > 0 && sell.level_count >= nanpin_levels)
+  if (nanpin_levels >= 1 && sell.count > 0)
   {
     double base_step = state.sell_grid_step > 0.0 ? state.sell_grid_step : grid_step;
-    int next_level_index = nanpin_levels;
-    double stop_step = base_step * LevelStepFactor(params, next_level_index + 1);
-    bool apply_min_width = !params.strict_nanpin_spacing;
-    stop_step = AdjustNanpinStep(state.sell_level_price, next_level_index, stop_step, apply_min_width);
-    double base_price = state.sell_level_price[nanpin_levels - 1];
-    if (base_price <= 0.0)
-      base_price = sell.max_price;
+    int stop_level_index = nanpin_levels;
+    double stop_price = EnsureProjectedSellLevelPrice(state, sell, base_step, stop_level_index);
     double point = state.point;
     if (point <= 0.0)
       point = 0.00001;
     double tol = point * 0.5;
-    if (stop_step > 0.0 && base_price > 0.0)
+    if (stop_price > 0.0)
     {
-      double stop_price = base_price + stop_step;
       if (bid >= stop_price - tol)
       {
-        PrintFormat("Final level stop-loss triggered: %s SELL level=%d max_levels=%d nanpin_levels=%d is_trading_time=%s bid=%.5f stop=%.5f",
-                    symbol, sell.level_count, levels, nanpin_levels, is_trading_time ? "true" : "false", bid, stop_price);
+        PrintFormat("Final level stop-loss triggered: %s SELL actual_level=%d stop_level=%d max_levels=%d nanpin_levels=%d is_trading_time=%s bid=%.5f stop=%.5f",
+                    symbol, sell.level_count, nanpin_levels + 1, levels, nanpin_levels, is_trading_time ? "true" : "false", bid, stop_price);
         if (sell.basket_id > 0)
           CloseBasketById(state, POSITION_TYPE_SELL, sell.basket_id);
         final_level_sl_closed = true;
@@ -5267,6 +5303,16 @@ void ProcessSymbolTick(SymbolState &state)
           basket_id = 1;
         if (TryOpen(state, symbol, ORDER_TYPE_BUY, lot, MakeLevelComment(NM2::kCoreComment, basket_id, next_level), next_level))
         {
+          if (params.enable_l2_fixed_atr_for_nanpin && next_level == 2 && state.buy_l2_fixed_nanpin_atr <= 0.0)
+          {
+            if (atr_for_grid_base > 0.0)
+            {
+              state.buy_l2_fixed_nanpin_atr = atr_for_grid_base;
+              state.buy_grid_step = state.buy_l2_fixed_nanpin_atr * params.atr_multiplier;
+              PrintFormat("Nanpin ATR fixed at L2 open: %s BUY basket=%d atr=%.5f",
+                          symbol, basket_id, state.buy_l2_fixed_nanpin_atr);
+            }
+          }
           state.buy_order_pending = true;
           state.buy_order_pending_time = now;
           state.last_buy_nanpin_time = now;
@@ -5300,6 +5346,16 @@ void ProcessSymbolTick(SymbolState &state)
           basket_id = 1;
         if (TryOpen(state, symbol, ORDER_TYPE_SELL, lot, MakeLevelComment(NM2::kCoreComment, basket_id, next_level), next_level))
         {
+          if (params.enable_l2_fixed_atr_for_nanpin && next_level == 2 && state.sell_l2_fixed_nanpin_atr <= 0.0)
+          {
+            if (atr_for_grid_base > 0.0)
+            {
+              state.sell_l2_fixed_nanpin_atr = atr_for_grid_base;
+              state.sell_grid_step = state.sell_l2_fixed_nanpin_atr * params.atr_multiplier;
+              PrintFormat("Nanpin ATR fixed at L2 open: %s SELL basket=%d atr=%.5f",
+                          symbol, basket_id, state.sell_l2_fixed_nanpin_atr);
+            }
+          }
           state.sell_order_pending = true;
           state.sell_order_pending_time = now;
           state.last_sell_nanpin_time = now;
