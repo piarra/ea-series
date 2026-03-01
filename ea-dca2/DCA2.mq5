@@ -39,7 +39,7 @@ input double BaseLots           = 0.10;
 // Take Profit settings
 input double TP_Points          = 3800;      // TP distance in points (from weighted avg entry)
 input bool   EnableTrailingTakeProfit = true; // TP到達時に最深ポジションのみ残してトレーリング
-input double TrailingDistanceRatio    = 0.55; // trail distance = TP distance * ratio
+input double TrailingDistancePoints   = 760; // trail distance in points
 
 // Safety
 input double MaxSpreadPoints    = 320;
@@ -57,6 +57,119 @@ double buy_runner_trail_dist = 0.0;
 double sell_runner_trail_dist = 0.0;
 double buy_dca_step_locked = 0.0;
 double sell_dca_step_locked = 0.0;
+int ma_handle = INVALID_HANDLE;
+int std_handle = INVALID_HANDLE;
+int atr_handle = INVALID_HANDLE;
+int adx_handle = INVALID_HANDLE;
+string ind_cache_symbol = "";
+ENUM_TIMEFRAMES ind_cache_ma_tf = (ENUM_TIMEFRAMES)-1;
+int ind_cache_ma_period = -1;
+bool ind_cache_use_ema = false;
+int ind_cache_std_period = -1;
+int ind_cache_atr_period = -1;
+ENUM_TIMEFRAMES ind_cache_adx_tf = (ENUM_TIMEFRAMES)-1;
+int ind_cache_adx_period = -1;
+string sym_meta_symbol = "";
+double sym_meta_point = 0.0;
+int sym_meta_digits = -1;
+double sym_meta_min_lot = 0.0;
+double sym_meta_max_lot = 0.0;
+double sym_meta_lot_step = 0.0;
+int sym_meta_stops_level = 0;
+bool sym_meta_ready = false;
+
+void ReleaseHandle(int &h){
+   if(h != INVALID_HANDLE){
+      IndicatorRelease(h);
+      h = INVALID_HANDLE;
+   }
+}
+
+void ReleaseIndicatorCache(){
+   ReleaseHandle(ma_handle);
+   ReleaseHandle(std_handle);
+   ReleaseHandle(atr_handle);
+   ReleaseHandle(adx_handle);
+   ind_cache_symbol = "";
+   ind_cache_ma_tf = (ENUM_TIMEFRAMES)-1;
+   ind_cache_ma_period = -1;
+   ind_cache_use_ema = false;
+   ind_cache_std_period = -1;
+   ind_cache_atr_period = -1;
+   ind_cache_adx_tf = (ENUM_TIMEFRAMES)-1;
+   ind_cache_adx_period = -1;
+}
+
+bool EnsureSymbolMeta(string sym){
+   if(sym_meta_ready && sym_meta_symbol == sym) return true;
+
+   sym_meta_symbol = sym;
+   sym_meta_point = SymbolInfoDouble(sym, SYMBOL_POINT);
+   sym_meta_digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   sym_meta_min_lot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
+   sym_meta_max_lot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
+   sym_meta_lot_step = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
+   sym_meta_stops_level = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
+   sym_meta_ready = (sym_meta_point > 0.0
+                     && sym_meta_digits >= 0
+                     && sym_meta_min_lot > 0.0
+                     && sym_meta_max_lot >= sym_meta_min_lot
+                     && sym_meta_lot_step > 0.0);
+   return sym_meta_ready;
+}
+
+bool EnsureIndicatorHandles(string sym){
+   bool rebuild = false;
+   if(ind_cache_symbol != sym
+      || ind_cache_ma_tf != InpTF
+      || ind_cache_ma_period != MaPeriod
+      || ind_cache_use_ema != UseEMA
+      || ind_cache_std_period != StdPeriod
+      || ind_cache_atr_period != 14
+      || ind_cache_adx_tf != AdxFilterTF
+      || ind_cache_adx_period != AdxPeriod){
+      rebuild = true;
+   }
+   if(!rebuild){
+      if(ma_handle == INVALID_HANDLE
+         || std_handle == INVALID_HANDLE
+         || atr_handle == INVALID_HANDLE
+         || adx_handle == INVALID_HANDLE){
+         rebuild = true;
+      }
+   }
+   if(!rebuild) return true;
+
+   ReleaseIndicatorCache();
+   ma_handle = iMA(sym, InpTF, MaPeriod, 0, UseEMA ? MODE_EMA : MODE_SMA, PRICE_CLOSE);
+   std_handle = iStdDev(sym, InpTF, StdPeriod, 0, MODE_SMA, PRICE_CLOSE);
+   atr_handle = iATR(sym, InpTF, 14);
+   adx_handle = iADX(sym, AdxFilterTF, AdxPeriod);
+   if(ma_handle == INVALID_HANDLE
+      || std_handle == INVALID_HANDLE
+      || atr_handle == INVALID_HANDLE
+      || adx_handle == INVALID_HANDLE){
+      ReleaseIndicatorCache();
+      return false;
+   }
+
+   ind_cache_symbol = sym;
+   ind_cache_ma_tf = InpTF;
+   ind_cache_ma_period = MaPeriod;
+   ind_cache_use_ema = UseEMA;
+   ind_cache_std_period = StdPeriod;
+   ind_cache_atr_period = 14;
+   ind_cache_adx_tf = AdxFilterTF;
+   ind_cache_adx_period = AdxPeriod;
+   return true;
+}
+
+double ReadLatestBufferValue(int handle){
+   if(handle == INVALID_HANDLE) return EMPTY_VALUE;
+   double b[];
+   if(CopyBuffer(handle, 0, 0, 1, b) <= 0) return EMPTY_VALUE;
+   return b[0];
+}
 
 // -------- helpers --------
 bool IsNewBar(string sym, ENUM_TIMEFRAMES tf){
@@ -69,6 +182,11 @@ bool IsNewBar(string sym, ENUM_TIMEFRAMES tf){
 }
 
 double GetMA(string sym, ENUM_TIMEFRAMES tf, int period){
+   if(sym == InpSymbol && tf == InpTF && period == MaPeriod){
+      if(!EnsureIndicatorHandles(sym)) return EMPTY_VALUE;
+      return ReadLatestBufferValue(ma_handle);
+   }
+
    int h = iMA(sym, tf, period, 0, UseEMA ? MODE_EMA : MODE_SMA, PRICE_CLOSE);
    if(h == INVALID_HANDLE) return EMPTY_VALUE;
    double b[];
@@ -78,6 +196,11 @@ double GetMA(string sym, ENUM_TIMEFRAMES tf, int period){
 }
 
 double GetStd(string sym, ENUM_TIMEFRAMES tf, int period){
+   if(sym == InpSymbol && tf == InpTF && period == StdPeriod){
+      if(!EnsureIndicatorHandles(sym)) return EMPTY_VALUE;
+      return ReadLatestBufferValue(std_handle);
+   }
+
    int h = iStdDev(sym, tf, period, 0, MODE_SMA, PRICE_CLOSE);
    if(h == INVALID_HANDLE) return EMPTY_VALUE;
    double b[];
@@ -87,6 +210,11 @@ double GetStd(string sym, ENUM_TIMEFRAMES tf, int period){
 }
 
 double GetATR(string sym, ENUM_TIMEFRAMES tf, int period){
+   if(sym == InpSymbol && tf == InpTF && period == 14){
+      if(!EnsureIndicatorHandles(sym)) return EMPTY_VALUE;
+      return ReadLatestBufferValue(atr_handle);
+   }
+
    int h = iATR(sym, tf, period);
    if(h == INVALID_HANDLE) return EMPTY_VALUE;
    double b[];
@@ -97,6 +225,11 @@ double GetATR(string sym, ENUM_TIMEFRAMES tf, int period){
 
 double GetADX(string sym, ENUM_TIMEFRAMES tf, int period){
    if(period<=0) return EMPTY_VALUE;
+   if(sym == InpSymbol && tf == AdxFilterTF && period == AdxPeriod){
+      if(!EnsureIndicatorHandles(sym)) return EMPTY_VALUE;
+      return ReadLatestBufferValue(adx_handle);
+   }
+
    int h = iADX(sym, tf, period);
    if(h == INVALID_HANDLE) return EMPTY_VALUE;
    double b[];
@@ -106,12 +239,38 @@ double GetADX(string sym, ENUM_TIMEFRAMES tf, int period){
 }
 
 double NormalizeLots(string sym, double lots){
-   double minLot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
-   double maxLot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
-   double step   = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
+   double minLot;
+   double maxLot;
+   double step;
+   if(EnsureSymbolMeta(sym)){
+      minLot = sym_meta_min_lot;
+      maxLot = sym_meta_max_lot;
+      step = sym_meta_lot_step;
+   } else {
+      minLot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
+      maxLot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
+      step   = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
+   }
+   if(step<=0) return lots;
    lots = MathMax(minLot, MathMin(maxLot, lots));
    lots = MathFloor(lots/step)*step;
    return lots;
+}
+
+void CountPositionsBySide(string sym, int &buyCount, int &sellCount){
+   buyCount = 0;
+   sellCount = 0;
+   for(int i=PositionsTotal()-1; i>=0; --i){
+      if(PositionGetTicket(i)){
+         string ps = PositionGetString(POSITION_SYMBOL);
+         long pm   = PositionGetInteger(POSITION_MAGIC);
+         if(ps==sym && pm==Magic){
+            long pt = PositionGetInteger(POSITION_TYPE);
+            if(pt==POSITION_TYPE_BUY) buyCount++;
+            else if(pt==POSITION_TYPE_SELL) sellCount++;
+         }
+      }
+   }
 }
 
 // Return count of positions by side for this EA
@@ -214,17 +373,16 @@ ulong RunnerTicket(long posType){
 }
 
 double CalcTakeProfitDistancePrice(string sym){
-   double point = SymbolInfoDouble(sym, SYMBOL_POINT);
+   double point = EnsureSymbolMeta(sym) ? sym_meta_point : SymbolInfoDouble(sym, SYMBOL_POINT);
    if(point<=0) return 0.0;
    return TP_Points * point;
 }
 
 double CalcTrailDistancePrice(string sym){
-   double point = SymbolInfoDouble(sym, SYMBOL_POINT);
+   double point = EnsureSymbolMeta(sym) ? sym_meta_point : SymbolInfoDouble(sym, SYMBOL_POINT);
    if(point<=0) return 0.0;
-   double tpDist = CalcTakeProfitDistancePrice(sym);
-   if(tpDist<=0) return 0.0;
-   double dist = tpDist * TrailingDistanceRatio;
+   double dist = TrailingDistancePoints * point;
+   if(dist<=0) return 0.0;
    if(dist < point) dist = point;
    return dist;
 }
@@ -330,7 +488,7 @@ bool ManageDeepestRunnerTrailing(string sym, long posType){
    // enforce deepest-only state in case any extra positions appeared
    ClosePositionsExceptTicket(sym, posType, keepTicket);
 
-   double point = SymbolInfoDouble(sym, SYMBOL_POINT);
+   double point = EnsureSymbolMeta(sym) ? sym_meta_point : SymbolInfoDouble(sym, SYMBOL_POINT);
    if(point<=0){
       ResetRunnerState(posType);
       return false;
@@ -373,8 +531,8 @@ bool ManageDeepestRunnerTrailing(string sym, long posType){
 }
 
 double CalcBasketTP(string sym, double avgPrice, long posType){
-   double point = SymbolInfoDouble(sym, SYMBOL_POINT);
-   int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   double point = EnsureSymbolMeta(sym) ? sym_meta_point : SymbolInfoDouble(sym, SYMBOL_POINT);
+   int digits = EnsureSymbolMeta(sym) ? sym_meta_digits : (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
    if(point<=0 || digits<0) return 0.0;
 
    double tpDistPrice = TP_Points * point;
@@ -384,7 +542,7 @@ double CalcBasketTP(string sym, double avgPrice, long posType){
 
 // Apply/Update TP for all positions on side to same basket TP
 void UpdateBasketTP(string sym, long posType, double basketTP){
-   double point = SymbolInfoDouble(sym, SYMBOL_POINT);
+   double point = EnsureSymbolMeta(sym) ? sym_meta_point : SymbolInfoDouble(sym, SYMBOL_POINT);
    if(point<=0 || basketTP<=0) return;
 
    // modify each position TP (keep SL as-is)
@@ -424,7 +582,7 @@ void ManageBasketTakeProfit(string sym, long posType){
 
    double ask   = SymbolInfoDouble(sym, SYMBOL_ASK);
    double bid   = SymbolInfoDouble(sym, SYMBOL_BID);
-   double point = SymbolInfoDouble(sym, SYMBOL_POINT);
+   double point = EnsureSymbolMeta(sym) ? sym_meta_point : SymbolInfoDouble(sym, SYMBOL_POINT);
    if(point<=0) return;
 
    // Virtual TP fallback: if target is reached but some tickets had no TP, force close.
@@ -490,7 +648,7 @@ void ManageBasketTakeProfit(string sym, long posType){
    }
 
    // Some brokers reject TP too close to current price; skip modify and keep virtual TP fallback.
-   int stopsLevel = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
+   int stopsLevel = EnsureSymbolMeta(sym) ? sym_meta_stops_level : (int)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
    if(posType==POSITION_TYPE_BUY){
       double minTP = bid + (stopsLevel + 1) * point;
       if(basketTP <= minTP) return;
@@ -522,16 +680,29 @@ void SetCooldownBars(string sym, ENUM_TIMEFRAMES tf, int bars, long posType){
 // ---------------- main ----------------
 int OnInit(){
    trade.SetExpertMagicNumber(Magic);
+   sym_meta_ready = false;
+   ReleaseIndicatorCache();
+   EnsureSymbolMeta(InpSymbol);
+   EnsureIndicatorHandles(InpSymbol);
    return(INIT_SUCCEEDED);
+}
+
+void OnDeinit(const int reason){
+   (void)reason;
+   ReleaseIndicatorCache();
 }
 
 void OnTick(){
    string sym = InpSymbol;
    if(!SymbolSelect(sym, true)) return;
+   // Refresh symbol constants once per tick, then reuse in hot paths.
+   sym_meta_ready = false;
+   EnsureSymbolMeta(sym);
 
    // TP maintenance and recovery run every tick, not only on new bar.
-   int liveLong  = CountPositionsByType(sym, POSITION_TYPE_BUY);
-   int liveShort = CountPositionsByType(sym, POSITION_TYPE_SELL);
+   int liveLong = 0;
+   int liveShort = 0;
+   CountPositionsBySide(sym, liveLong, liveShort);
    if(liveLong<=0) ResetRunnerState(POSITION_TYPE_BUY);
    if(liveShort<=0) ResetRunnerState(POSITION_TYPE_SELL);
    if(liveLong<=0) buy_dca_step_locked = 0.0;
@@ -547,7 +718,7 @@ void OnTick(){
    // spread filter
    double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
    double bid = SymbolInfoDouble(sym, SYMBOL_BID);
-   double point = SymbolInfoDouble(sym, SYMBOL_POINT);
+   double point = EnsureSymbolMeta(sym) ? sym_meta_point : SymbolInfoDouble(sym, SYMBOL_POINT);
    if(point<=0) return;
    double spread_points = (ask-bid)/point;
    if(spread_points > MaxSpreadPoints) return;
