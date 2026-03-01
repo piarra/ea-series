@@ -39,7 +39,7 @@ input double BaseLots           = 0.10;
 // Take Profit settings
 input double TP_Points          = 3800;      // TP distance in points (from weighted avg entry)
 input bool   EnableTrailingTakeProfit = true; // TP到達時に最深ポジションのみ残してトレーリング
-input double TrailingDistancePoints   = 760; // trail distance in points
+input double TrailingDistancePoints   = 400; // trail distance in points
 
 // Safety
 input double MaxSpreadPoints    = 320;
