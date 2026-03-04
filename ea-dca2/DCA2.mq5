@@ -14,10 +14,10 @@ input string InpSymbol          = "XAUUSDc";
 input ENUM_TIMEFRAMES InpTF     = PERIOD_M4;
 
 // Entry (mean reversion)
-input int    MaPeriod           = 192;
-input int    StdPeriod          = 32;
+input int    MaPeriod           = 180;
+input int    StdPeriod          = 30;
 input bool   UseEMA             = true;
-input double Z_Entry            = 1.6;      // long: z <= -Z_Entry
+input double Z_Entry            = 1.5;      // long: z <= -Z_Entry
 input bool   ENABLE_LONG        = true;
 input ENUM_TIMEFRAMES AdxFilterTF = PERIOD_M30; // ADX filter timeframe
 input int    AdxPeriod          = 18;       // ADX period (width)
@@ -29,7 +29,7 @@ input double DcaStep_ATR        = 2.0;      // add next stage when price moves a
 input double LotMultiplier      = 1.2;      // lots *= multiplier each added stage
 input bool   RequireEntrySignalForDca = true; // trueならナンピン時も初回エントリー条件を必須化
 input bool   AllowReEnterAfterStop = true;  // after 4th trigger stopout, allow immediate new cycle if signal still valid
-input int    CooldownBarsAfterStop = 1;     // wait N new bars after stopout before re-entering
+input int    CooldownBarsAfterStop = 3;     // wait N new bars after stopout before re-entering
 
 // Position sizing (base lot)
 input bool   UseRiskPercent     = false;    // simple base lots by default (DCA strategy often uses fixed)
@@ -688,7 +688,6 @@ int OnInit(){
 }
 
 void OnDeinit(const int reason){
-   (void)reason;
    ReleaseIndicatorCache();
 }
 
