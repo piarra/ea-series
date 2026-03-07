@@ -16,10 +16,10 @@ CTrade close_trade;
 input string InpSymbolGold        = "XAUUSD-m";
 input string InpSymbolSilver      = "XAGUSD-m";
 
-input ENUM_TIMEFRAMES InpSMT_TF   = PERIOD_M5; // SMT + PVT confirmation timeframe
-input ENUM_TIMEFRAMES InpEntry_TF = PERIOD_M1;  // Entry timeframe (structure break)
+input ENUM_TIMEFRAMES InpSMT_TF   = PERIOD_M1; // SMT + PVT confirmation timeframe
+input ENUM_TIMEFRAMES InpEntry_TF = PERIOD_M2;  // Entry timeframe (structure break)
 
-input int    InpPivotLeft         = 2;   // Pivot detection left bars
+input int    InpPivotLeft         = 3;   // Pivot detection left bars
 input int    InpPivotRight        = 2;   // Pivot detection right bars
 input int    InpLookbackBars      = 400; // History scan bars per TF
 
@@ -28,7 +28,10 @@ input int    InpSetupExpiryBars   = 12;  // Setup validity in Entry TF bars afte
 input double InpFixedLot          = 0.01;
 input double InpMinRR             = 2.1; // RR >= 2
 input int    InpSL_BufferPoints   = 40;  // buffer in points beyond swing
-input double InpSwingTrailDistanceRatio = 0.55; // NM2-style: trail distance = TP distance * ratio
+input double InpSwingTPMultipleOfScalp = 2.0;   // SWING TP distance = SCALP TP distance * N
+input bool   InpSwingMoveSLOnScalpTP   = true;  // when SCALP hits TP, move SWING SL to BE +/- offset
+input double InpSwingBEOffsetPips      = 10.0;  // offset in pips from entry for SWING BE lock
+input double InpSwingTrailDistanceRatio = 0.55; // legacy trailing ratio (currently unused)
 
 input long   InpMagic             = 26021401;
 input bool   InpOnePositionOnly   = false;
@@ -77,6 +80,35 @@ int DigitsOf(const string sym)
 double PointOf(const string sym)
 {
    return SymbolInfoDouble(sym, SYMBOL_POINT);
+}
+
+double PipSizeOf(const string sym)
+{
+   double point = PointOf(sym);
+   if(point <= 0.0) return 0.00001;
+
+   int digits = DigitsOf(sym);
+   if(digits == 3 || digits == 5)
+      return point * 10.0;
+   return point;
+}
+
+double CalcSwingTPFromScalp(const SetupDir dir, const double sl, const double scalp_tp)
+{
+   double rr = InpMinRR;
+   if(rr <= 0.0) return 0.0;
+
+   double entry_ref = (scalp_tp + rr * sl) / (1.0 + rr);
+   double scalp_distance = MathAbs(scalp_tp - entry_ref);
+   if(scalp_distance <= 0.0) return 0.0;
+
+   double tp_mult = InpSwingTPMultipleOfScalp;
+   if(tp_mult <= 0.0) tp_mult = 1.0;
+   double swing_distance = scalp_distance * tp_mult;
+
+   if(dir == SETUP_SELL) return entry_ref - swing_distance;
+   if(dir == SETUP_BUY)  return entry_ref + swing_distance;
+   return 0.0;
 }
 
 bool EnsureSymbols()
@@ -593,7 +625,7 @@ bool UpdatePositionTrailSL(const ulong ticket, const ENUM_POSITION_TYPE type, do
    bool ok = tr.PositionModify(ticket, requested_sl, tp);
    if(!ok)
    {
-      PrintFormat("SWING trailing SL update failed: ticket=%I64u type=%d sl=%.5f retcode=%d %s",
+      PrintFormat("SWING SL update failed: ticket=%I64u type=%d sl=%.5f retcode=%d %s",
                   ticket,
                   (int)type,
                   requested_sl,
@@ -601,6 +633,61 @@ bool UpdatePositionTrailSL(const ulong ticket, const ENUM_POSITION_TYPE type, do
                   tr.ResultRetcodeDescription());
    }
    return ok;
+}
+
+bool MoveSwingSLToBreakevenOffset(const long pair_id)
+{
+   if(pair_id <= 0) return false;
+
+   double pip_size = PipSizeOf(InpSymbolGold);
+   double offset = InpSwingBEOffsetPips * pip_size;
+   if(offset < 0.0) offset = 0.0;
+
+   bool found = false;
+   bool all_ok = true;
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+
+      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != InpSymbolGold)
+         continue;
+
+      string role = "";
+      long pos_pair_id = 0;
+      string comment = PositionGetString(POSITION_COMMENT);
+      if(!ParsePositionRoleAndPairId(comment, role, pos_pair_id))
+         continue;
+      if(role != "SWING" || pos_pair_id != pair_id)
+         continue;
+
+      ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+      double requested_sl = (type == POSITION_TYPE_BUY)
+                          ? (open_price + offset)
+                          : (open_price - offset);
+      found = true;
+      if(!UpdatePositionTrailSL(ticket, type, requested_sl))
+      {
+         all_ok = false;
+      }
+      else
+      {
+         PrintFormat("SWING BE SL set after SCALP TP: pair=%I64d ticket=%I64u sl=%.5f offset_pips=%.2f",
+                     pair_id,
+                     ticket,
+                     requested_sl,
+                     InpSwingBEOffsetPips);
+      }
+   }
+
+   if(!found)
+      return true;
+   return all_ok;
 }
 
 void ManageSwingTrailing()
@@ -667,9 +754,10 @@ bool GetLastTwoPivotHighs(const string sym, ENUM_TIMEFRAMES tf, int left, int ri
    int bars = iBars(sym, tf);
    if(bars < left+right+10) return false;
 
-   int start = MathMin(lookback, bars - right - 1);
-   // scan from older to newer, keep last two
-   for(int k=start; k>=right+left; k--)
+   int oldest = MathMin(lookback, bars - right - 1);
+   int newest = right + left;
+   // scan from newer to older so idx1/idx2 are truly the latest two confirmed pivots
+   for(int k=newest; k<=oldest; k++)
    {
       double hk = iHigh(sym, tf, k);
       bool ok=true;
@@ -680,10 +768,9 @@ bool GetLastTwoPivotHighs(const string sym, ENUM_TIMEFRAMES tf, int left, int ri
          if(iHigh(sym, tf, k-j) >= hk) { ok=false; break; }
       if(!ok) continue;
 
-      // confirmed pivot high at k
+      // first hit is latest pivot, second hit is previous pivot
       if(idx1 == -1) idx1 = k;
-      else { idx2 = idx1; idx1 = k; }
-      if(idx2 != -1) return true;
+      else { idx2 = k; return true; }
    }
    return false;
 }
@@ -695,8 +782,9 @@ bool GetLastTwoPivotLows(const string sym, ENUM_TIMEFRAMES tf, int left, int rig
    int bars = iBars(sym, tf);
    if(bars < left+right+10) return false;
 
-   int start = MathMin(lookback, bars - right - 1);
-   for(int k=start; k>=right+left; k--)
+   int oldest = MathMin(lookback, bars - right - 1);
+   int newest = right + left;
+   for(int k=newest; k<=oldest; k++)
    {
       double lk = iLow(sym, tf, k);
       bool ok=true;
@@ -708,8 +796,7 @@ bool GetLastTwoPivotLows(const string sym, ENUM_TIMEFRAMES tf, int left, int rig
       if(!ok) continue;
 
       if(idx1 == -1) idx1 = k;
-      else { idx2 = idx1; idx1 = k; }
-      if(idx2 != -1) return true;
+      else { idx2 = k; return true; }
    }
    return false;
 }
@@ -953,6 +1040,10 @@ bool ExecuteTrade(SetupDir dir, double sl, double tp)
    long pair_id = NextPairId();
    string scalp_comment = BuildPairComment("SCALP", pair_id);
    string swing_comment = BuildPairComment("SWING", pair_id);
+   double swing_tp = CalcSwingTPFromScalp(dir, sl, tp);
+   int digits = DigitsOf(InpSymbolGold);
+   if(swing_tp > 0.0)
+      swing_tp = NormalizeDouble(swing_tp, digits);
 
    bool scalp_ok = false;
    bool swing_ok = false;
@@ -961,13 +1052,13 @@ bool ExecuteTrade(SetupDir dir, double sl, double tp)
    {
       scalp_ok = trade.Sell(InpFixedLot, InpSymbolGold, 0.0, sl, tp, scalp_comment);
       if(scalp_ok)
-         swing_ok = trade.Sell(InpFixedLot, InpSymbolGold, 0.0, sl, 0.0, swing_comment);
+         swing_ok = trade.Sell(InpFixedLot, InpSymbolGold, 0.0, sl, swing_tp, swing_comment);
    }
    else if(dir == SETUP_BUY)
    {
       scalp_ok = trade.Buy(InpFixedLot, InpSymbolGold, 0.0, sl, tp, scalp_comment);
       if(scalp_ok)
-         swing_ok = trade.Buy(InpFixedLot, InpSymbolGold, 0.0, sl, 0.0, swing_comment);
+         swing_ok = trade.Buy(InpFixedLot, InpSymbolGold, 0.0, sl, swing_tp, swing_comment);
    }
 
    if(!scalp_ok || !swing_ok)
@@ -1010,7 +1101,6 @@ datetime last_entry_bar = 0;
 void OnTick()
 {
    if(!EnsureSymbols()) return;
-   ManageSwingTrailing();
 
    // 1) On new SMT TF bar: evaluate SMT + PVT and arm setup
    if(IsNewBar(InpSymbolGold, InpSMT_TF, last_smt_bar))
@@ -1059,17 +1149,31 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 
    if((long)HistoryDealGetInteger(trans.deal, DEAL_ENTRY) != DEAL_ENTRY_OUT)
       return;
-   if((long)HistoryDealGetInteger(trans.deal, DEAL_REASON) != DEAL_REASON_SL)
-      return;
    if((long)HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != InpMagic)
       return;
    if(HistoryDealGetString(trans.deal, DEAL_SYMBOL) != InpSymbolGold)
       return;
 
+   long reason = (long)HistoryDealGetInteger(trans.deal, DEAL_REASON);
    string role = "";
    long pair_id = 0;
    string comment = HistoryDealGetString(trans.deal, DEAL_COMMENT);
    if(!ParsePositionRoleAndPairId(comment, role, pair_id))
+      return;
+
+   if(reason == DEAL_REASON_TP && role == "SCALP")
+   {
+      if(InpSwingMoveSLOnScalpTP)
+      {
+         if(!MoveSwingSLToBreakevenOffset(pair_id))
+         {
+            PrintFormat("SCALP TP sync BE move failed or no SWING found: pair=%I64d deal=%I64u", pair_id, trans.deal);
+         }
+      }
+      return;
+   }
+
+   if(reason != DEAL_REASON_SL)
       return;
 
    if(!ClosePairPositionsById(pair_id))
