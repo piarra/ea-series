@@ -44,6 +44,10 @@ input double TrailingDistancePoints   = 400; // trail distance in points
 // Safety
 input double MaxSpreadPoints    = 320;
 input int    Magic              = 20260228;
+input bool   EnablePropFirmLimits      = true; // prop-firm style hard guard
+input double DailyMaxLossPercent       = 2.5;  // daily loss limit (% of day-start balance)
+input double MaxAccountLossPercent     = 8.0;  // total loss limit (% of initial balance)
+input bool   ResetPropFirmStateOnInit  = false; // true: reset baselines/locks at EA init
 
 datetime last_bar_time = 0;
 
@@ -77,6 +81,13 @@ double sym_meta_max_lot = 0.0;
 double sym_meta_lot_step = 0.0;
 int sym_meta_stops_level = 0;
 bool sym_meta_ready = false;
+double prop_initial_balance = 0.0;
+double prop_day_start_balance = 0.0;
+int prop_day_key = 0;
+bool prop_daily_locked = false;
+bool prop_account_locked = false;
+bool prop_daily_log_sent = false;
+bool prop_account_log_sent = false;
 
 void ReleaseHandle(int &h){
    if(h != INVALID_HANDLE){
@@ -677,6 +688,175 @@ void SetCooldownBars(string sym, ENUM_TIMEFRAMES tf, int bars, long posType){
    GlobalVariableSet(GV_CooldownName(sym, posType), (double)nextBar);
 }
 
+int MakeDayKey(datetime t){
+   MqlDateTime ts;
+   TimeToStruct(t, ts);
+   return ts.year*10000 + ts.mon*100 + ts.day;
+}
+
+string GV_PropPrefix(){
+   long login = (long)AccountInfoInteger(ACCOUNT_LOGIN);
+   return "MRDCA_PROP_"+(string)login+"_"+(string)Magic;
+}
+
+string GV_PropInitialBalanceName(){ return GV_PropPrefix()+"_INIT_BAL"; }
+string GV_PropDayStartBalanceName(){ return GV_PropPrefix()+"_DAY_BAL"; }
+string GV_PropDayKeyName(){ return GV_PropPrefix()+"_DAY_KEY"; }
+string GV_PropDailyLockName(){ return GV_PropPrefix()+"_DAY_LOCK"; }
+string GV_PropAccountLockName(){ return GV_PropPrefix()+"_ACC_LOCK"; }
+
+void SavePropFirmState(){
+   GlobalVariableSet(GV_PropInitialBalanceName(), prop_initial_balance);
+   GlobalVariableSet(GV_PropDayStartBalanceName(), prop_day_start_balance);
+   GlobalVariableSet(GV_PropDayKeyName(), (double)prop_day_key);
+   GlobalVariableSet(GV_PropDailyLockName(), prop_daily_locked ? 1.0 : 0.0);
+   GlobalVariableSet(GV_PropAccountLockName(), prop_account_locked ? 1.0 : 0.0);
+}
+
+void InitPropFirmState(){
+   if(!EnablePropFirmLimits) return;
+
+   datetime now = TimeTradeServer();
+   if(now<=0) now = TimeCurrent();
+   int todayKey = MakeDayKey(now);
+   double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+   if(bal<=0.0) bal = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   if(ResetPropFirmStateOnInit){
+      prop_initial_balance = bal;
+      prop_day_start_balance = bal;
+      prop_day_key = todayKey;
+      prop_daily_locked = false;
+      prop_account_locked = false;
+      SavePropFirmState();
+      return;
+   }
+
+   if(GlobalVariableCheck(GV_PropInitialBalanceName()))
+      prop_initial_balance = GlobalVariableGet(GV_PropInitialBalanceName());
+   else
+      prop_initial_balance = bal;
+
+   if(GlobalVariableCheck(GV_PropDayStartBalanceName()))
+      prop_day_start_balance = GlobalVariableGet(GV_PropDayStartBalanceName());
+   else
+      prop_day_start_balance = bal;
+
+   if(GlobalVariableCheck(GV_PropDayKeyName()))
+      prop_day_key = (int)GlobalVariableGet(GV_PropDayKeyName());
+   else
+      prop_day_key = todayKey;
+
+   if(GlobalVariableCheck(GV_PropDailyLockName()))
+      prop_daily_locked = (GlobalVariableGet(GV_PropDailyLockName()) > 0.5);
+   else
+      prop_daily_locked = false;
+
+   if(GlobalVariableCheck(GV_PropAccountLockName()))
+      prop_account_locked = (GlobalVariableGet(GV_PropAccountLockName()) > 0.5);
+   else
+      prop_account_locked = false;
+
+   if(prop_initial_balance<=0.0) prop_initial_balance = bal;
+   if(prop_day_key!=todayKey || prop_day_start_balance<=0.0){
+      prop_day_key = todayKey;
+      prop_day_start_balance = bal;
+      prop_daily_locked = false;
+   }
+   SavePropFirmState();
+}
+
+void RefreshPropFirmDay(){
+   if(!EnablePropFirmLimits) return;
+   datetime now = TimeTradeServer();
+   if(now<=0) now = TimeCurrent();
+   int todayKey = MakeDayKey(now);
+   if(prop_day_key == todayKey) return;
+
+   double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+   if(bal<=0.0) bal = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   prop_day_key = todayKey;
+   prop_day_start_balance = bal;
+   prop_daily_locked = false;
+   prop_daily_log_sent = false;
+   SavePropFirmState();
+}
+
+void CloseAllEaPositions(){
+   for(int i=PositionsTotal()-1; i>=0; --i){
+      if(PositionGetTicket(i)){
+         ulong ticket = (ulong)PositionGetInteger(POSITION_TICKET);
+         long pm = PositionGetInteger(POSITION_MAGIC);
+         if(pm==Magic){
+            if(!trade.PositionClose(ticket)){
+               PrintFormat("PropFirm close failed ticket=%I64u ret=%u (%s) err=%d",
+                           ticket,
+                           trade.ResultRetcode(),
+                           trade.ResultRetcodeDescription(),
+                           GetLastError());
+            }
+         }
+      }
+   }
+}
+
+bool EnforcePropFirmLimits(){
+   if(!EnablePropFirmLimits) return false;
+   RefreshPropFirmDay();
+
+   double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   double dailyLimit = 0.0;
+   double totalLimit = 0.0;
+   double dailyLoss = 0.0;
+   double totalLoss = 0.0;
+   bool stateChanged = false;
+
+   if(DailyMaxLossPercent>0.0 && prop_day_start_balance>0.0){
+      dailyLimit = prop_day_start_balance * DailyMaxLossPercent * 0.01;
+      dailyLoss = prop_day_start_balance - eq;
+      if(dailyLoss >= dailyLimit){
+         if(!prop_daily_locked) stateChanged = true;
+         prop_daily_locked = true;
+      }
+   }
+
+   if(MaxAccountLossPercent>0.0 && prop_initial_balance>0.0){
+      totalLimit = prop_initial_balance * MaxAccountLossPercent * 0.01;
+      totalLoss = prop_initial_balance - eq;
+      if(totalLoss >= totalLimit){
+         if(!prop_account_locked) stateChanged = true;
+         prop_account_locked = true;
+      }
+   }
+
+   bool blocked = (prop_daily_locked || prop_account_locked);
+   if(!blocked){
+      if(stateChanged) SavePropFirmState();
+      return false;
+   }
+
+   if(stateChanged) SavePropFirmState();
+
+   if(prop_daily_locked && !prop_daily_log_sent){
+      PrintFormat("PropFirm daily lock activated: loss=%.2f limit=%.2f",
+                  dailyLoss, dailyLimit);
+      prop_daily_log_sent = true;
+   }
+   if(prop_account_locked && !prop_account_log_sent){
+      PrintFormat("PropFirm account lock activated: loss=%.2f limit=%.2f",
+                  totalLoss, totalLimit);
+      prop_account_log_sent = true;
+   }
+
+   CloseAllEaPositions();
+   ResetRunnerState(POSITION_TYPE_BUY);
+   ResetRunnerState(POSITION_TYPE_SELL);
+   buy_dca_step_locked = 0.0;
+   sell_dca_step_locked = 0.0;
+   return true;
+}
+
 // ---------------- main ----------------
 int OnInit(){
    trade.SetExpertMagicNumber(Magic);
@@ -684,6 +864,7 @@ int OnInit(){
    ReleaseIndicatorCache();
    EnsureSymbolMeta(InpSymbol);
    EnsureIndicatorHandles(InpSymbol);
+   InitPropFirmState();
    return(INIT_SUCCEEDED);
 }
 
@@ -694,6 +875,9 @@ void OnDeinit(const int reason){
 void OnTick(){
    string sym = InpSymbol;
    if(!SymbolSelect(sym, true)) return;
+
+   if(EnforcePropFirmLimits()) return;
+
    // Refresh symbol constants once per tick, then reuse in hot paths.
    sym_meta_ready = false;
    EnsureSymbolMeta(sym);
