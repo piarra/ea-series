@@ -18,7 +18,6 @@ const DEPOSIT = process.env.BT_DEPOSIT || "10000";
 const CURRENCY = process.env.BT_CURRENCY || "USD";
 const LEVERAGE = process.env.BT_LEVERAGE || "100";
 const TIMEOUT_MS = Number(process.env.BT_TIMEOUT_MS || "1800000");
-const LOG_RETENTION_DAYS = Number(process.env.BT_LOG_RETENTION_DAYS || "7");
 
 function runChecked(command, args, label) {
   const result = spawnSync(command, args, { encoding: "utf8" });
@@ -115,11 +114,9 @@ function collectTesterEvidence(terminalDataDir, symbol) {
   return { logPath, missingLine, summaryLines };
 }
 
-function cleanupOldWindowsLogs(terminalDataDir) {
-  const retentionDays = Number.isFinite(LOG_RETENTION_DAYS) ? LOG_RETENTION_DAYS : 7;
+function cleanupLatestBacktestLogs(terminalDataDir, runStartedIso) {
   const script =
-    `$days=${retentionDays};` +
-    `$cutoff=(Get-Date).AddDays(-$days);` +
+    `$cutoff=[DateTime]::Parse(${psQuote(runStartedIso)});` +
     `$removed=0;` +
     `$dirs=@(` +
     `${psQuote(`${terminalDataDir}\\Logs`)},` +
@@ -128,7 +125,7 @@ function cleanupOldWindowsLogs(terminalDataDir) {
     `);` +
     `foreach($d in $dirs){` +
     ` if(Test-Path $d){` +
-    `  $files=Get-ChildItem -Path $d -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cutoff };` +
+    `  $files=Get-ChildItem -Path $d -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $cutoff };` +
     `  if($files){ $files | Remove-Item -Force -ErrorAction SilentlyContinue; $removed += @($files).Count }` +
     ` }` +
     `};` +
@@ -136,7 +133,7 @@ function cleanupOldWindowsLogs(terminalDataDir) {
     `if(Test-Path $testerRoot){` +
     ` $logDirs=Get-ChildItem -Path $testerRoot -Recurse -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ieq 'logs' };` +
     ` foreach($ld in $logDirs){` +
-    `  $files=Get-ChildItem -Path $ld.FullName -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cutoff };` +
+    `  $files=Get-ChildItem -Path $ld.FullName -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $cutoff };` +
     `  if($files){ $files | Remove-Item -Force -ErrorAction SilentlyContinue; $removed += @($files).Count }` +
     ` }` +
     `};` +
@@ -148,6 +145,8 @@ function cleanupOldWindowsLogs(terminalDataDir) {
 }
 
 function main() {
+  const runStartedIso = new Date().toISOString();
+
   console.log("[1/6] Building EA before backtest");
   runChecked("node", [path.join(ROOT_DIR, "scripts", "build-mt5.js")], "Pre-backtest build");
 
@@ -308,14 +307,14 @@ function main() {
   ].join("\n");
   writeFileSync(summaryFile, summaryText + "\n", "utf8");
 
-  console.log("[6/6] Cleaning old Windows logs");
-  const removedCount = cleanupOldWindowsLogs(terminalDataDir);
+  console.log("[6/6] Cleaning latest backtest logs on Windows");
+  const removedCount = cleanupLatestBacktestLogs(terminalDataDir, runStartedIso);
 
   console.log("[7/7] Completed");
   console.log(`Range: ${FROM_DATE} -> ${TO_DATE}`);
   console.log(`Symbol: ${selectedSymbol}`);
   console.log(`Report prefix: ${selectedReportPrefix}`);
-  console.log(`Removed old logs on Windows: ${removedCount} (retention ${LOG_RETENTION_DAYS} days)`);
+  console.log(`Removed latest backtest logs on Windows: ${removedCount}`);
   console.log(`Local artifacts: ${localResultDir}`);
   if (reportNames.length > 0) {
     reportNames.forEach((name) => console.log(` - ${path.join(localResultDir, name)}`));
