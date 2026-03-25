@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "scripts": {
-    "build": "node scripts/build-mt5.js",
+    "build": "node ../scripts/build-mt5.js --source ./DCA2.mq5",
     "backtest": "node scripts/backtest-mt5.js"
   }
 }
