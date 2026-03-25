@@ -1,0 +1,9 @@
+{
+  "name": "ea-usdjpy-rb-build",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "build": "node ../scripts/build-mt5.js --source ./USDJPY_RB.mq5",
+    "backtest": "node scripts/backtest-mt5.js"
+  }
+}
