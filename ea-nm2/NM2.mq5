@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.85"
+#property version   "1.90"
 
 // v1.24 ナンピン停止ルール追加, ナンピン幅の厳格化
 // v1.25 AdxMaxForNanpinのデフォルトを20.0に、DiGapMinのデフォルトを2.0に
@@ -63,6 +63,11 @@
 // v1.83 バスケット損切りATR倍率のinput参照を整理
 // v1.84 EnableBasketLossStopと関連ロジックを削除
 // v1.85 max未到達時の最終段損切りラインをN+2基準へ変更
+// v1.86 N+2最終段損切りは20秒待機後、価格が閾値より不利なら実行
+// v1.87 レンジ上限/下限で保有した不利ポジションの早期損切りオプションを追加
+// v1.88 completed basketランナーのSL更新失敗時は成行クローズへフォールバック
+// v1.89 completed basketの継続トレール失敗では即クローズせず、初回保護SL設定失敗時のみフォールバック
+// v1.90 RangeEdgeEarlyCutを標準有効化し、初回/浅い段の逆張り停止とL3+撤退を前倒し
 
 #include <Trade/Trade.mqh>
 
@@ -83,6 +88,7 @@ const int kClosedTicketCountCap = 4096;
 const int kRunnerTrailStateCap = 512;
 const double kDeepLevelTrailLockPoints = 2.0;
 const double kDeepRunnerRevisitCloseBandRatio = 0.20;
+const int kFinalLevelStopDelaySeconds = 20;
 }
 
 enum RegimeState
@@ -156,8 +162,26 @@ input group "RISK CONTROL"
 input bool EnableBalanceGuard = false;
 input double MinAccountBalance = 0.0;
 input bool ClosePositionsOnLowBalance = false;
+input bool EnableRangeEdgeEarlyCut = true;
+input int RangeEdgeLookbackBars = 30;
+input double RangeEdgeNearEdgeAtrMultiplier = 0.30;
+input double RangeEdgeEarlyCutAtrMultiplier = 0.80;
+input int RangeEdgeEarlyCutMaxLevel = 2;
+input int RangeEdgeEarlyCutMaxBars = 180;
+input bool EnableAdaptiveFinalLevelStop = true;
+input double FinalLevelStopAtrMultiplierNormal = 0.50;
+input double FinalLevelStopAtrMultiplierTrend = 1.20;
+input int FinalLevelStopRequireRegimePersistenceBars = 3;
 input int CombinedProfitCloseLevel = 3;
 input double CombinedProfitCloseAtrMultiplier = 3.80;
+input int DeepLevelEntryStopLevel = 3;
+input double DeepLevelAdxMax = 16.0;
+input double DeepLevelDirectionalAtrLimit = 2.20;
+input bool DisableDeepCounterTrendAdds = true;
+input int OpenRejectRetryCount = 2;
+input int OpenRejectRetryDelayMs = 250;
+input int OpenRejectCooldownSeconds = 60;
+input int OpenRejectDailyLimit = 12;
 
 input group "MANAGEMENT SERVER"
 input string ManagementServerHost = "";
@@ -340,8 +364,26 @@ struct NM2Params
   bool enable_balance_guard;
   double min_account_balance;
   bool close_positions_on_low_balance;
+  bool enable_range_edge_early_cut;
+  int range_edge_lookback_bars;
+  double range_edge_near_edge_atr_multiplier;
+  double range_edge_early_cut_atr_multiplier;
+  int range_edge_early_cut_max_level;
+  int range_edge_early_cut_max_bars;
+  bool enable_adaptive_final_level_stop;
+  double final_level_stop_atr_multiplier_normal;
+  double final_level_stop_atr_multiplier_trend;
+  int final_level_stop_require_regime_persistence_bars;
   int combined_profit_close_level;
   double combined_profit_close_atr_multiplier;
+  int deep_level_entry_stop_level;
+  double deep_level_adx_max;
+  double deep_level_directional_atr_limit;
+  bool disable_deep_counter_trend_adds;
+  int open_reject_retry_count;
+  int open_reject_retry_delay_ms;
+  int open_reject_cooldown_seconds;
+  int open_reject_daily_limit;
   bool no_martingale;
   bool double_second_lot;
 };
@@ -376,6 +418,13 @@ int runner_revisit_types[];
 double runner_revisit_rebound_prices[];
 double runner_revisit_deep_prices[];
 bool runner_revisit_rebound_touched[];
+string basket_log_symbols[];
+int basket_log_ids[];
+int basket_log_types[];
+double basket_log_net_profit[];
+int basket_log_close_counts[];
+int basket_log_max_levels[];
+bool basket_log_reported[];
 datetime news_last_checked_server_time = 0;
 bool news_last_check_blocked = false;
 ulong news_last_event_id = 0;
@@ -459,6 +508,10 @@ struct SymbolState
   ulong sell_trail_sl_cooldown_until_ms;
   bool buy_stop_active;
   bool sell_stop_active;
+  datetime buy_final_sl_pending_time;
+  datetime sell_final_sl_pending_time;
+  double buy_final_sl_pending_price;
+  double sell_final_sl_pending_price;
   int buy_skip_levels;
   int sell_skip_levels;
   double buy_skip_distance;
@@ -470,8 +523,16 @@ struct SymbolState
   int regime_down_count;
   int regime_off_count;
   int regime_cooling_left;
+  datetime regime_started_time;
+  int buy_basket_closed_count;
+  int buy_basket_win_count;
+  int sell_basket_closed_count;
+  int sell_basket_win_count;
   datetime last_bar_time;
   datetime last_regime_bar_time;
+  datetime open_reject_cooldown_until;
+  int open_reject_day_key;
+  int open_reject_daily_count;
 };
 
 SymbolState symbols[NM2::kMaxSymbols];
@@ -487,6 +548,52 @@ bool IsManagedMagic(const int magic)
   return false;
 }
 
+int FindBasketLogIndex(const string symbol, ENUM_POSITION_TYPE type, int basket_id)
+{
+  int count = ArraySize(basket_log_ids);
+  for (int i = 0; i < count; ++i)
+  {
+    if (basket_log_ids[i] == basket_id
+        && basket_log_types[i] == (int)type
+        && basket_log_symbols[i] == symbol)
+      return i;
+  }
+  return -1;
+}
+
+void AccumulateBasketLog(const string symbol,
+                         ENUM_POSITION_TYPE type,
+                         int basket_id,
+                         int level,
+                         double net_profit)
+{
+  if (basket_id <= 0 || StringLen(symbol) <= 0)
+    return;
+  int idx = FindBasketLogIndex(symbol, type, basket_id);
+  if (idx < 0)
+  {
+    idx = ArraySize(basket_log_ids);
+    ArrayResize(basket_log_symbols, idx + 1);
+    ArrayResize(basket_log_ids, idx + 1);
+    ArrayResize(basket_log_types, idx + 1);
+    ArrayResize(basket_log_net_profit, idx + 1);
+    ArrayResize(basket_log_close_counts, idx + 1);
+    ArrayResize(basket_log_max_levels, idx + 1);
+    ArrayResize(basket_log_reported, idx + 1);
+    basket_log_symbols[idx] = symbol;
+    basket_log_ids[idx] = basket_id;
+    basket_log_types[idx] = (int)type;
+    basket_log_net_profit[idx] = 0.0;
+    basket_log_close_counts[idx] = 0;
+    basket_log_max_levels[idx] = 0;
+    basket_log_reported[idx] = false;
+  }
+  basket_log_net_profit[idx] += net_profit;
+  basket_log_close_counts[idx]++;
+  if (level > basket_log_max_levels[idx])
+    basket_log_max_levels[idx] = level;
+}
+
 void ClearRunnerTrailTracking()
 {
   ArrayResize(runner_trail_tickets, 0);
@@ -497,6 +604,17 @@ void ClearRunnerTrailTracking()
   ArrayResize(runner_revisit_rebound_prices, 0);
   ArrayResize(runner_revisit_deep_prices, 0);
   ArrayResize(runner_revisit_rebound_touched, 0);
+}
+
+void ClearBasketLogTracking()
+{
+  ArrayResize(basket_log_symbols, 0);
+  ArrayResize(basket_log_ids, 0);
+  ArrayResize(basket_log_types, 0);
+  ArrayResize(basket_log_net_profit, 0);
+  ArrayResize(basket_log_close_counts, 0);
+  ArrayResize(basket_log_max_levels, 0);
+  ArrayResize(basket_log_reported, 0);
 }
 
 void ClearCloseTracking()
@@ -607,6 +725,7 @@ void InitCumulativeLotTracking()
   cumulative_lot_start_time = TimeCurrent();
   ClearCloseTracking();
   ClearRunnerTrailTracking();
+  ClearBasketLogTracking();
 }
 
 bool ClosePositionWithLog(const ulong ticket, const string context)
@@ -618,11 +737,24 @@ bool ClosePositionWithLog(const ulong ticket, const string context)
   string symbol = "";
   int magic = 0;
   bool has_info = false;
+  string comment = "";
+  int basket_id = 0;
+  int level = 0;
+  ENUM_POSITION_TYPE position_type = POSITION_TYPE_BUY;
+  double position_profit = 0.0;
+  double position_swap = 0.0;
+  double position_commission = 0.0;
   if (PositionSelectByTicket(ticket))
   {
     volume = PositionGetDouble(POSITION_VOLUME);
     symbol = PositionGetString(POSITION_SYMBOL);
     magic = (int)PositionGetInteger(POSITION_MAGIC);
+    comment = PositionGetString(POSITION_COMMENT);
+    basket_id = BasketIdFromComment(comment);
+    level = ExtractLevelFromComment(comment);
+    position_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+    position_profit = PositionGetDouble(POSITION_PROFIT);
+    position_swap = PositionGetDouble(POSITION_SWAP);
     has_info = true;
   }
   bool closed = close_trade.PositionClose(ticket);
@@ -634,15 +766,34 @@ bool ClosePositionWithLog(const ulong ticket, const string context)
     {
       cumulative_trade_lots += volume;
       MarkTicketCounted(ticket);
+      ulong deal_ticket = close_trade.ResultDeal();
+      double deal_profit = 0.0;
+      double deal_swap = position_swap;
+      double deal_commission = position_commission;
+      double net_profit = position_profit + position_swap + position_commission;
+      if (deal_ticket > 0)
+      {
+        if (HistoryDealSelect(deal_ticket)
+            || (HistorySelect(TimeCurrent() - 86400, TimeCurrent() + 60) && HistoryDealSelect(deal_ticket)))
+        {
+          deal_profit = HistoryDealGetDouble(deal_ticket, DEAL_PROFIT);
+          deal_swap = HistoryDealGetDouble(deal_ticket, DEAL_SWAP);
+          deal_commission = HistoryDealGetDouble(deal_ticket, DEAL_COMMISSION);
+          net_profit = deal_profit + deal_swap + deal_commission;
+        }
+      }
+      AccumulateBasketLog(symbol, position_type, basket_id, level, net_profit);
       if (StringLen(context) > 0)
       {
-        PrintFormat("Position closed: ticket=%I64u symbol=%s lots=%.2f total=%.2f (%s)",
-                    ticket, symbol, volume, cumulative_trade_lots, context);
+        PrintFormat("Position closed: ticket=%I64u symbol=%s lots=%.2f total=%.2f basket=%d level=%d deal_profit=%.2f deal_swap=%.2f deal_commission=%.2f net_profit=%.2f (%s)",
+                    ticket, symbol, volume, cumulative_trade_lots, basket_id, level,
+                    deal_profit, deal_swap, deal_commission, net_profit, context);
       }
       else
       {
-        PrintFormat("Position closed: ticket=%I64u symbol=%s lots=%.2f total=%.2f",
-                    ticket, symbol, volume, cumulative_trade_lots);
+        PrintFormat("Position closed: ticket=%I64u symbol=%s lots=%.2f total=%.2f basket=%d level=%d deal_profit=%.2f deal_swap=%.2f deal_commission=%.2f net_profit=%.2f",
+                    ticket, symbol, volume, cumulative_trade_lots, basket_id, level,
+                    deal_profit, deal_swap, deal_commission, net_profit);
       }
     }
   }
@@ -822,6 +973,10 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.sell_trail_sl_cooldown_until_ms = 0;
   state.buy_stop_active = false;
   state.sell_stop_active = false;
+  state.buy_final_sl_pending_time = 0;
+  state.sell_final_sl_pending_time = 0;
+  state.buy_final_sl_pending_price = 0.0;
+  state.sell_final_sl_pending_price = 0.0;
   state.buy_skip_levels = 0;
   state.sell_skip_levels = 0;
   state.buy_skip_distance = 0.0;
@@ -833,8 +988,16 @@ void InitSymbolState(SymbolState &state, const string logical, const string brok
   state.regime_down_count = 0;
   state.regime_off_count = 0;
   state.regime_cooling_left = 0;
+  state.regime_started_time = 0;
+  state.buy_basket_closed_count = 0;
+  state.buy_basket_win_count = 0;
+  state.sell_basket_closed_count = 0;
+  state.sell_basket_win_count = 0;
   state.last_bar_time = 0;
   state.last_regime_bar_time = 0;
+  state.open_reject_cooldown_until = 0;
+  state.open_reject_day_key = 0;
+  state.open_reject_daily_count = 0;
   ClearLevelPrices(state.buy_level_price);
   ClearLevelPrices(state.sell_level_price);
   state.buy_grid_step = 0.0;
@@ -904,8 +1067,26 @@ void ApplyCommonParams(NM2Params &params)
   params.enable_balance_guard = EnableBalanceGuard;
   params.min_account_balance = MinAccountBalance;
   params.close_positions_on_low_balance = ClosePositionsOnLowBalance;
+  params.enable_range_edge_early_cut = EnableRangeEdgeEarlyCut;
+  params.range_edge_lookback_bars = RangeEdgeLookbackBars;
+  params.range_edge_near_edge_atr_multiplier = RangeEdgeNearEdgeAtrMultiplier;
+  params.range_edge_early_cut_atr_multiplier = RangeEdgeEarlyCutAtrMultiplier;
+  params.range_edge_early_cut_max_level = RangeEdgeEarlyCutMaxLevel;
+  params.range_edge_early_cut_max_bars = RangeEdgeEarlyCutMaxBars;
+  params.enable_adaptive_final_level_stop = EnableAdaptiveFinalLevelStop;
+  params.final_level_stop_atr_multiplier_normal = FinalLevelStopAtrMultiplierNormal;
+  params.final_level_stop_atr_multiplier_trend = FinalLevelStopAtrMultiplierTrend;
+  params.final_level_stop_require_regime_persistence_bars = FinalLevelStopRequireRegimePersistenceBars;
   params.combined_profit_close_level = CombinedProfitCloseLevel;
   params.combined_profit_close_atr_multiplier = CombinedProfitCloseAtrMultiplier;
+  params.deep_level_entry_stop_level = DeepLevelEntryStopLevel;
+  params.deep_level_adx_max = DeepLevelAdxMax;
+  params.deep_level_directional_atr_limit = DeepLevelDirectionalAtrLimit;
+  params.disable_deep_counter_trend_adds = DisableDeepCounterTrendAdds;
+  params.open_reject_retry_count = OpenRejectRetryCount;
+  params.open_reject_retry_delay_ms = OpenRejectRetryDelayMs;
+  params.open_reject_cooldown_seconds = OpenRejectCooldownSeconds;
+  params.open_reject_daily_limit = OpenRejectDailyLimit;
   params.double_second_lot = false;
 }
 
@@ -1627,6 +1808,39 @@ int BasketIdFromComment(const string comment)
   return basket_id;
 }
 
+int DayKey(datetime t)
+{
+  MqlDateTime dt;
+  TimeToStruct(t, dt);
+  return dt.year * 10000 + dt.mon * 100 + dt.day;
+}
+
+int RegimePersistenceBars(const SymbolState &state, const string symbol)
+{
+  if (state.regime_started_time <= 0)
+    return 0;
+  int bars = iBarShift(symbol, _Period, state.regime_started_time, false);
+  if (bars < 0)
+    bars = 0;
+  return bars;
+}
+
+double BasketDirectionalExtension(const BasketInfo &basket, ENUM_POSITION_TYPE type, double bid, double ask)
+{
+  if (type == POSITION_TYPE_BUY)
+    return MathMax(0.0, basket.max_price - bid);
+  return MathMax(0.0, ask - basket.min_price);
+}
+
+bool IsCounterTrendSide(const SymbolState &state, ENUM_POSITION_TYPE type)
+{
+  if (type == POSITION_TYPE_BUY)
+    return state.regime == REGIME_TREND_DOWN;
+  if (type == POSITION_TYPE_SELL)
+    return state.regime == REGIME_TREND_UP;
+  return false;
+}
+
 int NextBasketId(const SymbolState &state)
 {
   if (state.next_basket_id > 0)
@@ -1678,6 +1892,55 @@ bool HasBasketPosition(const SymbolState &state, ENUM_POSITION_TYPE type, int ba
     return true;
   }
   return false;
+}
+
+void EmitClosedBasketSummaries(SymbolState &state)
+{
+  int count = ArraySize(basket_log_ids);
+  for (int i = 0; i < count; ++i)
+  {
+    if (basket_log_reported[i])
+      continue;
+    if (basket_log_symbols[i] != state.broker_symbol)
+      continue;
+    int basket_id = basket_log_ids[i];
+    ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)basket_log_types[i];
+    if (basket_id <= 0)
+      continue;
+    if (HasBasketPosition(state, type, basket_id))
+      continue;
+
+    double net_profit = basket_log_net_profit[i];
+    bool win = net_profit > 0.0;
+    if (type == POSITION_TYPE_BUY)
+    {
+      state.buy_basket_closed_count++;
+      if (win)
+        state.buy_basket_win_count++;
+    }
+    else if (type == POSITION_TYPE_SELL)
+    {
+      state.sell_basket_closed_count++;
+      if (win)
+        state.sell_basket_win_count++;
+    }
+
+    int total_closed = state.buy_basket_closed_count + state.sell_basket_closed_count;
+    int total_wins = state.buy_basket_win_count + state.sell_basket_win_count;
+    double buy_wr = (state.buy_basket_closed_count > 0)
+                    ? (100.0 * state.buy_basket_win_count / state.buy_basket_closed_count) : 0.0;
+    double sell_wr = (state.sell_basket_closed_count > 0)
+                     ? (100.0 * state.sell_basket_win_count / state.sell_basket_closed_count) : 0.0;
+    double total_wr = (total_closed > 0) ? (100.0 * total_wins / total_closed) : 0.0;
+
+    PrintFormat("Basket result: %s type=%d basket=%d closes=%d max_level=%d net_profit=%.2f win=%s buy_wr=%.1f%% (%d/%d) sell_wr=%.1f%% (%d/%d) total_wr=%.1f%% (%d/%d)",
+                state.broker_symbol, (int)type, basket_id, basket_log_close_counts[i], basket_log_max_levels[i],
+                net_profit, win ? "true" : "false",
+                buy_wr, state.buy_basket_win_count, state.buy_basket_closed_count,
+                sell_wr, state.sell_basket_win_count, state.sell_basket_closed_count,
+                total_wr, total_wins, total_closed);
+    basket_log_reported[i] = true;
+  }
 }
 
 void RemoveCompletedBasketAt(int &basket_ids[], int &count, int index)
@@ -2287,8 +2550,13 @@ bool CanAddBasketBySafetyGuard(const SymbolState &state,
     double price = PositionGetDouble(POSITION_PRICE_OPEN);
     basket_volumes[idx] += volume;
     basket_values[idx] += volume * price;
-    if (PositionGetDouble(POSITION_SL) <= 0.0)
-      basket_missing_sl[idx] = true;
+    double sl = PositionGetDouble(POSITION_SL);
+    if (sl <= 0.0)
+    {
+      bool protected_by_internal_trail = (!state.params.use_take_profit_trail_sl && FindRunnerTrailIndex(ticket) >= 0);
+      if (!protected_by_internal_trail)
+        basket_missing_sl[idx] = true;
+    }
   }
 
   if (basket_count <= 0)
@@ -2816,6 +3084,7 @@ void UpdateRegime(SymbolState &state, double adx_now, double di_plus_now, double
 
   if (state.regime != prev)
   {
+    state.regime_started_time = confirmed_bar_time;
     SendLog(BuildRegimeLogMessage(state, prev));
     PrintFormat("Regime changed: %s -> %s (%s)", RegimeName(prev), RegimeName(state.regime), state.broker_symbol);
   }
@@ -3034,6 +3303,29 @@ bool UpdatePositionTrailSL(const SymbolState &state,
                 symbol, ticket, (int)type, requested_sl, tr.ResultRetcode(), tr.ResultRetcodeDescription());
   }
   return ok;
+}
+
+bool HasRunnerBrokerSL(const SymbolState &state, ulong ticket, ENUM_POSITION_TYPE type)
+{
+  if (!PositionSelectByTicket(ticket))
+    return false;
+  if (PositionGetInteger(POSITION_MAGIC) != state.params.magic_number)
+    return false;
+  if (PositionGetString(POSITION_SYMBOL) != state.broker_symbol)
+    return false;
+  if ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != type)
+    return false;
+  return PositionGetDouble(POSITION_SL) > 0.0;
+}
+
+void LogRunnerProtectionDegraded(const SymbolState &state,
+                                 ENUM_POSITION_TYPE type,
+                                 int basket_id,
+                                 ulong ticket,
+                                 const string reason)
+{
+  PrintFormat("Runner protection degraded: %s type=%d basket=%d ticket=%I64u reason=%s",
+              state.broker_symbol, (int)type, basket_id, ticket, reason);
 }
 
 bool ClearPositionSL(const SymbolState &state,
@@ -3472,9 +3764,6 @@ void ManageRunnerTrailing(SymbolState &state,
     {
       if (ShouldCloseRunnerByRevisit(state, keep_ticket, type, market_price))
         continue;
-      // L3+ runner waits for revisit condition; skip generic trail close while armed.
-      if (FindRunnerRevisitIndex(keep_ticket) >= 0)
-        continue;
     }
     else
     {
@@ -3490,7 +3779,15 @@ void ManageRunnerTrailing(SymbolState &state,
     if (use_trail_sl)
     {
       RemoveRunnerTrailTicket(keep_ticket);
-      UpdatePositionTrailSL(state, keep_ticket, type, requested_stop);
+      if (!UpdatePositionTrailSL(state, keep_ticket, type, requested_stop))
+      {
+        LogRunnerProtectionDegraded(state, type, basket_id, keep_ticket, "completed_runner_trail_sl_update_failed");
+        continue;
+      }
+      if (!HasRunnerBrokerSL(state, keep_ticket, type))
+      {
+        LogRunnerProtectionDegraded(state, type, basket_id, keep_ticket, "completed_runner_sl_missing_after_update");
+      }
       continue;
     }
 
@@ -3748,13 +4045,25 @@ bool UpdateBasketSL(SymbolState &state,
   return all_protected;
 }
 
-bool TryOpen(const SymbolState &state,
+bool TryOpen(SymbolState &state,
              const string symbol,
              ENUM_ORDER_TYPE order_type,
              double lot,
              const string comment = "",
              int level = 0)
 {
+  datetime now = TimeCurrent();
+  if (state.open_reject_day_key != DayKey(now))
+  {
+    state.open_reject_day_key = DayKey(now);
+    state.open_reject_daily_count = 0;
+  }
+  if (state.open_reject_cooldown_until > now)
+    return false;
+  if (state.params.open_reject_daily_limit > 0
+      && state.open_reject_daily_count >= state.params.open_reject_daily_limit)
+    return false;
+
   double multiplier = 1.0;
   if (level == 1)
   {
@@ -3773,17 +4082,53 @@ bool TryOpen(const SymbolState &state,
   if (filling == ORDER_FILLING_FOK || filling == ORDER_FILLING_IOC || filling == ORDER_FILLING_RETURN)
     trade.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)filling);
   bool ok = false;
-  if (order_type == ORDER_TYPE_BUY)
-    ok = trade.Buy(lot, symbol, 0.0, 0.0, 0.0, comment);
-  else if (order_type == ORDER_TYPE_SELL)
-    ok = trade.Sell(lot, symbol, 0.0, 0.0, 0.0, comment);
-
-  if (!ok)
+  int max_attempts = state.params.open_reject_retry_count;
+  if (max_attempts < 0)
+    max_attempts = 0;
+  for (int attempt = 0; attempt <= max_attempts; ++attempt)
   {
-    PrintFormat("Order failed: type=%d lot=%.2f retcode=%d %s",
-                order_type, lot, trade.ResultRetcode(), trade.ResultRetcodeDescription());
+    MqlTick tick;
+    double bid = 0.0;
+    double ask = 0.0;
+    double spread_points = 0.0;
+    if (SymbolInfoTick(symbol, tick))
+    {
+      bid = tick.bid;
+      ask = tick.ask;
+      spread_points = SpreadPoints(state, bid, ask);
+    }
+
+    if (order_type == ORDER_TYPE_BUY)
+      ok = trade.Buy(lot, symbol, 0.0, 0.0, 0.0, comment);
+    else if (order_type == ORDER_TYPE_SELL)
+      ok = trade.Sell(lot, symbol, 0.0, 0.0, 0.0, comment);
+
+    if (ok)
+      return true;
+
+    uint retcode = trade.ResultRetcode();
+    PrintFormat("Order failed: type=%d lot=%.2f level=%d retcode=%d %s bid=%.5f ask=%.5f spread_points=%.1f regime=%s reject_attempt=%d",
+                order_type, lot, level, retcode, trade.ResultRetcodeDescription(),
+                bid, ask, spread_points, RegimeName(state.regime), attempt + 1);
+
+    if (retcode != TRADE_RETCODE_REJECT)
+      break;
+
+    state.open_reject_daily_count++;
+    int cooldown_seconds = state.params.open_reject_cooldown_seconds;
+    if (cooldown_seconds < 0)
+      cooldown_seconds = 0;
+    state.open_reject_cooldown_until = TimeCurrent() + cooldown_seconds;
+
+    if (state.params.open_reject_daily_limit > 0
+        && state.open_reject_daily_count >= state.params.open_reject_daily_limit)
+      break;
+    if (attempt >= max_attempts)
+      break;
+    if (state.params.open_reject_retry_delay_ms > 0)
+      Sleep(state.params.open_reject_retry_delay_ms);
   }
-  return ok;
+  return false;
 }
 
 double DealNetProfit(ulong deal_ticket)
@@ -3942,6 +4287,29 @@ double AtrReferenceForStops(const SymbolState &state, double atr_base, double at
   if (atr_ref <= 0.0)
     atr_ref = point;
   return atr_ref;
+}
+
+double AdaptiveFinalLevelStopPrice(const SymbolState &state,
+                                   ENUM_POSITION_TYPE type,
+                                   double base_stop_price,
+                                   double atr_ref)
+{
+  if (!state.params.enable_adaptive_final_level_stop)
+    return base_stop_price;
+  if (base_stop_price <= 0.0 || atr_ref <= 0.0)
+    return base_stop_price;
+
+  double extension = atr_ref * state.params.final_level_stop_atr_multiplier_normal;
+  bool trend_side = (type == POSITION_TYPE_BUY && state.regime == REGIME_TREND_DOWN)
+                    || (type == POSITION_TYPE_SELL && state.regime == REGIME_TREND_UP);
+  if (trend_side)
+    extension = atr_ref * state.params.final_level_stop_atr_multiplier_trend;
+  if (extension <= 0.0)
+    return base_stop_price;
+
+  if (type == POSITION_TYPE_BUY)
+    return base_stop_price - extension;
+  return base_stop_price + extension;
 }
 
 void ResetBuyTakeProfitTrail(SymbolState &state)
@@ -4252,15 +4620,7 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
     RemoveRunnerTrailTicket(buy.deepest_ticket);
     if (!UpdatePositionTrailSL(state, buy.deepest_ticket, POSITION_TYPE_BUY, requested_stop))
     {
-      PrintFormat("Basket TP split close fallback close: %s BUY basket=%d keep_ticket=%I64u reason=trail_sl_update_failed",
-                  state.broker_symbol, buy.basket_id, buy.deepest_ticket);
-      bool is_l1_l2_only = (buy.count <= 2 && buy.level_count <= 2);
-      if (is_l1_l2_only)
-      {
-        PrintFormat("Basket TP split keep alive: %s BUY basket=%d keep_ticket=%I64u reason=trail_sl_update_failed_l2_or_less",
-                    state.broker_symbol, buy.basket_id, buy.deepest_ticket);
-        return false;
-      }
+      LogRunnerProtectionDegraded(state, POSITION_TYPE_BUY, buy.basket_id, buy.deepest_ticket, "trail_sl_update_failed");
       bool fallback_closed = CloseBasketById(state, POSITION_TYPE_BUY, buy.basket_id);
       if (!fallback_closed)
       {
@@ -4268,6 +4628,17 @@ bool ManageBuyTakeProfit(SymbolState &state, const BasketInfo &buy, double bid, 
                     state.broker_symbol, buy.basket_id, buy.deepest_ticket);
         return false;
       }
+      state.buy_close_as_completed = false;
+      state.buy_active_basket_id = 0;
+      ResetBuyTakeProfitTrail(state);
+      return true;
+    }
+    if (!HasRunnerBrokerSL(state, buy.deepest_ticket, POSITION_TYPE_BUY))
+    {
+      LogRunnerProtectionDegraded(state, POSITION_TYPE_BUY, buy.basket_id, buy.deepest_ticket, "runner_sl_missing_after_update");
+      bool fallback_closed = CloseBasketById(state, POSITION_TYPE_BUY, buy.basket_id);
+      if (!fallback_closed)
+        return false;
       state.buy_close_as_completed = false;
       state.buy_active_basket_id = 0;
       ResetBuyTakeProfitTrail(state);
@@ -4354,15 +4725,7 @@ bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask
     RemoveRunnerTrailTicket(sell.deepest_ticket);
     if (!UpdatePositionTrailSL(state, sell.deepest_ticket, POSITION_TYPE_SELL, requested_stop))
     {
-      PrintFormat("Basket TP split close fallback close: %s SELL basket=%d keep_ticket=%I64u reason=trail_sl_update_failed",
-                  state.broker_symbol, sell.basket_id, sell.deepest_ticket);
-      bool is_l1_l2_only = (sell.count <= 2 && sell.level_count <= 2);
-      if (is_l1_l2_only)
-      {
-        PrintFormat("Basket TP split keep alive: %s SELL basket=%d keep_ticket=%I64u reason=trail_sl_update_failed_l2_or_less",
-                    state.broker_symbol, sell.basket_id, sell.deepest_ticket);
-        return false;
-      }
+      LogRunnerProtectionDegraded(state, POSITION_TYPE_SELL, sell.basket_id, sell.deepest_ticket, "trail_sl_update_failed");
       bool fallback_closed = CloseBasketById(state, POSITION_TYPE_SELL, sell.basket_id);
       if (!fallback_closed)
       {
@@ -4370,6 +4733,17 @@ bool ManageSellTakeProfit(SymbolState &state, const BasketInfo &sell, double ask
                     state.broker_symbol, sell.basket_id, sell.deepest_ticket);
         return false;
       }
+      state.sell_close_as_completed = false;
+      state.sell_active_basket_id = 0;
+      ResetSellTakeProfitTrail(state);
+      return true;
+    }
+    if (!HasRunnerBrokerSL(state, sell.deepest_ticket, POSITION_TYPE_SELL))
+    {
+      LogRunnerProtectionDegraded(state, POSITION_TYPE_SELL, sell.basket_id, sell.deepest_ticket, "runner_sl_missing_after_update");
+      bool fallback_closed = CloseBasketById(state, POSITION_TYPE_SELL, sell.basket_id);
+      if (!fallback_closed)
+        return false;
       state.sell_close_as_completed = false;
       state.sell_active_basket_id = 0;
       ResetSellTakeProfitTrail(state);
@@ -4414,6 +4788,7 @@ void ProcessSymbolTick(SymbolState &state)
   BasketInfo buy, sell;
   RefreshBasketSequenceState(state);
   CollectBasketInfo(state, state.buy_active_basket_id, state.sell_active_basket_id, buy, sell);
+  EmitClosedBasketSummaries(state);
   int levels = EffectiveMaxLevelsRuntime(state);
   MqlTick t;
   if (!SymbolInfoTick(symbol, t))
@@ -4444,9 +4819,17 @@ void ProcessSymbolTick(SymbolState &state)
       state.sell_order_pending = false;
   }
   if (buy.count != state.prev_buy_count)
+  {
     ResetBuyTakeProfitTrail(state);
+    state.buy_final_sl_pending_time = 0;
+    state.buy_final_sl_pending_price = 0.0;
+  }
   if (sell.count != state.prev_sell_count)
+  {
     ResetSellTakeProfitTrail(state);
+    state.sell_final_sl_pending_time = 0;
+    state.sell_final_sl_pending_price = 0.0;
+  }
   if (DebugMode)
   {
     string regime_name = RegimeName(state.regime);
@@ -4533,6 +4916,97 @@ void ProcessSymbolTick(SymbolState &state)
       }
     }
   }
+
+  bool range_edge_early_cut_closed = false;
+  if (params.enable_range_edge_early_cut)
+  {
+    int lookback = params.range_edge_lookback_bars;
+    if (lookback < 2)
+      lookback = 2;
+    int highest_shift = iHighest(symbol, _Period, MODE_HIGH, lookback, 1);
+    int lowest_shift = iLowest(symbol, _Period, MODE_LOW, lookback, 1);
+    if (highest_shift >= 0 && lowest_shift >= 0)
+    {
+      double range_high = iHigh(symbol, _Period, highest_shift);
+      double range_low = iLow(symbol, _Period, lowest_shift);
+      if (range_high > range_low && range_high > 0.0 && range_low > 0.0)
+      {
+        double atr_ref = AtrReferenceForStops(state, atr_base, atr_now);
+        double point = state.point;
+        if (point <= 0.0)
+          point = 0.00001;
+        double near_dist = atr_ref * params.range_edge_near_edge_atr_multiplier;
+        double cut_dist = atr_ref * params.range_edge_early_cut_atr_multiplier;
+        if (near_dist < point * 2.0)
+          near_dist = point * 2.0;
+        if (cut_dist < point)
+          cut_dist = point;
+        int target_level = params.range_edge_early_cut_max_level;
+        if (target_level < 1)
+          target_level = 1;
+        int max_open_bars = params.range_edge_early_cut_max_bars;
+
+        int buy_open_bars = 0;
+        if (state.buy_open_time > 0)
+        {
+          buy_open_bars = iBarShift(symbol, _Period, state.buy_open_time, false);
+          if (buy_open_bars < 0)
+            buy_open_bars = 0;
+        }
+        int sell_open_bars = 0;
+        if (state.sell_open_time > 0)
+        {
+          sell_open_bars = iBarShift(symbol, _Period, state.sell_open_time, false);
+          if (sell_open_bars < 0)
+            sell_open_bars = 0;
+        }
+
+        bool buy_time_ok = (max_open_bars <= 0 || buy_open_bars <= max_open_bars);
+        bool sell_time_ok = (max_open_bars <= 0 || sell_open_bars <= max_open_bars);
+
+        if (buy.count > 0 && buy.basket_id > 0 && buy.avg_price > 0.0
+            && buy.level_count <= target_level && buy_time_ok)
+        {
+          bool near_upper = (buy.max_price >= (range_high - near_dist));
+          double adverse = buy.avg_price - bid;
+          if (adverse < 0.0)
+            adverse = 0.0;
+          if (near_upper && adverse >= cut_dist)
+          {
+            PrintFormat("Range-edge early cut: %s BUY basket=%d level=%d bars=%d bid=%.5f avg=%.5f adverse=%.5f cut=%.5f range_low=%.5f range_high=%.5f near=%.5f",
+                        symbol, buy.basket_id, buy.level_count, buy_open_bars, bid, buy.avg_price, adverse, cut_dist,
+                        range_low, range_high, near_dist);
+            CloseBasketById(state, POSITION_TYPE_BUY, buy.basket_id);
+            range_edge_early_cut_closed = true;
+          }
+        }
+
+        if (sell.count > 0 && sell.basket_id > 0 && sell.avg_price > 0.0
+            && sell.level_count <= target_level && sell_time_ok)
+        {
+          bool near_lower = (sell.min_price <= (range_low + near_dist));
+          double adverse = ask - sell.avg_price;
+          if (adverse < 0.0)
+            adverse = 0.0;
+          if (near_lower && adverse >= cut_dist)
+          {
+            PrintFormat("Range-edge early cut: %s SELL basket=%d level=%d bars=%d ask=%.5f avg=%.5f adverse=%.5f cut=%.5f range_low=%.5f range_high=%.5f near=%.5f",
+                        symbol, sell.basket_id, sell.level_count, sell_open_bars, ask, sell.avg_price, adverse, cut_dist,
+                        range_low, range_high, near_dist);
+            CloseBasketById(state, POSITION_TYPE_SELL, sell.basket_id);
+            range_edge_early_cut_closed = true;
+          }
+        }
+      }
+    }
+  }
+  if (range_edge_early_cut_closed)
+  {
+    state.prev_buy_count = buy.count;
+    state.prev_sell_count = sell.count;
+    return;
+  }
+
   if (!is_trading_time)
   {
     double threshold_distance = -0.5 * take_profit_distance;
@@ -4592,6 +5066,8 @@ void ProcessSymbolTick(SymbolState &state)
     state.buy_l2_fixed_nanpin_atr = 0.0;
     state.buy_open_time = 0;
     state.buy_deepest_entry_time = 0;
+    state.buy_final_sl_pending_time = 0;
+    state.buy_final_sl_pending_price = 0.0;
   }
   if (state.prev_sell_count > 0 && sell.count == 0)
   {
@@ -4611,6 +5087,8 @@ void ProcessSymbolTick(SymbolState &state)
     state.sell_l2_fixed_nanpin_atr = 0.0;
     state.sell_open_time = 0;
     state.sell_deepest_entry_time = 0;
+    state.sell_final_sl_pending_time = 0;
+    state.sell_final_sl_pending_price = 0.0;
   }
   if (state.prev_buy_count == 0 && buy.count > 0)
   {
@@ -4629,6 +5107,8 @@ void ProcessSymbolTick(SymbolState &state)
     SyncLevelPricesFromPositions(state, buy.basket_id, sell.basket_id);
 
   int timed_exit_level = levels;
+  if (timed_exit_level > 3)
+    timed_exit_level = 3;
   if (buy.level_count >= timed_exit_level)
   {
     if (state.buy_deepest_entry_time == 0)
@@ -4655,6 +5135,13 @@ void ProcessSymbolTick(SymbolState &state)
                                                    timed_exit_regime_factor,
                                                    timed_exit_safety_factor,
                                                    timed_exit_atr_factor);
+  if (timed_exit_level <= 3)
+  {
+    int tightened_minutes = (int)MathFloor((double)timed_exit_minutes * 0.60);
+    if (tightened_minutes < params.deepest_timed_exit_min_minutes)
+      tightened_minutes = params.deepest_timed_exit_min_minutes;
+    timed_exit_minutes = tightened_minutes;
+  }
   int timed_exit_seconds = timed_exit_minutes * 60;
   bool timed_exit_closed = false;
   if (buy.count > 0 && state.buy_deepest_entry_time > 0
@@ -4685,8 +5172,15 @@ void ProcessSymbolTick(SymbolState &state)
   }
 
   bool attempted_initial = false;
-  const bool allow_entry_buy = (state.regime != REGIME_TREND_DOWN);
-  const bool allow_entry_sell = (state.regime != REGIME_TREND_UP);
+  bool allow_entry_buy = (state.regime != REGIME_TREND_DOWN);
+  bool allow_entry_sell = (state.regime != REGIME_TREND_UP);
+  if (has_adx && params.deep_level_adx_max > 0.0)
+  {
+    if (adx_now >= params.deep_level_adx_max && di_minus_now > di_plus_now)
+      allow_entry_buy = false;
+    if (adx_now >= params.deep_level_adx_max && di_plus_now > di_minus_now)
+      allow_entry_sell = false;
+  }
   if (!state.initial_started && (TimeCurrent() - state.start_time) >= params.start_delay_seconds)
   {
     if (buy.count == 0 && sell.count == 0 && is_trading_time && !safety_triggered && !low_balance && spread_ok)
@@ -4881,6 +5375,67 @@ void ProcessSymbolTick(SymbolState &state)
     sell_stop = true;
   else if (state.regime == REGIME_TREND_DOWN)
     buy_stop = true;
+
+  double atr_ref_for_stops = AtrReferenceForStops(state, atr_base, atr_now);
+  int deep_stop_level = params.deep_level_entry_stop_level;
+  if (deep_stop_level < 2)
+    deep_stop_level = 2;
+  if (allow_nanpin)
+  {
+    double shallow_directional_limit = params.deep_level_directional_atr_limit;
+    if (shallow_directional_limit > 0.0)
+      shallow_directional_limit *= 0.75;
+    if (buy.count > 0 && buy.level_count >= (deep_stop_level - 1))
+    {
+      double extension = BasketDirectionalExtension(buy, POSITION_TYPE_BUY, bid, ask);
+      if (params.disable_deep_counter_trend_adds && IsCounterTrendSide(state, POSITION_TYPE_BUY))
+        buy_stop = true;
+      if (has_adx && params.deep_level_adx_max > 0.0 && adx_now >= params.deep_level_adx_max && di_minus_now > di_plus_now)
+        buy_stop = true;
+      if (params.deep_level_directional_atr_limit > 0.0
+          && atr_ref_for_stops > 0.0
+          && extension >= (atr_ref_for_stops * params.deep_level_directional_atr_limit))
+        buy_stop = true;
+    }
+    else if (buy.count > 0)
+    {
+      double extension = BasketDirectionalExtension(buy, POSITION_TYPE_BUY, bid, ask);
+      if (params.disable_deep_counter_trend_adds && IsCounterTrendSide(state, POSITION_TYPE_BUY) && buy.level_count >= 1)
+      {
+        if (has_adx && params.deep_level_adx_max > 0.0 && adx_now >= params.deep_level_adx_max && di_minus_now > di_plus_now)
+          buy_stop = true;
+        if (!buy_stop && shallow_directional_limit > 0.0
+            && atr_ref_for_stops > 0.0
+            && extension >= (atr_ref_for_stops * shallow_directional_limit))
+          buy_stop = true;
+      }
+    }
+    if (sell.count > 0 && sell.level_count >= (deep_stop_level - 1))
+    {
+      double extension = BasketDirectionalExtension(sell, POSITION_TYPE_SELL, bid, ask);
+      if (params.disable_deep_counter_trend_adds && IsCounterTrendSide(state, POSITION_TYPE_SELL))
+        sell_stop = true;
+      if (has_adx && params.deep_level_adx_max > 0.0 && adx_now >= params.deep_level_adx_max && di_plus_now > di_minus_now)
+        sell_stop = true;
+      if (params.deep_level_directional_atr_limit > 0.0
+          && atr_ref_for_stops > 0.0
+          && extension >= (atr_ref_for_stops * params.deep_level_directional_atr_limit))
+        sell_stop = true;
+    }
+    else if (sell.count > 0)
+    {
+      double extension = BasketDirectionalExtension(sell, POSITION_TYPE_SELL, bid, ask);
+      if (params.disable_deep_counter_trend_adds && IsCounterTrendSide(state, POSITION_TYPE_SELL) && sell.level_count >= 1)
+      {
+        if (has_adx && params.deep_level_adx_max > 0.0 && adx_now >= params.deep_level_adx_max && di_plus_now > di_minus_now)
+          sell_stop = true;
+        if (!sell_stop && shallow_directional_limit > 0.0
+            && atr_ref_for_stops > 0.0
+            && extension >= (atr_ref_for_stops * shallow_directional_limit))
+          sell_stop = true;
+      }
+    }
+  }
   allow_buy_trigger = allow_nanpin && !buy_stop;
   allow_sell_trigger = allow_nanpin && !sell_stop;
 
@@ -4914,21 +5469,84 @@ void ProcessSymbolTick(SymbolState &state)
       stop_level = max_stop_level;
     int stop_level_index = stop_level - 1;
     double stop_price = EnsureProjectedBuyLevelPrice(state, buy, base_step, stop_level_index);
+    double stop_price_raw = stop_price;
+    stop_price = AdaptiveFinalLevelStopPrice(state, POSITION_TYPE_BUY, stop_price, atr_ref_for_stops);
     double point = state.point;
     if (point <= 0.0)
       point = 0.00001;
     double tol = point * 0.5;
     if (stop_price > 0.0)
     {
-      if (ask <= stop_price + tol)
+      bool reached_stop = (ask <= stop_price + tol);
+      if (reached_stop)
       {
-        PrintFormat("Final level stop-loss triggered: %s BUY actual_level=%d stop_level=%d max_levels=%d nanpin_levels=%d is_trading_time=%s ask=%.5f stop=%.5f",
-                    symbol, buy.level_count, stop_level, levels, nanpin_levels, is_trading_time ? "true" : "false", ask, stop_price);
-        if (buy.basket_id > 0)
-          CloseBasketById(state, POSITION_TYPE_BUY, buy.basket_id);
-        final_level_sl_closed = true;
+        if (state.buy_final_sl_pending_time <= 0 || state.buy_final_sl_pending_price <= 0.0)
+        {
+          state.buy_final_sl_pending_time = now;
+          state.buy_final_sl_pending_price = stop_price;
+          PrintFormat("Final level stop-loss delay started: %s BUY actual_level=%d stop_level=%d delay=%dsec ask=%.5f stop=%.5f",
+                      symbol, buy.level_count, stop_level, NM2::kFinalLevelStopDelaySeconds, ask, state.buy_final_sl_pending_price);
+        }
+        if (state.buy_final_sl_pending_time > 0
+            && (now - state.buy_final_sl_pending_time) >= NM2::kFinalLevelStopDelaySeconds)
+        {
+          double pending_stop = state.buy_final_sl_pending_price;
+          if (pending_stop <= 0.0)
+            pending_stop = stop_price;
+          int persistence_bars = RegimePersistenceBars(state, symbol);
+          bool persistence_ok = true;
+          if (IsCounterTrendSide(state, POSITION_TYPE_BUY)
+              && params.final_level_stop_require_regime_persistence_bars > 0)
+            persistence_ok = persistence_bars >= params.final_level_stop_require_regime_persistence_bars;
+          if (ask <= pending_stop + tol && persistence_ok)
+          {
+            double di_gap = MathAbs(di_plus_now - di_minus_now);
+            PrintFormat("Final level stop-loss triggered after delay: %s BUY actual_level=%d stop_level=%d max_levels=%d nanpin_levels=%d is_trading_time=%s ask=%.5f stop=%.5f stop_raw=%.5f avg=%.5f worst=%.5f atr_now=%.5f adx=%.2f di_gap=%.2f regime=%s regime_bars=%d waited=%dsec",
+                        symbol, buy.level_count, stop_level, levels, nanpin_levels, is_trading_time ? "true" : "false",
+                        ask, pending_stop, stop_price_raw, buy.avg_price, buy.min_price, atr_now, adx_now, di_gap,
+                        RegimeName(state.regime), persistence_bars, (int)(now - state.buy_final_sl_pending_time));
+            if (buy.basket_id > 0)
+              CloseBasketById(state, POSITION_TYPE_BUY, buy.basket_id);
+            final_level_sl_closed = true;
+          }
+          else if (ask <= pending_stop + tol)
+          {
+            PrintFormat("Final level stop-loss deferred: %s BUY actual_level=%d stop_level=%d regime=%s regime_bars=%d required=%d ask=%.5f stop=%.5f",
+                        symbol, buy.level_count, stop_level, RegimeName(state.regime), persistence_bars,
+                        params.final_level_stop_require_regime_persistence_bars, ask, pending_stop);
+          }
+          else
+          {
+            PrintFormat("Final level stop-loss delay canceled: %s BUY ask recovered ask=%.5f stop=%.5f waited=%dsec",
+                        symbol, ask, pending_stop, (int)(now - state.buy_final_sl_pending_time));
+            state.buy_final_sl_pending_time = 0;
+            state.buy_final_sl_pending_price = 0.0;
+          }
+          if (final_level_sl_closed)
+          {
+            state.buy_final_sl_pending_time = 0;
+            state.buy_final_sl_pending_price = 0.0;
+          }
+        }
+      }
+      else if (state.buy_final_sl_pending_time > 0)
+      {
+        PrintFormat("Final level stop-loss delay reset: %s BUY ask=%.5f current_stop=%.5f",
+                    symbol, ask, stop_price);
+        state.buy_final_sl_pending_time = 0;
+        state.buy_final_sl_pending_price = 0.0;
       }
     }
+    else
+    {
+      state.buy_final_sl_pending_time = 0;
+      state.buy_final_sl_pending_price = 0.0;
+    }
+  }
+  else
+  {
+    state.buy_final_sl_pending_time = 0;
+    state.buy_final_sl_pending_price = 0.0;
   }
   if (nanpin_levels >= 1 && sell.count > 0)
   {
@@ -4943,21 +5561,84 @@ void ProcessSymbolTick(SymbolState &state)
       stop_level = max_stop_level;
     int stop_level_index = stop_level - 1;
     double stop_price = EnsureProjectedSellLevelPrice(state, sell, base_step, stop_level_index);
+    double stop_price_raw = stop_price;
+    stop_price = AdaptiveFinalLevelStopPrice(state, POSITION_TYPE_SELL, stop_price, atr_ref_for_stops);
     double point = state.point;
     if (point <= 0.0)
       point = 0.00001;
     double tol = point * 0.5;
     if (stop_price > 0.0)
     {
-      if (bid >= stop_price - tol)
+      bool reached_stop = (bid >= stop_price - tol);
+      if (reached_stop)
       {
-        PrintFormat("Final level stop-loss triggered: %s SELL actual_level=%d stop_level=%d max_levels=%d nanpin_levels=%d is_trading_time=%s bid=%.5f stop=%.5f",
-                    symbol, sell.level_count, stop_level, levels, nanpin_levels, is_trading_time ? "true" : "false", bid, stop_price);
-        if (sell.basket_id > 0)
-          CloseBasketById(state, POSITION_TYPE_SELL, sell.basket_id);
-        final_level_sl_closed = true;
+        if (state.sell_final_sl_pending_time <= 0 || state.sell_final_sl_pending_price <= 0.0)
+        {
+          state.sell_final_sl_pending_time = now;
+          state.sell_final_sl_pending_price = stop_price;
+          PrintFormat("Final level stop-loss delay started: %s SELL actual_level=%d stop_level=%d delay=%dsec bid=%.5f stop=%.5f",
+                      symbol, sell.level_count, stop_level, NM2::kFinalLevelStopDelaySeconds, bid, state.sell_final_sl_pending_price);
+        }
+        if (state.sell_final_sl_pending_time > 0
+            && (now - state.sell_final_sl_pending_time) >= NM2::kFinalLevelStopDelaySeconds)
+        {
+          double pending_stop = state.sell_final_sl_pending_price;
+          if (pending_stop <= 0.0)
+            pending_stop = stop_price;
+          int persistence_bars = RegimePersistenceBars(state, symbol);
+          bool persistence_ok = true;
+          if (IsCounterTrendSide(state, POSITION_TYPE_SELL)
+              && params.final_level_stop_require_regime_persistence_bars > 0)
+            persistence_ok = persistence_bars >= params.final_level_stop_require_regime_persistence_bars;
+          if (bid >= pending_stop - tol && persistence_ok)
+          {
+            double di_gap = MathAbs(di_plus_now - di_minus_now);
+            PrintFormat("Final level stop-loss triggered after delay: %s SELL actual_level=%d stop_level=%d max_levels=%d nanpin_levels=%d is_trading_time=%s bid=%.5f stop=%.5f stop_raw=%.5f avg=%.5f worst=%.5f atr_now=%.5f adx=%.2f di_gap=%.2f regime=%s regime_bars=%d waited=%dsec",
+                        symbol, sell.level_count, stop_level, levels, nanpin_levels, is_trading_time ? "true" : "false",
+                        bid, pending_stop, stop_price_raw, sell.avg_price, sell.max_price, atr_now, adx_now, di_gap,
+                        RegimeName(state.regime), persistence_bars, (int)(now - state.sell_final_sl_pending_time));
+            if (sell.basket_id > 0)
+              CloseBasketById(state, POSITION_TYPE_SELL, sell.basket_id);
+            final_level_sl_closed = true;
+          }
+          else if (bid >= pending_stop - tol)
+          {
+            PrintFormat("Final level stop-loss deferred: %s SELL actual_level=%d stop_level=%d regime=%s regime_bars=%d required=%d bid=%.5f stop=%.5f",
+                        symbol, sell.level_count, stop_level, RegimeName(state.regime), persistence_bars,
+                        params.final_level_stop_require_regime_persistence_bars, bid, pending_stop);
+          }
+          else
+          {
+            PrintFormat("Final level stop-loss delay canceled: %s SELL bid recovered bid=%.5f stop=%.5f waited=%dsec",
+                        symbol, bid, pending_stop, (int)(now - state.sell_final_sl_pending_time));
+            state.sell_final_sl_pending_time = 0;
+            state.sell_final_sl_pending_price = 0.0;
+          }
+          if (final_level_sl_closed)
+          {
+            state.sell_final_sl_pending_time = 0;
+            state.sell_final_sl_pending_price = 0.0;
+          }
+        }
+      }
+      else if (state.sell_final_sl_pending_time > 0)
+      {
+        PrintFormat("Final level stop-loss delay reset: %s SELL bid=%.5f current_stop=%.5f",
+                    symbol, bid, stop_price);
+        state.sell_final_sl_pending_time = 0;
+        state.sell_final_sl_pending_price = 0.0;
       }
     }
+    else
+    {
+      state.sell_final_sl_pending_time = 0;
+      state.sell_final_sl_pending_price = 0.0;
+    }
+  }
+  else
+  {
+    state.sell_final_sl_pending_time = 0;
+    state.sell_final_sl_pending_price = 0.0;
   }
   if (final_level_sl_closed)
   {
